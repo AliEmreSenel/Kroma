@@ -1,0 +1,69 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kroma-shared",
+    "crates/kroma-daemon",
+    "crates/kroma-gui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Kroma Contributors"]
+license = "MIT"
+
+[workspace.dependencies]
+# Shared
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+log = "0.4"
+env_logger = "0.11"
+
+# GPU / Rendering
+wgpu = "24"
+raw-window-handle = "0.6"
+
+# Wayland
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+smithay-client-toolkit = "0.19"
+
+# Data providers
+sysinfo = "0.33"
+
+# Shader translation
+regex = "1"
+naga = { version = "24", features = ["glsl-in", "wgsl-out"] }
+
+# IPC
+tokio = { version = "1", features = ["full"] }
+
+# .shade packaging
+zip = "2"
+
+# Math
+glam = "0.29"
+
+# Byte handling
+bytemuck = { version = "1", features = ["derive"] }
+
+# Audio
+cpal = "0.15"
+rustfft = "6"
+
+# GUI
+iced = { version = "0.13", features = ["tokio"] }
+rfd = "0.15"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
