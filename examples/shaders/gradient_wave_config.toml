@@ -1,0 +1,9 @@
+[meta]
+name = "Gradient Wave"
+author = "Kroma Team"
+version = "1.0"
+
+[uniforms]
+speed = { type = "float", min = 0.1, max = 5.0, default = 1.0 }
+brightness = { type = "float", min = 0.0, max = 2.0, default = 1.0 }
+glow_radius = { type = "float", min = 0.05, max = 1.0, default = 0.3 }

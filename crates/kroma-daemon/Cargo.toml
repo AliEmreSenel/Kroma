@@ -1,0 +1,35 @@
+[package]
+name = "kroma-daemon"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "The Kroma wallpaper engine daemon — headless renderer"
+
+[[bin]]
+name = "kroma-daemon"
+path = "src/main.rs"
+
+[dependencies]
+kroma-shared = { path = "../kroma-shared" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+log.workspace = true
+env_logger.workspace = true
+wgpu.workspace = true
+raw-window-handle.workspace = true
+wayland-client.workspace = true
+wayland-backend.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-wlr.workspace = true
+smithay-client-toolkit.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+naga.workspace = true
+cpal.workspace = true
+rustfft.workspace = true

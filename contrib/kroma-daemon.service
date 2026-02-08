@@ -1,0 +1,21 @@
+[Unit]
+Description=Kroma Wallpaper Engine Daemon
+Documentation=https://github.com/kroma-project/kroma
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.cargo/bin/kroma-daemon
+Restart=on-failure
+RestartSec=3
+Environment=WAYLAND_DISPLAY=wayland-1
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=RUST_LOG=info
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=25%
+
+[Install]
+WantedBy=graphical-session.target
