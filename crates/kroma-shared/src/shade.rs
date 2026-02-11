@@ -13,9 +13,9 @@ use crate::types::ShadeConfig;
 pub struct ShadePackage {
     /// Parsed `config.toml`.
     pub config: ShadeConfig,
-    /// The raw GLSL fragment shader source.
-    pub shader_source: String,
-    /// Optional preview image bytes (JPEG).
+    /// The raw GLSL fragment shader source (optional — not needed for image/video wallpapers).
+    pub shader_source: Option<String>,
+    /// Optional preview image bytes (JPEG/PNG/WebP).
     pub preview: Option<Vec<u8>>,
     /// Asset files: `(relative_path, bytes)`.
     pub assets: Vec<(String, Vec<u8>)>,
@@ -40,24 +40,25 @@ impl ShadePackage {
                 .with_context(|| "Failed to parse config.toml")?
         };
 
-        // --- shader.frag (required) ---
-        let shader_source = {
-            let mut entry = archive
-                .by_name("shader.frag")
-                .with_context(|| "Missing shader.frag in shade package")?;
+        // --- shader.frag (optional — not required for image/video modes) ---
+        let shader_source = if let Ok(mut entry) = archive.by_name("shader.frag") {
             let mut buf = String::new();
             entry.read_to_string(&mut buf)?;
-            buf
-        };
-
-        // --- preview.jpg (optional) ---
-        let preview = if let Ok(mut entry) = archive.by_name("preview.jpg") {
-            let mut buf = Vec::new();
-            entry.read_to_end(&mut buf)?;
             Some(buf)
         } else {
             None
         };
+
+        // --- preview image (optional, any common format) ---
+        let preview = ["preview.jpg", "preview.png", "preview.webp"]
+            .iter()
+            .find_map(|name| {
+                archive.by_name(name).ok().map(|mut entry| {
+                    let mut buf = Vec::new();
+                    entry.read_to_end(&mut buf).ok()?;
+                    Some(buf)
+                }).flatten()
+            });
 
         // --- assets/ (optional) ---
         let mut assets = Vec::new();
@@ -94,8 +95,10 @@ impl ShadePackage {
         zip.write_all(config_str.as_bytes())?;
 
         // shader.frag
-        zip.start_file("shader.frag", options)?;
-        zip.write_all(self.shader_source.as_bytes())?;
+        if let Some(ref shader) = self.shader_source {
+            zip.start_file("shader.frag", options)?;
+            zip.write_all(shader.as_bytes())?;
+        }
 
         // preview.jpg
         if let Some(ref preview) = self.preview {
@@ -127,11 +130,18 @@ mod tests {
                     name: "Test".into(),
                     author: "Tester".into(),
                     version: "1.0".into(),
+                    description: String::new(),
+                    tags: Vec::new(),
                 },
+                mode: Default::default(),
+                rendering: Default::default(),
+                audio: Default::default(),
                 uniforms: Default::default(),
                 textures: Default::default(),
+                slideshow: Default::default(),
+                fonts: Default::default(),
             },
-            shader_source: "void main() { gl_FragColor = vec4(1.0); }".into(),
+            shader_source: Some("void main() { gl_FragColor = vec4(1.0); }".into()),
             preview: Some(vec![0xFF, 0xD8, 0xFF]),
             assets: vec![("assets/test.txt".into(), b"hello".to_vec())],
         };

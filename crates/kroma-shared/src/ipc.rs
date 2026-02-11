@@ -38,6 +38,18 @@ pub enum DaemonCommand {
 
     /// Gracefully shut down the daemon.
     Shutdown,
+
+    /// Query the daemon's current status. The daemon responds with a
+    /// `DaemonEvent::Status` on the same connection.
+    StatusQuery,
+
+    /// Hot-reload: push raw Shadertoy-compatible GLSL source directly
+    /// to the daemon for immediate rendering (live preview).
+    LiveReload { glsl_source: String },
+
+    /// Query real-time system info (CPU, RAM, battery, cursor, audio).
+    /// The daemon responds with a `DaemonEvent::SystemInfo`.
+    QuerySystemInfo,
 }
 
 /// Runtime uniform value (matches types in `config.toml`).
@@ -72,4 +84,31 @@ pub enum DaemonEvent {
         paused: bool,
         loaded_shade: Option<String>,
     },
+
+    /// Result of a shader compilation attempt (from LiveReload or LoadShade).
+    CompileResult {
+        success: bool,
+        /// Error messages with optional line numbers.
+        errors: Vec<CompileError>,
+        /// Non-fatal warnings.
+        warnings: Vec<String>,
+    },
+
+    /// Real-time system info snapshot from the daemon.
+    SystemInfo {
+        cpu_usage: f32,
+        ram_usage: f32,
+        battery: Option<f32>,
+        audio_level: f32,
+        cursor_x: f32,
+        cursor_y: f32,
+    },
+}
+
+/// A single compilation error with optional source location.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompileError {
+    pub message: String,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
 }

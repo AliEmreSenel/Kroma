@@ -145,8 +145,8 @@ unsafe fn extract_proxy_ptr_at(
 
 /// A created layer shell surface with its raw pointers and metadata.
 pub struct CreatedSurface {
-    pub monitor: MonitorConfig,
-    pub layer_surface: LayerSurface,
+    pub _monitor: MonitorConfig,
+    pub _layer_surface: LayerSurface,
     pub wl_surface: wl_surface::WlSurface,
     /// The configured width from the compositor.
     pub width: u32,
@@ -199,6 +199,7 @@ impl WaylandSurfaceProvider {
     }
 
     /// Check if a monitor's surface has been configured by the compositor.
+    #[allow(dead_code)]
     pub fn is_configured(&self, monitor_id: u32) -> bool {
         self.surfaces.get(&monitor_id).map(|s| s.configured).unwrap_or(false)
     }
@@ -305,8 +306,8 @@ impl WaylandSurfaceProvider {
             wl_surface.commit();
 
             let created = CreatedSurface {
-                monitor: monitor.clone(),
-                layer_surface,
+                _monitor: monitor.clone(),
+                _layer_surface: layer_surface,
                 wl_surface,
                 width: monitor.width,
                 height: monitor.height,

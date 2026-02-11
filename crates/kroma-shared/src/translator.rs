@@ -24,13 +24,20 @@ pub struct TranslationResult {
 }
 
 /// Mapping from Shadertoy globals to Kroma uniforms.
+/// These are simple 1:1 name replacements (same type or compatible).
 const UNIFORM_MAP: &[(&str, &str)] = &[
     ("iTime", "u_time"),
     ("iGlobalTime", "u_time"), // legacy alias
     ("iTimeDelta", "u_delta_time"),
-    ("iResolution", "u_resolution"),
     ("iMouse", "u_mouse"),
-    ("iFrame", "u_frame"),
+];
+
+/// Replacements that require wrapping (type mismatch between Shadertoy & Kroma).
+/// * `iResolution` is vec3 in Shadertoy, but vec2 in Kroma → wrap as `vec3(u_resolution, 1.0)`
+/// * `iFrame` is int in Shadertoy, but uint in Kroma → wrap as `int(u_frame)`
+const SEMANTIC_MAP: &[(&str, &str)] = &[
+    ("iResolution", "vec3(u_resolution, 1.0)"),
+    ("iFrame", "int(u_frame)"),
 ];
 
 /// Translate raw Shadertoy GLSL into a Kroma-compliant fragment shader.
@@ -45,6 +52,35 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
     let mut detected_channels = HashSet::new();
 
     // ------------------------------------------------------------------
+    // Early-out: detect already-translated Kroma shaders
+    // ------------------------------------------------------------------
+    if source.contains("kroma_main") || source.contains("kroma_out_color") {
+        warnings.push(
+            "Shader appears to already be in Kroma format — skipping translation.".into(),
+        );
+        return TranslationResult {
+            shader_source: source.to_string(),
+            config: ShadeConfig {
+                meta: ShadeMeta {
+                    name: name.to_string(),
+                    author: author.to_string(),
+                    description: String::new(),
+                    version: "1.0".to_string(),
+                    tags: vec![],
+                },
+                mode: Default::default(),
+                textures: std::collections::HashMap::new(),
+                uniforms: std::collections::HashMap::new(),
+                rendering: Default::default(),
+                audio: Default::default(),
+                slideshow: Default::default(),
+                fonts: Default::default(),
+            },
+            warnings,
+        };
+    }
+
+    // ------------------------------------------------------------------
     // Step 1: Replace Shadertoy uniforms with Kroma equivalents
     // ------------------------------------------------------------------
     for &(shadertoy_name, kroma_name) in UNIFORM_MAP {
@@ -54,6 +90,44 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
             output = re.replace_all(&output, kroma_name).to_string();
         }
     }
+    // Semantic replacements (type-wrapping)
+    for &(shadertoy_name, replacement) in SEMANTIC_MAP {
+        let re = Regex::new(&format!(r"\b{}\b", regex::escape(shadertoy_name)))
+            .expect("valid regex");
+        if re.is_match(&output) {
+            output = re.replace_all(&output, replacement).to_string();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Step 1.5: GLSL compatibility fixes
+    // ------------------------------------------------------------------
+    output = fix_mat_constructors(&output, &mut warnings);
+
+    // Replace legacy GLSL texture functions with GLSL 450 equivalents
+    let texture_fixes: &[(&str, &str)] = &[
+        ("texture2D", "texture"),
+        ("textureCube", "texture"),
+        ("texture2DLod", "textureLod"),
+        ("textureCubeLod", "textureLod"),
+    ];
+    for &(old, new) in texture_fixes {
+        let re = Regex::new(&format!(r"\b{}\b", regex::escape(old)))
+            .expect("valid regex");
+        if re.is_match(&output) {
+            output = re.replace_all(&output, new).to_string();
+            warnings.push(format!("Replaced {} with {} for GLSL 450.", old, new));
+        }
+    }
+
+    // Remove any #version directives from the source (we prepend our own)
+    let version_re = Regex::new(r"#version\s+\d+(\s+\w+)?\s*\n?").expect("valid regex");
+    output = version_re.replace_all(&output, "").to_string();
+
+    // Remove any precision qualifiers (not valid in GLSL 450 with Vulkan)
+    let precision_re = Regex::new(r"\bprecision\s+(lowp|mediump|highp)\s+\w+\s*;\s*\n?")
+        .expect("valid regex");
+    output = precision_re.replace_all(&output, "").to_string();
 
     // ------------------------------------------------------------------
     // Step 2: Detect and replace iChannelN texture samplers
@@ -66,14 +140,15 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
         }
     }
 
-    // Replace iChannelN with kroma sampler names
-    for idx in &detected_channels {
+    // Sort detected channels so binding indices are deterministic
+    let mut sorted_channels: Vec<u32> = detected_channels.iter().copied().collect();
+    sorted_channels.sort();
+
+    // Replace iChannelN with sampler2D(kroma_tex_I, kroma_samp_I) expressions
+    // where I is the sequential binding index (position in sorted channels).
+    for (binding_idx, idx) in sorted_channels.iter().enumerate() {
         let from = format!("iChannel{}", idx);
-        let to = if *idx == 0 {
-            "kroma_video_sampler_0".to_string()
-        } else {
-            format!("kroma_sampler_{}", idx)
-        };
+        let to = format!("sampler2D(kroma_tex_{}, kroma_samp_{})", binding_idx, binding_idx);
         let re = Regex::new(&format!(r"\b{}\b", regex::escape(&from))).expect("valid regex");
         output = re.replace_all(&output, to.as_str()).to_string();
     }
@@ -92,8 +167,9 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
 
     if has_main_image {
         // Replace the mainImage signature
+        // Note: `in` qualifier is optional — many Shadertoy shaders omit it
         let main_image_re =
-            Regex::new(r"void\s+mainImage\s*\(\s*out\s+vec4\s+(\w+)\s*,\s*in\s+vec2\s+(\w+)\s*\)")
+            Regex::new(r"void\s+mainImage\s*\(\s*out\s+vec4\s+(\w+)\s*,\s*(?:in\s+)?vec2\s+(\w+)\s*\)")
                 .expect("valid regex");
 
         if let Some(caps) = main_image_re.captures(&output) {
@@ -106,8 +182,9 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
                 .to_string();
 
             // Prepend local variable declarations inside the function body
+            // Y-flip: Vulkan/wgpu has top-left origin, Shadertoy expects bottom-left
             let locals = format!(
-                "    vec2 {} = gl_FragCoord.xy;\n    vec4 {} = vec4(0.0);\n",
+                "    vec2 {} = vec2(gl_FragCoord.x, u_resolution.y - gl_FragCoord.y);\n    vec4 {} = vec4(0.0);\n",
                 frag_coord_name, frag_color_name
             );
 
@@ -148,33 +225,38 @@ layout(set = 0, binding = 0) uniform Globals {
     uint  u_frame;
     uint  _pad0;
     vec2  u_resolution;
-    vec2  u_mouse;
+    vec2  _pad1;
+    vec4  u_mouse;
     float u_cpu;
     float u_ram;
     float u_battery;
     float u_audio_level;
 };
 
+// Custom uniform storage buffer — access via custom_data[index]
+layout(set = 0, binding = 1) readonly buffer CustomUniforms {
+    float custom_data[32];
+};
+
 // Fragment output
 layout(location = 0) out vec4 kroma_out_color;
 "#;
 
-    // Add sampler uniforms for detected channels (set = 1, binding = N)
+    // Add separate texture2D + sampler declarations for each channel.
+    // Using (binding_idx*2, binding_idx*2+1) pairs to match the renderer's
+    // build_texture_bind_group() layout.
     let mut sampler_decls = String::new();
-    let mut sorted_channels: Vec<u32> = detected_channels.iter().copied().collect();
-    sorted_channels.sort();
-    for (binding, idx) in sorted_channels.iter().enumerate() {
-        if *idx == 0 {
-            sampler_decls.push_str(&format!(
-                "layout(set = 1, binding = {}) uniform sampler2D kroma_video_sampler_0;\n",
-                binding
-            ));
-        } else {
-            sampler_decls.push_str(&format!(
-                "layout(set = 1, binding = {}) uniform sampler2D kroma_sampler_{};\n",
-                binding, idx
-            ));
-        }
+    for (binding_idx, _idx) in sorted_channels.iter().enumerate() {
+        let tex_binding = binding_idx * 2;
+        let samp_binding = binding_idx * 2 + 1;
+        sampler_decls.push_str(&format!(
+            "layout(set = 1, binding = {}) uniform texture2D kroma_tex_{};\n",
+            tex_binding, binding_idx
+        ));
+        sampler_decls.push_str(&format!(
+            "layout(set = 1, binding = {}) uniform sampler kroma_samp_{};\n",
+            samp_binding, binding_idx
+        ));
     }
 
     output = format!("{}{}\n{}", header, sampler_decls, output);
@@ -200,6 +282,9 @@ layout(location = 0) out vec4 kroma_out_color;
                 },
                 source: Some(format!("assets/channel{}.mp4", idx)),
                 looping: true,
+                filter: Default::default(),
+                wrap: Default::default(),
+                binding: None,
             },
         );
     }
@@ -209,7 +294,12 @@ layout(location = 0) out vec4 kroma_out_color;
             name: name.to_string(),
             author: author.to_string(),
             version: "1.0".into(),
+            description: String::new(),
+            tags: Vec::new(),
         },
+        mode: Default::default(),
+        rendering: Default::default(),
+        audio: Default::default(),
         uniforms: {
             let mut m = std::collections::HashMap::new();
             m.insert(
@@ -224,6 +314,8 @@ layout(location = 0) out vec4 kroma_out_color;
             m
         },
         textures,
+        slideshow: Default::default(),
+        fonts: Default::default(),
     };
 
     TranslationResult {
@@ -263,7 +355,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 }
 "#;
         let result = translate(src, "Channel Test", "Tester");
-        assert!(result.shader_source.contains("kroma_video_sampler_0"));
+        // Should use separate texture2D + sampler, combined via sampler2D()
+        assert!(result.shader_source.contains("kroma_tex_0"));
+        assert!(result.shader_source.contains("kroma_samp_0"));
+        assert!(result.shader_source.contains("sampler2D(kroma_tex_0, kroma_samp_0)"));
+        assert!(result.shader_source.contains("uniform texture2D kroma_tex_0"));
+        assert!(result.shader_source.contains("uniform sampler kroma_samp_0"));
         assert!(result.config.textures.contains_key("channel0"));
     }
 
@@ -271,8 +368,122 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fn generates_uniform_header() {
         let result = translate(SIMPLE_SHADERTOY, "Test", "T");
         assert!(result.shader_source.contains("layout(set = 0, binding = 0) uniform Globals"));
+        assert!(result.shader_source.contains("layout(set = 0, binding = 1) readonly buffer CustomUniforms"));
+        assert!(result.shader_source.contains("float custom_data[32]"));
         assert!(result.shader_source.contains("layout(location = 0) out vec4 kroma_out_color"));
         assert!(result.shader_source.contains("float u_time;"));
         assert!(result.shader_source.contains("void main()"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// GLSL compatibility fixups for naga
+// ---------------------------------------------------------------------------
+
+/// Fix `mat2(single_vec4_expr)` → `mat2(v.x, v.y, v.z, v.w)` with a
+/// helper variable.  naga's GLSL frontend cannot construct mat2 from a
+/// single vec4 argument.
+fn fix_mat_constructors(src: &str, warnings: &mut Vec<String>) -> String {
+    let mut output = src.to_string();
+    let mut counter = 0u32;
+    let mut search_from = 0usize;
+
+    let mat2_needle = "mat2(";
+
+    loop {
+        let pos = match output[search_from..].find(mat2_needle) {
+            Some(p) => search_from + p,
+            None => break,
+        };
+
+        // Make sure this isn't part of a longer identifier (e.g. imat2)
+        if pos > 0 {
+            let prev = output.as_bytes()[pos - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' {
+                search_from = pos + mat2_needle.len();
+                continue;
+            }
+        }
+
+        let inner_start = pos + mat2_needle.len();
+
+        // Find the matching closing paren by counting depth
+        let mut depth = 1i32;
+        let mut end = inner_start;
+        let mut found_close = false;
+        for (i, ch) in output[inner_start..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = inner_start + i;
+                        found_close = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !found_close {
+            break; // unbalanced parens, stop
+        }
+
+        let inner = output[inner_start..end].to_string();
+
+        // Count top-level commas (commas at depth 0 inside the mat2 args)
+        let mut comma_depth = 0i32;
+        let mut top_commas = 0;
+        for ch in inner.chars() {
+            match ch {
+                '(' => comma_depth += 1,
+                ')' => comma_depth -= 1,
+                ',' if comma_depth == 0 => top_commas += 1,
+                _ => {}
+            }
+        }
+
+        if top_commas == 0 && !inner.trim().is_empty() {
+            // Single argument — likely a vec4 expression.
+            // Rewrite: mat2(expr) → mat2(_kmN_[0], _kmN_[1], _kmN_[2], _kmN_[3])
+            // with `vec4 _kmN_ = expr;` inserted before the statement.
+            let var = format!("_km{}_", counter);
+            counter += 1;
+            let replacement = format!(
+                "mat2({v}[0], {v}[1], {v}[2], {v}[3])",
+                v = var
+            );
+
+            // Find the statement start (work backwards to find ; or { or newline)
+            let stmt_start = output[..pos]
+                .rfind(|c: char| c == ';' || c == '{' || c == '\n')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+
+            let indent: String = output[stmt_start..pos]
+                .chars()
+                .take_while(|c| c.is_whitespace())
+                .collect();
+
+            let helper = format!("{}vec4 {} = {};\n", indent, var, inner.trim());
+
+            // Build the new output
+            let before = &output[..stmt_start];
+            let between = &output[stmt_start..pos];
+            let after = &output[end + 1..];
+            output = format!("{}{}{}{}{}", before, helper, between, replacement, after);
+
+            warnings.push("Rewrote mat2(vec4) for naga compatibility.".into());
+
+            // Reset search to beginning — indices shifted after insertion
+            search_from = 0;
+            continue;
+        }
+
+        // This mat2() has multiple args — skip past it
+        search_from = end + 1;
+    }
+
+    output
 }

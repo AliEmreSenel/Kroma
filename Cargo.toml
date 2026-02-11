@@ -4,6 +4,7 @@ members = [
     "crates/kroma-shared",
     "crates/kroma-daemon",
     "crates/kroma-gui",
+    "crates/kroma-graph",
 ]
 
 [workspace.package]
@@ -38,7 +39,12 @@ sysinfo = "0.33"
 
 # Shader translation
 regex = "1"
-naga = { version = "24", features = ["glsl-in", "wgsl-out"] }
+naga = { version = "24", features = ["glsl-in", "wgsl-out", "spv-in"] }
+shaderc = "0.8"
+
+# X11 support
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr"] }
+libloading = "0.8"
 
 # IPC
 tokio = { version = "1", features = ["full"] }
@@ -52,12 +58,21 @@ glam = "0.29"
 # Byte handling
 bytemuck = { version = "1", features = ["derive"] }
 
+# Image decoding
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+
 # Audio
 cpal = "0.15"
 rustfft = "6"
 
+# Video decoding (optional, needs system ffmpeg libs)
+ffmpeg-next = "8"
+
+# Font rendering
+fontdue = "0.9"
+
 # GUI
-iced = { version = "0.13", features = ["tokio"] }
+iced = { version = "0.13", features = ["tokio", "canvas"] }
 rfd = "0.15"
 
 # HTTP client
