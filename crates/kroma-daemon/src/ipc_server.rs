@@ -2,17 +2,30 @@
 //!
 //! Listens on a Unix domain socket for JSON commands from the GUI.
 //! Supports bidirectional communication — sends status events back.
+//! Uses a response channel for commands that produce results (e.g., LiveReload).
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use log::{error, info};
 
 use kroma_shared::ipc::{socket_path, DaemonCommand, DaemonEvent};
+
+/// Internal command wrapper that includes an optional response channel.
+///
+/// For commands that produce results (LiveReload, LoadShade, Reload),
+/// the IPC server creates a oneshot-style channel and waits for the
+/// main loop to send a `DaemonEvent` back.
+pub struct InternalCommand {
+    pub command: DaemonCommand,
+    /// If set, the main loop should send a response (e.g., `CompileResult`).
+    pub response_tx: Option<std::sync::mpsc::Sender<DaemonEvent>>,
+}
 
 /// Shared daemon status for IPC queries.
 #[derive(Clone)]
@@ -20,6 +33,12 @@ pub struct DaemonStatus {
     pub fps: f32,
     pub paused: bool,
     pub loaded_shade: Option<String>,
+    pub cpu_usage: f32,
+    pub ram_usage: f32,
+    pub battery: Option<f32>,
+    pub audio_level: f32,
+    pub cursor_x: f32,
+    pub cursor_y: f32,
 }
 
 impl Default for DaemonStatus {
@@ -28,6 +47,12 @@ impl Default for DaemonStatus {
             fps: 0.0,
             paused: false,
             loaded_shade: None,
+            cpu_usage: 0.0,
+            ram_usage: 0.0,
+            battery: None,
+            audio_level: 0.0,
+            cursor_x: 0.0,
+            cursor_y: 0.0,
         }
     }
 }
@@ -36,7 +61,7 @@ impl Default for DaemonStatus {
 ///
 /// Returns a join handle and a shared status object that the main loop
 /// should update periodically.
-pub fn start(cmd_tx: Sender<DaemonCommand>) -> Result<(JoinHandle<()>, Arc<Mutex<DaemonStatus>>)> {
+pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<(JoinHandle<()>, Arc<Mutex<DaemonStatus>>)> {
     let path = socket_path();
 
     // Remove stale socket if it exists
@@ -76,9 +101,9 @@ pub fn start(cmd_tx: Sender<DaemonCommand>) -> Result<(JoinHandle<()>, Arc<Mutex
                                 match line {
                                     Ok(line) if line.trim().is_empty() => continue,
                                     Ok(line) => {
-                                        // Check if this is a status query (special handling)
-                                        if line.trim() == "\"StatusQuery\"" || line.trim() == "{\"type\":\"StatusQuery\"}" {
-                                            let s = status.lock().unwrap();
+                                        // Check for legacy bare-string status query
+                                        if line.trim() == "\"StatusQuery\"" {
+                                            let s = status.lock().unwrap_or_else(|e| e.into_inner());
                                             let event = DaemonEvent::Status {
                                                 fps: s.fps,
                                                 paused: s.paused,
@@ -92,16 +117,86 @@ pub fn start(cmd_tx: Sender<DaemonCommand>) -> Result<(JoinHandle<()>, Arc<Mutex
                                         }
 
                                         match serde_json::from_str::<DaemonCommand>(&line) {
-                                            Ok(cmd) => {
-                                                // Send acknowledgment
-                                                let ack = DaemonEvent::Ready;
-                                                if let Ok(json) = serde_json::to_string(&ack) {
+                                            Ok(DaemonCommand::StatusQuery) => {
+                                                let s = status.lock().unwrap_or_else(|e| e.into_inner());
+                                                let event = DaemonEvent::Status {
+                                                    fps: s.fps,
+                                                    paused: s.paused,
+                                                    loaded_shade: s.loaded_shade.clone(),
+                                                };
+                                                if let Ok(json) = serde_json::to_string(&event) {
                                                     let _ = writeln!(writer, "{}", json);
                                                     let _ = writer.flush();
                                                 }
+                                            }
+                                            Ok(DaemonCommand::QuerySystemInfo) => {
+                                                let s = status.lock().unwrap_or_else(|e| e.into_inner());
+                                                let event = DaemonEvent::SystemInfo {
+                                                    cpu_usage: s.cpu_usage,
+                                                    ram_usage: s.ram_usage,
+                                                    battery: s.battery,
+                                                    audio_level: s.audio_level,
+                                                    cursor_x: s.cursor_x,
+                                                    cursor_y: s.cursor_y,
+                                                };
+                                                if let Ok(json) = serde_json::to_string(&event) {
+                                                    let _ = writeln!(writer, "{}", json);
+                                                    let _ = writer.flush();
+                                                }
+                                            }
+                                            Ok(cmd) => {
+                                                // Determine if this command expects a compile result
+                                                let needs_response = matches!(
+                                                    cmd,
+                                                    DaemonCommand::LiveReload { .. }
+                                                        | DaemonCommand::LoadShade { .. }
+                                                        | DaemonCommand::Reload
+                                                );
 
-                                                if tx.send(cmd).is_err() {
-                                                    return;
+                                                if needs_response {
+                                                    // Create response channel and wait for result
+                                                    let (resp_tx, resp_rx) =
+                                                        std::sync::mpsc::channel();
+                                                    let icmd = InternalCommand {
+                                                        command: cmd,
+                                                        response_tx: Some(resp_tx),
+                                                    };
+                                                    if tx.send(icmd).is_err() {
+                                                        return;
+                                                    }
+                                                    // Wait for compile result with timeout
+                                                    let event = match resp_rx
+                                                        .recv_timeout(Duration::from_secs(10))
+                                                    {
+                                                        Ok(ev) => ev,
+                                                        Err(_) => DaemonEvent::Error {
+                                                            message:
+                                                                "Compile response timed out"
+                                                                    .into(),
+                                                        },
+                                                    };
+                                                    if let Ok(json) =
+                                                        serde_json::to_string(&event)
+                                                    {
+                                                        let _ = writeln!(writer, "{}", json);
+                                                        let _ = writer.flush();
+                                                    }
+                                                } else {
+                                                    // Fire-and-forget with Ready ack
+                                                    let ack = DaemonEvent::Ready;
+                                                    if let Ok(json) =
+                                                        serde_json::to_string(&ack)
+                                                    {
+                                                        let _ = writeln!(writer, "{}", json);
+                                                        let _ = writer.flush();
+                                                    }
+                                                    let icmd = InternalCommand {
+                                                        command: cmd,
+                                                        response_tx: None,
+                                                    };
+                                                    if tx.send(icmd).is_err() {
+                                                        return;
+                                                    }
                                                 }
                                             }
                                             Err(e) => {

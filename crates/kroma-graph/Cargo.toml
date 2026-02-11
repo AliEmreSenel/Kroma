@@ -1,0 +1,10 @@
+[package]
+name = "kroma-graph"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Shader node graph: types, GLSL parser, and code generator for Kroma"
+
+[dependencies]
+glsl = "7.0.0"

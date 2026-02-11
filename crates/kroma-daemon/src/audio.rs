@@ -95,11 +95,11 @@ impl SharedAudioState {
 
 impl AudioProvider for SharedAudioState {
     fn get_spectrum(&self) -> Vec<f32> {
-        self.spectrum.lock().unwrap().clone()
+        self.spectrum.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     fn get_level(&self) -> f32 {
-        *self.level.lock().unwrap()
+        *self.level.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -117,17 +117,129 @@ pub struct CpalAudioProvider {
 impl CpalAudioProvider {
     /// Create a new cpal audio provider.
     ///
-    /// Attempts to open the default audio input device. Falls back to the
-    /// default output device's monitor source if available.
-    pub fn new() -> anyhow::Result<Self> {
+    /// Prefers desktop audio (monitor/loopback) over microphone.
+    /// Set `source` to "desktop" (default), "microphone", or a specific device name.
+    pub fn new_with_source(source: &str) -> anyhow::Result<Self> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
         use rustfft::{FftPlanner, num_complex::Complex};
 
         let host = cpal::default_host();
 
-        let device = host
-            .default_input_device()
-            .ok_or_else(|| anyhow::anyhow!("No audio input device available"))?;
+        // Log all available input devices for debugging
+        if let Ok(devices) = host.input_devices() {
+            log::info!("Available audio input devices:");
+            for d in devices {
+                if let Ok(name) = d.name() {
+                    log::info!("  - {}", name);
+                }
+            }
+        }
+
+        let device = match source {
+            "microphone" | "mic" => {
+                log::info!("Audio: using microphone (default input device)");
+                host.default_input_device()
+                    .ok_or_else(|| anyhow::anyhow!("No microphone available"))?
+            }
+            "desktop" | "" => {
+                // First, try to get the exact monitor source name for the current
+                // default audio output using pactl (PulseAudio/PipeWire).
+                // This gives us e.g. "alsa_output.pci-0000_00_1f.3.analog-stereo.monitor"
+                let pa_monitor = get_default_sink_monitor();
+
+                let monitor_device = if let Some(ref monitor_name) = pa_monitor {
+                    log::info!("Audio: PulseAudio default sink monitor: {}", monitor_name);
+                    host.input_devices().ok().and_then(|devices| {
+                        devices
+                            .filter_map(|d| {
+                                let name = d.name().ok()?;
+                                // Try exact match first, then partial
+                                if name == *monitor_name || name.contains(monitor_name.as_str()) {
+                                    Some(d)
+                                } else {
+                                    None
+                                }
+                            })
+                            .next()
+                    })
+                } else {
+                    log::warn!("Audio: pactl not available, cannot detect default sink monitor");
+                    None
+                };
+
+                // If pactl approach didn't work, fall back to substring matching
+                let monitor_device = monitor_device.or_else(|| {
+                    log::info!("Audio: Trying substring match for monitor device...");
+                    host.input_devices().ok().and_then(|devices| {
+                        // Collect devices and prefer ones with "monitor" in the name
+                        let all: Vec<_> = devices.collect();
+                        // First pass: look for ".monitor" (PulseAudio/PipeWire convention)
+                        for d in &all {
+                            if let Ok(name) = d.name() {
+                                if name.to_lowercase().contains(".monitor") {
+                                    log::info!("Audio: found monitor device via substring: {}", name);
+                                    // We need to return owned device, re-enumerate
+                                    drop(all);
+                                    return host.input_devices().ok().and_then(|devs| {
+                                        devs.filter(|d2| d2.name().ok().as_deref() == Some(&name)).next()
+                                    });
+                                }
+                            }
+                        }
+                        // Second pass: look for loopback/desktop/output
+                        for d in &all {
+                            if let Ok(name) = d.name() {
+                                let lower = name.to_lowercase();
+                                if lower.contains("loopback")
+                                    || lower.contains("desktop")
+                                    || lower.contains("output")
+                                {
+                                    log::info!("Audio: found fallback device via substring: {}", name);
+                                    drop(all);
+                                    return host.input_devices().ok().and_then(|devs| {
+                                        devs.filter(|d2| d2.name().ok().as_deref() == Some(&name)).next()
+                                    });
+                                }
+                            }
+                        }
+                        None
+                    })
+                });
+
+                if let Some(dev) = monitor_device {
+                    let name = dev.name().unwrap_or_default();
+                    log::info!("Audio: using desktop monitor device: {}", name);
+                    dev
+                } else {
+                    // No monitor device found — do NOT fall back to microphone.
+                    // Return an error so the caller can use SilentAudioProvider.
+                    log::error!("Audio: no monitor/loopback device found for desktop audio capture. \
+                        Ensure PipeWire/PulseAudio is running and has a monitor source for your output device.");
+                    return Err(anyhow::anyhow!("No desktop audio monitor source found. \
+                        Run 'pactl list sources short' to see available sources."));
+                }
+            }
+            device_name => {
+                // User specified a device name directly
+                let device = host.input_devices().ok()
+                    .and_then(|devices| {
+                        devices
+                            .filter_map(|d| {
+                                let name = d.name().ok()?;
+                                if name.contains(device_name) {
+                                    Some(d)
+                                } else {
+                                    None
+                                }
+                            })
+                            .next()
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("Audio device '{}' not found", device_name))?;
+                let name = device.name().unwrap_or_default();
+                log::info!("Audio: using specified device: {}", name);
+                device
+            }
+        };
 
         let device_name = device.name().unwrap_or_else(|_| "unknown".into());
         log::info!("Audio input device: {}", device_name);
@@ -171,7 +283,7 @@ impl CpalAudioProvider {
                     std::thread::sleep(std::time::Duration::from_millis(16)); // ~60 Hz
 
                     let samples: Vec<f32> = {
-                        let mut buf = sample_buf_clone.lock().unwrap();
+                        let mut buf = sample_buf_clone.lock().unwrap_or_else(|e| e.into_inner());
                         if buf.len() < FFT_SIZE {
                             continue;
                         }
@@ -189,7 +301,7 @@ impl CpalAudioProvider {
                     };
                     // Normalize RMS to 0-1 range (assuming max amplitude is 1.0)
                     let level = (rms * 3.0).min(1.0); // Boost for visibility
-                    *level_writer_fft.lock().unwrap() = level;
+                    *level_writer_fft.lock().unwrap_or_else(|e| e.into_inner()) = level;
 
                     // Apply Hann window and prepare FFT input
                     for i in 0..FFT_SIZE {
@@ -224,7 +336,7 @@ impl CpalAudioProvider {
                         }
                     }
 
-                    *spectrum_writer_fft.lock().unwrap() = spectrum;
+                    *spectrum_writer_fft.lock().unwrap_or_else(|e| e.into_inner()) = spectrum;
                 }
             })
             .expect("Failed to spawn FFT thread");
@@ -239,7 +351,7 @@ impl CpalAudioProvider {
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        let mut buffer = buf.lock().unwrap();
+                        let mut buffer = buf.lock().unwrap_or_else(|e| e.into_inner());
                         // Mix to mono
                         for chunk in data.chunks(channels) {
                             let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
@@ -260,7 +372,7 @@ impl CpalAudioProvider {
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                        let mut buffer = buf.lock().unwrap();
+                        let mut buffer = buf.lock().unwrap_or_else(|e| e.into_inner());
                         for chunk in data.chunks(channels) {
                             let mono: f32 = chunk.iter()
                                 .map(|&s| s as f32 / i16::MAX as f32)
@@ -282,7 +394,7 @@ impl CpalAudioProvider {
                 device.build_input_stream(
                     &config.into(),
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        let mut buffer = buf.lock().unwrap();
+                        let mut buffer = buf.lock().unwrap_or_else(|e| e.into_inner());
                         for chunk in data.chunks(channels) {
                             let mono: f32 = chunk.iter().sum::<f32>() / channels as f32;
                             buffer.push(mono);
@@ -313,6 +425,11 @@ impl CpalAudioProvider {
             state,
         })
     }
+
+    /// Convenience constructor that defaults to desktop audio.
+    pub fn new() -> anyhow::Result<Self> {
+        Self::new_with_source("desktop")
+    }
 }
 
 impl AudioProvider for CpalAudioProvider {
@@ -323,6 +440,38 @@ impl AudioProvider for CpalAudioProvider {
     fn get_level(&self) -> f32 {
         self.state.get_level()
     }
+}
+
+/// Query PulseAudio/PipeWire for the monitor source of the current default sink.
+///
+/// Runs `pactl get-default-sink` to get the default output device name, then
+/// appends ".monitor" which is the standard PulseAudio naming convention for
+/// the loopback/monitor source of a sink.
+///
+/// Returns `None` if pactl is not available or the command fails.
+fn get_default_sink_monitor() -> Option<String> {
+    use std::process::Command;
+
+    // Get the default sink name (e.g. "alsa_output.pci-0000_00_1f.3.analog-stereo")
+    let output = Command::new("pactl")
+        .arg("get-default-sink")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        log::debug!("pactl get-default-sink failed (status {})", output.status);
+        return None;
+    }
+
+    let sink_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sink_name.is_empty() {
+        return None;
+    }
+
+    // The monitor source is conventionally "<sink_name>.monitor"
+    let monitor_name = format!("{}.monitor", sink_name);
+    log::debug!("Default sink: {} → monitor source: {}", sink_name, monitor_name);
+    Some(monitor_name)
 }
 
 #[cfg(test)]
@@ -357,11 +506,11 @@ mod tests {
 
         // Write some data
         {
-            let mut s = spectrum_w.lock().unwrap();
+            let mut s = spectrum_w.lock().unwrap_or_else(|e| e.into_inner());
             s[0] = 0.5;
             s[100] = 0.8;
         }
-        *level_w.lock().unwrap() = 0.42;
+        *level_w.lock().unwrap_or_else(|e| e.into_inner()) = 0.42;
 
         // Read back
         let spectrum = state.get_spectrum();

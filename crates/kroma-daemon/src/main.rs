@@ -6,18 +6,88 @@
 mod audio;
 mod config;
 mod data;
+mod font;
 mod hyprland;
 mod ipc_server;
 mod renderer;
 mod surface;
+mod surface_x11;
 mod video;
 
 use anyhow::Result;
+use glam::Vec2;
 use log::info;
 
-use kroma_shared::traits::{DataProvider, SurfaceProvider};
+use kroma_shared::traits::{DataProvider, SurfaceProvider, VideoDecoder};
 
 use crate::audio::{AudioProvider, SimulatedAudioProvider, SilentAudioProvider, CpalAudioProvider};
+
+/// Try to create a video decoder for a shade package.
+///
+/// Scans the package's texture definitions for any `ty == "video"` entries
+/// and attempts to create an FFmpeg decoder for the first one found.
+/// Works regardless of WallpaperMode — any package can include video textures.
+fn try_create_video_decoder(
+    pkg: &kroma_shared::shade::ShadePackage,
+) -> Option<video::DefaultVideoDecoder> {
+    // Find the first video texture source
+    for (_name, tex_def) in &pkg.config.textures {
+        if tex_def.ty == "video" {
+            if let Some(ref source) = tex_def.source {
+                // Try loading from temp-extracted data first (for ZIP packages)
+                if let Some(video_data) = pkg.assets.iter()
+                    .find(|(path, _)| path == source || path.ends_with(source))
+                    .map(|(_, data)| data.as_slice())
+                {
+                    // Extract video to a temp file for FFmpeg
+                    match extract_video_to_temp(source, video_data) {
+                        Ok(temp_path) => {
+                            match video::DefaultVideoDecoder::load(&temp_path) {
+                                Ok(decoder) => {
+                                    log::info!("Video decoder created from package asset '{}'", source);
+                                    return Some(decoder);
+                                }
+                                Err(e) => {
+                                    log::warn!("Failed to create video decoder for '{}': {}", source, e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to extract video '{}' to temp: {}", source, e);
+                        }
+                    }
+                } else {
+                    // Try as a direct file path on disk
+                    let video_path = std::path::Path::new(source);
+                    match video::DefaultVideoDecoder::load(video_path) {
+                        Ok(decoder) => {
+                            log::info!("Video decoder created for '{}'", source);
+                            return Some(decoder);
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to create video decoder for '{}': {}", source, e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract embedded video data to a temp file so FFmpeg can open it.
+fn extract_video_to_temp(source: &str, data: &[u8]) -> Result<std::path::PathBuf> {
+    let extension = std::path::Path::new(source)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp4");
+    let temp_dir = std::env::temp_dir().join("kroma-video");
+    std::fs::create_dir_all(&temp_dir)?;
+    let temp_path = temp_dir.join(format!("video.{}", extension));
+    std::fs::write(&temp_path, data)?;
+    log::info!("Extracted video to temp: {}", temp_path.display());
+    Ok(temp_path)
+}
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -33,20 +103,147 @@ fn main() -> Result<()> {
     info!("Target FPS: {}, GPU power: {}", daemon_config.target_fps, daemon_config.gpu_power);
 
     // ---------------------------------------------------------------
-    // 1. Initialize the Wayland surface provider
+    // 1. Detect session type and initialize the surface provider
     // ---------------------------------------------------------------
-    let mut surface_provider = surface::WaylandSurfaceProvider::new();
-    surface_provider.connect()?;
+    let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+    let desktop_env = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    info!("Session: type={}, desktop={}", session_type, desktop_env);
 
-    // Create layer shell surfaces on all monitors
-    surface_provider.create_all_surfaces()?;
+    // Persisted Wayland surface provider for dispatch in the render loop.
+    let mut wayland_surface: Option<surface::WaylandSurfaceProvider> = None;
 
-    let monitors = surface_provider.list_monitors()?;
-    info!("Active on {} monitor(s):", monitors.len());
-    for m in &monitors {
-        info!("  - {} ({}x{} @ {},{}, scale {})",
-            m.name, m.width, m.height, m.x, m.y, m.scale);
+    enum Backend {
+        Wayland {
+            display_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
+            surface_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
+            logical_w: u32,
+            logical_h: u32,
+            scale: f64,
+            _monitors: Vec<kroma_shared::types::MonitorConfig>,
+        },
+        X11 {
+            window_id: u32,
+            screen_num: i32,
+            width: u32,
+            height: u32,
+            _monitors: Vec<kroma_shared::types::MonitorConfig>,
+        },
+        Headless,
     }
+
+    let backend = if session_type == "wayland" || std::env::var("WAYLAND_DISPLAY").is_ok() {
+        info!("Detected Wayland session — using layer shell backend");
+        let mut surface_provider = surface::WaylandSurfaceProvider::new();
+        match surface_provider.connect()
+            .and_then(|_| surface_provider.create_all_surfaces())
+        {
+            Ok(()) => {
+                let monitors = surface_provider.list_monitors()?;
+                info!("Active on {} Wayland monitor(s):", monitors.len());
+                for m in &monitors {
+                    info!("  - {} ({}x{} @ {},{}, scale {})",
+                        m.name, m.width, m.height, m.x, m.y, m.scale);
+                }
+                let primary = monitors.first().cloned().unwrap_or_else(|| {
+                    kroma_shared::types::MonitorConfig {
+                        id: kroma_shared::types::MonitorId(0),
+                        name: "default".into(),
+                        width: 1920, height: 1080, x: 0, y: 0, scale: 1.0,
+                    }
+                });
+                let display_ptr = surface_provider.display_ptr();
+                let surface_ptr = surface_provider.surface_ptr(primary.id.0);
+                let (logical_w, logical_h) = surface_provider
+                    .surface_size(primary.id.0)
+                    .unwrap_or((primary.width, primary.height));
+                let scale = primary.scale.max(1.0);
+
+                wayland_surface = Some(surface_provider);
+
+                Backend::Wayland {
+                    display_ptr,
+                    surface_ptr,
+                    logical_w,
+                    logical_h,
+                    scale,
+                    _monitors: monitors,
+                }
+            }
+            Err(e) => {
+                log::warn!("Wayland surface creation failed: {} — trying X11 fallback", e);
+                // Try X11 as fallback before going headless
+                let mut x11_provider = surface_x11::X11SurfaceProvider::new();
+                match x11_provider.connect()
+                    .and_then(|_| x11_provider.discover_monitors())
+                    .and_then(|_| x11_provider.create_all_windows())
+                {
+                    Ok(()) => {
+                        let monitors = x11_provider.monitors().to_vec();
+                        info!("Wayland failed, fell back to X11 on {} monitor(s):", monitors.len());
+                        for m in &monitors {
+                            info!("  - {} ({}x{} @ {},{})", m.name, m.width, m.height, m.x, m.y);
+                        }
+                        let primary = monitors.first().cloned().unwrap_or_else(|| {
+                            kroma_shared::types::MonitorConfig {
+                                id: kroma_shared::types::MonitorId(0),
+                                name: "default".into(),
+                                width: 1920, height: 1080, x: 0, y: 0, scale: 1.0,
+                            }
+                        });
+                        let window_id = x11_provider.get_window_id(primary.id.0).unwrap_or(0);
+                        Backend::X11 {
+                            window_id,
+                            screen_num: x11_provider.screen_num(),
+                            width: primary.width,
+                            height: primary.height,
+                            _monitors: monitors,
+                        }
+                    }
+                    Err(e2) => {
+                        log::warn!("X11 fallback also failed: {} — going headless", e2);
+                        Backend::Headless
+                    }
+                }
+            }
+        }
+    } else if session_type == "x11" || std::env::var("DISPLAY").is_ok() {
+        info!("Detected X11 session — using desktop window backend");
+        let mut x11_provider = surface_x11::X11SurfaceProvider::new();
+        match x11_provider.connect()
+            .and_then(|_| x11_provider.discover_monitors())
+            .and_then(|_| x11_provider.create_all_windows())
+        {
+            Ok(()) => {
+                let monitors = x11_provider.monitors().to_vec();
+                info!("Active on {} X11 monitor(s):", monitors.len());
+                for m in &monitors {
+                    info!("  - {} ({}x{} @ {},{})", m.name, m.width, m.height, m.x, m.y);
+                }
+                let primary = monitors.first().cloned().unwrap_or_else(|| {
+                    kroma_shared::types::MonitorConfig {
+                        id: kroma_shared::types::MonitorId(0),
+                        name: "default".into(),
+                        width: 1920, height: 1080, x: 0, y: 0, scale: 1.0,
+                    }
+                });
+                let window_id = x11_provider.get_window_id(primary.id.0).unwrap_or(0);
+                Backend::X11 {
+                    window_id,
+                    screen_num: x11_provider.screen_num(),
+                    width: primary.width,
+                    height: primary.height,
+                    _monitors: monitors,
+                }
+            }
+            Err(e) => {
+                log::warn!("X11 surface creation failed: {} — falling back to headless", e);
+                Backend::Headless
+            }
+        }
+    } else {
+        log::warn!("No display server detected — running headless");
+        Backend::Headless
+    };
 
     // ---------------------------------------------------------------
     // 2. Start the data provider
@@ -96,58 +293,69 @@ fn main() -> Result<()> {
     };
 
     // ---------------------------------------------------------------
-    // 4. Initialize the renderer with real Wayland surfaces
+    // 4. Initialize the renderer
     // ---------------------------------------------------------------
     let mut render_state = renderer::RenderState::new()?;
+    let (surf_w, surf_h): (u32, u32);
 
-    // Get the primary monitor and its surface pointers
-    let primary = monitors.first().cloned().unwrap_or_else(|| {
-        kroma_shared::types::MonitorConfig {
-            id: kroma_shared::types::MonitorId(0),
-            name: "default".into(),
-            width: 1920,
-            height: 1080,
-            x: 0,
-            y: 0,
-            scale: 1.0,
+    match &backend {
+        Backend::Wayland { display_ptr, surface_ptr, logical_w, logical_h, scale, .. } => {
+            let s = scale.max(1.0);
+            surf_w = (*logical_w as f64 * s) as u32;
+            surf_h = (*logical_h as f64 * s) as u32;
+            if let (Some(dp), Some(sp)) = (*display_ptr, *surface_ptr) {
+                info!("Initializing GPU with Wayland surface ({}x{} physical, scale {:.1})...", surf_w, surf_h, s);
+                match unsafe { render_state.init_gpu_with_surface(dp, sp, surf_w, surf_h) } {
+                    Ok(()) => info!("GPU initialized with Wayland surface"),
+                    Err(e) => {
+                        log::error!("GPU init with Wayland surface failed: {} — trying headless", e);
+                        render_state.init_gpu_headless()?;
+                    }
+                }
+            } else {
+                log::warn!("No Wayland surface pointers available — trying headless");
+                render_state.init_gpu_headless()?;
+            }
         }
-    });
-
-    let display_ptr = surface_provider.display_ptr();
-    let surface_ptr = surface_provider.surface_ptr(primary.id.0);
-    let (surf_w, surf_h) = surface_provider
-        .surface_size(primary.id.0)
-        .unwrap_or((primary.width, primary.height));
-
-    if let (Some(display_ptr), Some(surface_ptr)) = (display_ptr, surface_ptr) {
-        info!("Initializing GPU with Wayland surface ({}x{})...", surf_w, surf_h);
-        match unsafe { render_state.init_gpu_with_surface(display_ptr, surface_ptr, surf_w, surf_h) } {
-            Ok(()) => info!("GPU initialized with real surface"),
-            Err(e) => {
-                log::error!("GPU init with surface failed: {} — trying headless", e);
-                match render_state.init_gpu_headless() {
-                    Ok(()) => info!("GPU initialized in headless mode (no visible output)"),
-                    Err(e2) => log::error!("GPU init headless failed too: {} — rendering disabled", e2),
+        Backend::X11 { window_id, screen_num, width, height, .. } => {
+            surf_w = *width;
+            surf_h = *height;
+            info!("Initializing GPU with X11 surface ({}x{})...", surf_w, surf_h);
+            match unsafe { render_state.init_gpu_with_x11(*window_id, *screen_num, surf_w, surf_h) } {
+                Ok(()) => info!("GPU initialized with X11 surface"),
+                Err(e) => {
+                    log::error!("GPU init with X11 failed: {} — trying headless", e);
+                    render_state.init_gpu_headless()?;
                 }
             }
         }
-    } else {
-        log::warn!("No Wayland surface pointers available — trying headless GPU");
-        match render_state.init_gpu_headless() {
-            Ok(()) => info!("GPU initialized in headless mode"),
-            Err(e) => log::warn!("GPU init failed: {} — rendering disabled", e),
+        Backend::Headless => {
+            surf_w = 1920;
+            surf_h = 1080;
+            render_state.init_gpu_headless()?;
         }
     }
 
-    // Set resolution from primary monitor
+    // Set resolution
     render_state.uniforms.u_resolution = [surf_w as f32, surf_h as f32];
+
+    // Create audio spectrum texture (must happen after GPU init, before shade load)
+    if let Err(e) = render_state.create_audio_spectrum_texture() {
+        log::warn!("Failed to create audio spectrum texture: {}", e);
+    }
 
     // Load initial shade if configured
     let mut current_shade_path: Option<String> = None;
+    let mut video_decoder: Option<video::DefaultVideoDecoder> = None;
+    let mut video_frame_accum: f64 = 0.0; // Time accumulator for video frame pacing
+    const VIDEO_FPS: f64 = 30.0; // Default video frame rate
+    const VIDEO_FRAME_INTERVAL: f64 = 1.0 / VIDEO_FPS;
     if let Some(ref shade_path) = daemon_config.current_shade {
         info!("Loading initial shade: {}", shade_path);
         match kroma_shared::shade::ShadePackage::load(std::path::Path::new(shade_path)) {
             Ok(pkg) => {
+                video_decoder = try_create_video_decoder(&pkg);
+                video_frame_accum = 0.0;
                 match render_state.load_shade(&pkg) {
                     Ok(()) => {
                         current_shade_path = Some(shade_path.clone());
@@ -192,7 +400,23 @@ fn main() -> Result<()> {
                 hyprland::HyprlandEvent::WorkspaceChanged { id } => {
                     info!("Workspace changed to {} (was {})", id, active_workspace_id);
                     active_workspace_id = id;
-                    log::debug!("Active workspace is now {}", active_workspace_id);
+                    // Pause when workspace changes away (wallpaper is always on all workspaces,
+                    // but we can save GPU cycles when the user isn't looking at it).
+                    if daemon_config.pause_on_inactive {
+                        // On Hyprland the wallpaper layer is visible on every workspace,
+                        // so we interpret "inactive" as special workspaces (negative IDs)
+                        // which are overlaid and hide the desktop.
+                        if id < 0 {
+                            if !paused {
+                                paused = true;
+                                info!("Special workspace active — pausing render");
+                            }
+                        } else if paused {
+                            // Only resume if fullscreen doesn't keep us paused
+                            paused = false;
+                            info!("Normal workspace active — resuming render");
+                        }
+                    }
                 }
                 hyprland::HyprlandEvent::MonitorChanged { ref name } => {
                     info!("Active monitor: {}", name);
@@ -205,9 +429,21 @@ fn main() -> Result<()> {
         }
 
         // Process IPC commands (non-blocking)
-        while let Ok(cmd) = cmd_rx.try_recv() {
-            use kroma_shared::ipc::DaemonCommand;
-            match cmd {
+        while let Ok(internal) = cmd_rx.try_recv() {
+            use kroma_shared::ipc::{DaemonCommand, DaemonEvent, CompileError};
+            let ipc_server::InternalCommand { command, response_tx } = internal;
+
+            /// Helper: send a compile result event through the response channel.
+            fn send_response(
+                tx: &Option<std::sync::mpsc::Sender<DaemonEvent>>,
+                event: DaemonEvent,
+            ) {
+                if let Some(ref tx) = tx {
+                    let _ = tx.send(event);
+                }
+            }
+
+            match command {
                 DaemonCommand::Pause => {
                     paused = true;
                     info!("Rendering paused");
@@ -228,15 +464,44 @@ fn main() -> Result<()> {
                     info!("Loading shade package: {}", path);
                     match kroma_shared::shade::ShadePackage::load(std::path::Path::new(&path)) {
                         Ok(pkg) => {
+                            video_decoder = try_create_video_decoder(&pkg);
+                            video_frame_accum = 0.0;
                             match render_state.load_shade(&pkg) {
                                 Ok(()) => {
                                     current_shade_path = Some(path.clone());
                                     info!("Loaded: {}", pkg.config.meta.name);
+                                    send_response(&response_tx, DaemonEvent::CompileResult {
+                                        success: true,
+                                        errors: vec![],
+                                        warnings: vec![],
+                                    });
                                 }
-                                Err(e) => log::error!("Failed to compile shade shader: {}", e),
+                                Err(e) => {
+                                    log::error!("Failed to compile shade shader: {}", e);
+                                    send_response(&response_tx, DaemonEvent::CompileResult {
+                                        success: false,
+                                        errors: vec![CompileError {
+                                            message: e.to_string(),
+                                            line: None,
+                                            column: None,
+                                        }],
+                                        warnings: vec![],
+                                    });
+                                }
                             }
                         }
-                        Err(e) => log::error!("Failed to load shade: {}", e),
+                        Err(e) => {
+                            log::error!("Failed to load shade: {}", e);
+                            send_response(&response_tx, DaemonEvent::CompileResult {
+                                success: false,
+                                errors: vec![CompileError {
+                                    message: format!("Package load error: {}", e),
+                                    line: None,
+                                    column: None,
+                                }],
+                                warnings: vec![],
+                            });
+                        }
                     }
                 }
                 DaemonCommand::Reload => {
@@ -244,20 +509,93 @@ fn main() -> Result<()> {
                         info!("Reloading shade: {}", path);
                         match kroma_shared::shade::ShadePackage::load(std::path::Path::new(path)) {
                             Ok(pkg) => {
+                                video_decoder = try_create_video_decoder(&pkg);
+                                video_frame_accum = 0.0;
                                 match render_state.load_shade(&pkg) {
-                                    Ok(()) => info!("Reloaded: {}", pkg.config.meta.name),
-                                    Err(e) => log::error!("Failed to compile reloaded shader: {}", e),
+                                    Ok(()) => {
+                                        info!("Reloaded: {}", pkg.config.meta.name);
+                                        send_response(&response_tx, DaemonEvent::CompileResult {
+                                            success: true,
+                                            errors: vec![],
+                                            warnings: vec![],
+                                        });
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to compile reloaded shader: {}", e);
+                                        send_response(&response_tx, DaemonEvent::CompileResult {
+                                            success: false,
+                                            errors: vec![CompileError {
+                                                message: e.to_string(),
+                                                line: None,
+                                                column: None,
+                                            }],
+                                            warnings: vec![],
+                                        });
+                                    }
                                 }
                             }
-                            Err(e) => log::error!("Failed to reload shade: {}", e),
+                            Err(e) => {
+                                log::error!("Failed to reload shade: {}", e);
+                                send_response(&response_tx, DaemonEvent::CompileResult {
+                                    success: false,
+                                    errors: vec![CompileError {
+                                        message: format!("Package load error: {}", e),
+                                        line: None,
+                                        column: None,
+                                    }],
+                                    warnings: vec![],
+                                });
+                            }
                         }
                     } else {
                         log::warn!("No shade loaded to reload");
+                        send_response(&response_tx, DaemonEvent::Error {
+                            message: "No shade loaded to reload".into(),
+                        });
                     }
                 }
                 DaemonCommand::SetUniform { name, value } => {
                     log::debug!("Setting uniform {} = {:?}", name, value);
                     render_state.set_custom_uniform(&name, &value);
+                }
+                DaemonCommand::StatusQuery => {
+                    // Handled inline in ipc_server, shouldn't reach here
+                }
+                DaemonCommand::QuerySystemInfo => {
+                    // Handled inline in ipc_server, shouldn't reach here
+                }
+                DaemonCommand::LiveReload { glsl_source } => {
+                    log::info!("Live reload: {} bytes of GLSL", glsl_source.len());
+                    // Translate the raw Shadertoy GLSL with our translator first
+                    let result = kroma_shared::translator::translate(
+                        &glsl_source,
+                        "live-preview",
+                        "Kroma Editor",
+                    );
+                    let warnings: Vec<String> = result.warnings.clone();
+                    for w in &warnings {
+                        log::warn!("Translation warning: {}", w);
+                    }
+                    match render_state.load_glsl_source(&result.shader_source) {
+                        Ok(()) => {
+                            current_shade_path = Some("live-preview".to_string());
+                            send_response(&response_tx, DaemonEvent::CompileResult {
+                                success: true,
+                                errors: vec![],
+                                warnings,
+                            });
+                        }
+                        Err(e) => {
+                            log::error!("Live reload failed: {}", e);
+                            // Try to extract line numbers from error message
+                            let compile_error = parse_compile_error(&e.to_string());
+                            send_response(&response_tx, DaemonEvent::CompileResult {
+                                success: false,
+                                errors: vec![compile_error],
+                                warnings,
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -268,8 +606,10 @@ fn main() -> Result<()> {
         }
 
         // Dispatch Wayland events
-        if let Err(e) = surface_provider.dispatch() {
-            log::warn!("Wayland dispatch error: {}", e);
+        if let Some(ref mut sp) = wayland_surface {
+            if let Err(e) = sp.dispatch() {
+                log::warn!("Wayland dispatch error: {}", e);
+            }
         }
 
         // Update timing uniforms
@@ -285,17 +625,44 @@ fn main() -> Result<()> {
         let stats = data_provider.get_system_stats();
         render_state.uniforms.apply_system_stats(&stats);
         let cursor = data_provider.get_cursor_pos();
-        // Normalise cursor to 0..1 using actual surface resolution
-        let norm_cursor = glam::Vec2::new(
-            cursor.x / render_state.uniforms.u_resolution[0].max(1.0),
-            cursor.y / render_state.uniforms.u_resolution[1].max(1.0),
+        // Flip mouse Y: Hyprland uses Y=0 at top, Shadertoy expects Y=0 at bottom
+        let flipped_cursor = Vec2::new(
+            cursor.x,
+            render_state.uniforms.u_resolution[1] - cursor.y,
         );
-        render_state.uniforms.apply_cursor(norm_cursor);
+        render_state.uniforms.apply_cursor(flipped_cursor);
 
         // Gather audio data
-        let _audio_spectrum = audio_provider.get_spectrum();
+        let audio_spectrum = audio_provider.get_spectrum();
         let audio_level = audio_provider.get_level();
         render_state.uniforms.u_audio_level = audio_level;
+
+        // Upload audio spectrum to GPU texture
+        render_state.update_audio_spectrum(&audio_spectrum);
+
+        // Advance slideshow if active
+        render_state.update_slideshow(dt as f64);
+
+        // Decode and upload next video frame at the video's native FPS
+        if let Some(ref mut decoder) = video_decoder {
+            video_frame_accum += dt as f64;
+            while video_frame_accum >= VIDEO_FRAME_INTERVAL {
+                video_frame_accum -= VIDEO_FRAME_INTERVAL;
+                let (vw, vh) = decoder.dimensions();
+                match decoder.next_frame() {
+                    Some(rgba_data) => {
+                        render_state.update_video_frame(rgba_data, vw, vh);
+                    }
+                    None => {
+                        // End of video — loop back to start
+                        if let Err(e) = decoder.seek(0.0) {
+                            log::warn!("Video seek-to-start failed: {}", e);
+                        }
+                        break; // Don't try more frames after seek
+                    }
+                }
+            }
+        }
 
         // Render frame
         render_state.render_frame()?;
@@ -319,6 +686,16 @@ fn main() -> Result<()> {
                 status.fps = current_fps;
                 status.paused = paused;
                 status.loaded_shade = current_shade_path.clone();
+                status.cpu_usage = render_state.uniforms.u_cpu * 100.0;
+                status.ram_usage = render_state.uniforms.u_ram * 100.0;
+                status.battery = if render_state.uniforms.u_battery >= 0.0 {
+                    Some(render_state.uniforms.u_battery * 100.0)
+                } else {
+                    None
+                };
+                status.audio_level = render_state.uniforms.u_audio_level;
+                status.cursor_x = render_state.uniforms.u_mouse[0];
+                status.cursor_y = render_state.uniforms.u_mouse[1];
             }
         }
 
@@ -328,4 +705,72 @@ fn main() -> Result<()> {
             std::thread::sleep(frame_budget - elapsed);
         }
     }
+}
+
+/// Parse a shader compile error message and extract line/column numbers.
+///
+/// Handles patterns like:
+/// - `error: 5:23: 'foo' : ...` (shaderc format: `source:line`)
+/// - `error at line 42` (generic)
+fn parse_compile_error(msg: &str) -> kroma_shared::ipc::CompileError {
+    // shaderc pattern: "N:LINE:" where N is the source id
+    // Look for two consecutive numbers separated by colon followed by colon
+    if let Some(line_num) = extract_shaderc_line(msg) {
+        return kroma_shared::ipc::CompileError {
+            message: msg.to_string(),
+            line: Some(line_num),
+            column: None,
+        };
+    }
+
+    // Generic "line N" pattern (case-insensitive manual search)
+    let lower = msg.to_lowercase();
+    if let Some(idx) = lower.find("line ") {
+        let after = &msg[idx + 5..];
+        let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = num_str.parse::<u32>() {
+            return kroma_shared::ipc::CompileError {
+                message: msg.to_string(),
+                line: Some(n),
+                column: None,
+            };
+        }
+    }
+
+    kroma_shared::ipc::CompileError {
+        message: msg.to_string(),
+        line: None,
+        column: None,
+    }
+}
+
+/// Extract line number from shaderc-style error messages (e.g., "0:42: error").
+fn extract_shaderc_line(msg: &str) -> Option<u32> {
+    // Find patterns like "N:LINE:" where both are digits
+    let bytes = msg.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for a digit followed by ':'
+        if bytes[i].is_ascii_digit() {
+            // Skip the source ID digits
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b':' {
+                i += 1;
+                // Now try to parse the line number
+                let start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i > start && i < bytes.len() && bytes[i] == b':' {
+                    if let Ok(line) = msg[start..i].parse::<u32>() {
+                        return Some(line);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }
