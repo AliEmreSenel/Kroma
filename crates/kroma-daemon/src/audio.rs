@@ -62,14 +62,14 @@ impl AudioProvider for SimulatedAudioProvider {
                 let v = (t * 2.0 + freq * 20.0).sin() * 0.5 + 0.5;
                 // Simulate bass-heavy spectrum
                 let bass_falloff = 1.0 - (freq * 2.0).min(1.0);
-                (v * bass_falloff).max(0.0).min(1.0)
+                (v * bass_falloff).clamp(0.0, 1.0)
             })
             .collect()
     }
 
     fn get_level(&self) -> f32 {
         let t = self.start_time.elapsed().as_secs_f32();
-        ((t * 1.5).sin() * 0.5 + 0.5).max(0.0).min(1.0)
+        ((t * 1.5).sin() * 0.5 + 0.5).clamp(0.0, 1.0)
     }
 }
 
@@ -180,8 +180,8 @@ impl CpalAudioProvider {
                                     log::info!("Audio: found monitor device via substring: {}", name);
                                     // We need to return owned device, re-enumerate
                                     drop(all);
-                                    return host.input_devices().ok().and_then(|devs| {
-                                        devs.filter(|d2| d2.name().ok().as_deref() == Some(&name)).next()
+                                    return host.input_devices().ok().and_then(|mut devs| {
+                                        devs.find(|d2| d2.name().ok().as_deref() == Some(&name))
                                     });
                                 }
                             }
@@ -196,8 +196,8 @@ impl CpalAudioProvider {
                                 {
                                     log::info!("Audio: found fallback device via substring: {}", name);
                                     drop(all);
-                                    return host.input_devices().ok().and_then(|devs| {
-                                        devs.filter(|d2| d2.name().ok().as_deref() == Some(&name)).next()
+                                    return host.input_devices().ok().and_then(|mut devs| {
+                                        devs.find(|d2| d2.name().ok().as_deref() == Some(&name))
                                     });
                                 }
                             }
@@ -317,29 +317,29 @@ impl CpalAudioProvider {
                     let mut spectrum = vec![0.0f32; SPECTRUM_BANDS];
                     let bins_per_band = half as f32 / SPECTRUM_BANDS as f32;
 
-                    for band in 0..SPECTRUM_BANDS {
+                    for (band, spectrum_val) in spectrum.iter_mut().enumerate().take(SPECTRUM_BANDS) {
                         let start_bin = (band as f32 * bins_per_band) as usize;
                         let end_bin = ((band + 1) as f32 * bins_per_band) as usize;
                         let end_bin = end_bin.min(half);
 
                         if start_bin < end_bin {
                             let mut sum = 0.0f32;
-                            for bin in start_bin..end_bin {
-                                let mag = fft_input[bin].norm();
+                            for item in fft_input.iter().take(end_bin).skip(start_bin) {
+                                let mag = item.norm();
                                 sum += mag;
                             }
                             let avg = sum / (end_bin - start_bin) as f32;
                             // Convert to dB-like scale and normalize
                             let db = 20.0 * (avg + 1e-10).log10();
-                            let normalized = ((db + 60.0) / 60.0).max(0.0).min(1.0);
-                            spectrum[band] = normalized;
+                            let normalized = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+                            *spectrum_val = normalized;
                         }
                     }
 
                     *spectrum_writer_fft.lock().unwrap_or_else(|e| e.into_inner()) = spectrum;
                 }
             })
-            .expect("Failed to spawn FFT thread");
+            .map_err(|e| anyhow::anyhow!("Failed to spawn FFT thread: {}", e))?;
 
         // Build audio input stream
         let channels = config.channels() as usize;
@@ -375,7 +375,7 @@ impl CpalAudioProvider {
                         let mut buffer = buf.lock().unwrap_or_else(|e| e.into_inner());
                         for chunk in data.chunks(channels) {
                             let mono: f32 = chunk.iter()
-                                .map(|&s| s as f32 / i16::MAX as f32)
+                                .map(|&s| s as f32 / 32768.0)
                                 .sum::<f32>() / channels as f32;
                             buffer.push(mono);
                         }

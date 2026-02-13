@@ -6,6 +6,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Context;
 use glam::Vec2;
 use log::debug;
 use sysinfo::System;
@@ -20,7 +21,7 @@ pub struct SystemDataProvider {
 }
 
 impl SystemDataProvider {
-    pub fn new() -> Self {
+    pub fn new() -> anyhow::Result<Self> {
         // Use System::new() instead of System::new_all() — new_all() enumerates
         // every process, disk, network interface, etc. which is extremely slow.
         // We only need CPU usage and memory stats.
@@ -30,7 +31,7 @@ impl SystemDataProvider {
         // Note: CPU usage requires two calls to get meaningful values —
         // the first call establishes a baseline, the second computes deltas.
         {
-            let mut s = sys.lock().unwrap();
+            let mut s = sys.lock().unwrap_or_else(|e| e.into_inner());
             s.refresh_cpu_usage();
             s.refresh_memory();
             // Sleep briefly then refresh again so cpu_usage() returns non-zero
@@ -46,13 +47,13 @@ impl SystemDataProvider {
                 loop {
                     std::thread::sleep(Duration::from_secs(1));
                     {
-                        let mut s = sys_clone.lock().unwrap();
+                        let mut s = sys_clone.lock().unwrap_or_else(|e| e.into_inner());
                         s.refresh_cpu_usage();
                         s.refresh_memory();
                     }
                 }
             })
-            .expect("Failed to spawn sysinfo thread");
+            .context("Failed to spawn sysinfo thread")?;
 
         // Spawn a background thread that queries cursor position.
         // Uses hyprctl on Hyprland, or /dev/input fallback.
@@ -69,7 +70,7 @@ impl SystemDataProvider {
                 loop {
                     match query_hyprland_cursor() {
                         Ok(pos) => {
-                            *cursor_clone.lock().unwrap() = pos;
+                            *cursor_clone.lock().unwrap_or_else(|e| e.into_inner()) = pos;
                         }
                         Err(_) => {
                             debug!("Could not query Hyprland cursor position");
@@ -78,9 +79,9 @@ impl SystemDataProvider {
                     std::thread::sleep(Duration::from_millis(33)); // ~30 Hz
                 }
             })
-            .expect("Failed to spawn cursor thread");
+            .context("Failed to spawn cursor thread")?;
 
-        Self { sys, cursor_pos }
+        Ok(Self { sys, cursor_pos })
     }
 }
 
@@ -92,7 +93,7 @@ impl DataProvider for SystemDataProvider {
     }
 
     fn get_system_stats(&self) -> SystemStats {
-        let sys = self.sys.lock().unwrap();
+        let sys = self.sys.lock().unwrap_or_else(|e| e.into_inner());
         let cpu_usage = sys.global_cpu_usage();
         let ram_total = sys.total_memory();
         let ram_used = sys.used_memory();
@@ -108,7 +109,7 @@ impl DataProvider for SystemDataProvider {
     }
 
     fn get_cursor_pos(&self) -> Vec2 {
-        *self.cursor_pos.lock().unwrap()
+        *self.cursor_pos.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 

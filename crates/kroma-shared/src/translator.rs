@@ -7,10 +7,55 @@
 //! 4. Generating a skeleton `config.toml`.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use regex::Regex;
 
 use crate::types::{ShadeConfig, ShadeMeta, TextureDef, UniformDef};
+
+/// Pre-compiled regex for a word-boundary match.
+fn word_regex(word: &str) -> Regex {
+    Regex::new(&format!(r"\b{}\b", regex::escape(word))).expect("valid regex")
+}
+
+/// Statically compiled regexes for UNIFORM_MAP and SEMANTIC_MAP replacements.
+static UNIFORM_REGEXES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    UNIFORM_MAP.iter().map(|&(from, to)| (word_regex(from), to)).collect()
+});
+
+static SEMANTIC_REGEXES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    SEMANTIC_MAP.iter().map(|&(from, to)| (word_regex(from), to)).collect()
+});
+
+static TEXTURE_FIX_REGEXES: LazyLock<Vec<(Regex, &'static str, &'static str, &'static str)>> = LazyLock::new(|| {
+    [
+        ("texture2D", "texture"),
+        ("textureCube", "texture"),
+        ("texture2DLod", "textureLod"),
+        ("textureCubeLod", "textureLod"),
+    ].iter().map(|&(old, new)| (word_regex(old), new, old, new)).collect()
+});
+
+static VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"#version\s+\d+(\s+\w+)?\s*\n?").expect("valid regex")
+});
+
+static PRECISION_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bprecision\s+(lowp|mediump|highp)\s+\w+\s*;\s*\n?").expect("valid regex")
+});
+
+static HAS_MAIN_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\bvoid\s+mainImage\s*\(").expect("valid regex")
+});
+
+static MAIN_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"void\s+mainImage\s*\(\s*out\s+vec4\s+(\w+)\s*,\s*(?:in\s+)?vec2\s+(\w+)\s*\)")
+        .expect("valid regex")
+});
+
+static CHANNEL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\biChannel(\d+)\b").expect("valid regex")
+});
 
 /// Result of a successful translation.
 #[derive(Debug, Clone)]
@@ -83,19 +128,15 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
     // ------------------------------------------------------------------
     // Step 1: Replace Shadertoy uniforms with Kroma equivalents
     // ------------------------------------------------------------------
-    for &(shadertoy_name, kroma_name) in UNIFORM_MAP {
-        let re = Regex::new(&format!(r"\b{}\b", regex::escape(shadertoy_name)))
-            .expect("valid regex");
+    for (re, kroma_name) in UNIFORM_REGEXES.iter() {
         if re.is_match(&output) {
-            output = re.replace_all(&output, kroma_name).to_string();
+            output = re.replace_all(&output, *kroma_name).to_string();
         }
     }
     // Semantic replacements (type-wrapping)
-    for &(shadertoy_name, replacement) in SEMANTIC_MAP {
-        let re = Regex::new(&format!(r"\b{}\b", regex::escape(shadertoy_name)))
-            .expect("valid regex");
+    for (re, replacement) in SEMANTIC_REGEXES.iter() {
         if re.is_match(&output) {
-            output = re.replace_all(&output, replacement).to_string();
+            output = re.replace_all(&output, *replacement).to_string();
         }
     }
 
@@ -105,34 +146,23 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
     output = fix_mat_constructors(&output, &mut warnings);
 
     // Replace legacy GLSL texture functions with GLSL 450 equivalents
-    let texture_fixes: &[(&str, &str)] = &[
-        ("texture2D", "texture"),
-        ("textureCube", "texture"),
-        ("texture2DLod", "textureLod"),
-        ("textureCubeLod", "textureLod"),
-    ];
-    for &(old, new) in texture_fixes {
-        let re = Regex::new(&format!(r"\b{}\b", regex::escape(old)))
-            .expect("valid regex");
+    for (re, _new, old, new) in TEXTURE_FIX_REGEXES.iter() {
         if re.is_match(&output) {
-            output = re.replace_all(&output, new).to_string();
+            output = re.replace_all(&output, *new).to_string();
             warnings.push(format!("Replaced {} with {} for GLSL 450.", old, new));
         }
     }
 
     // Remove any #version directives from the source (we prepend our own)
-    let version_re = Regex::new(r"#version\s+\d+(\s+\w+)?\s*\n?").expect("valid regex");
-    output = version_re.replace_all(&output, "").to_string();
+    output = VERSION_RE.replace_all(&output, "").to_string();
 
     // Remove any precision qualifiers (not valid in GLSL 450 with Vulkan)
-    let precision_re = Regex::new(r"\bprecision\s+(lowp|mediump|highp)\s+\w+\s*;\s*\n?")
-        .expect("valid regex");
-    output = precision_re.replace_all(&output, "").to_string();
+    output = PRECISION_RE.replace_all(&output, "").to_string();
 
     // ------------------------------------------------------------------
     // Step 2: Detect and replace iChannelN texture samplers
     // ------------------------------------------------------------------
-    let channel_re = Regex::new(r"\biChannel(\d+)\b").expect("valid regex");
+    let channel_re = &*CHANNEL_RE;
     for cap in channel_re.captures_iter(source) {
         if let Some(m) = cap.get(1) {
             let idx: u32 = m.as_str().parse().unwrap_or(0);
@@ -149,7 +179,7 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
     for (binding_idx, idx) in sorted_channels.iter().enumerate() {
         let from = format!("iChannel{}", idx);
         let to = format!("sampler2D(kroma_tex_{}, kroma_samp_{})", binding_idx, binding_idx);
-        let re = Regex::new(&format!(r"\b{}\b", regex::escape(&from))).expect("valid regex");
+        let re = word_regex(&from);
         output = re.replace_all(&output, to.as_str()).to_string();
     }
 
@@ -161,16 +191,12 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
     // ------------------------------------------------------------------
     // Step 4: Wrap mainImage() → main()
     // ------------------------------------------------------------------
-    let has_main_image = Regex::new(r"\bvoid\s+mainImage\s*\(")
-        .expect("valid regex")
-        .is_match(&output);
+    let has_main_image = HAS_MAIN_IMAGE_RE.is_match(&output);
 
     if has_main_image {
         // Replace the mainImage signature
         // Note: `in` qualifier is optional — many Shadertoy shaders omit it
-        let main_image_re =
-            Regex::new(r"void\s+mainImage\s*\(\s*out\s+vec4\s+(\w+)\s*,\s*(?:in\s+)?vec2\s+(\w+)\s*\)")
-                .expect("valid regex");
+        let main_image_re = &*MAIN_IMAGE_RE;
 
         if let Some(caps) = main_image_re.captures(&output) {
             let frag_color_name = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_else(|| "fragColor".into());
@@ -196,11 +222,32 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
                     output = format!("{}\n{}{}", before, locals, after);
                 }
 
-                // Append output assignment before the closing brace
-                if let Some(last_brace) = output.rfind('}') {
-                    let writeback =
-                        format!("    kroma_out_color = {};\n", frag_color_name);
-                    output.insert_str(last_brace, &writeback);
+                // Append output assignment before the closing brace of kroma_main.
+                // Find the matching closing brace by counting depth from the opening brace.
+                if let Some(main_pos) = output.find("void kroma_main()") {
+                    if let Some(open_rel) = output[main_pos..].find('{') {
+                        let open_abs = main_pos + open_rel;
+                        let mut depth = 0;
+                        let mut close_pos = None;
+                        for (i, ch) in output[open_abs..].char_indices() {
+                            match ch {
+                                '{' => depth += 1,
+                                '}' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        close_pos = Some(open_abs + i);
+                                        break;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let Some(pos) = close_pos {
+                            let writeback =
+                                format!("    kroma_out_color = {};\n", frag_color_name);
+                            output.insert_str(pos, &writeback);
+                        }
+                    }
                 }
             }
         } else {
@@ -275,12 +322,8 @@ layout(location = 0) out vec4 kroma_out_color;
         textures.insert(
             channel_name,
             TextureDef {
-                ty: if *idx == 0 {
-                    "video".into()
-                } else {
-                    "image".into()
-                },
-                source: Some(format!("assets/channel{}.mp4", idx)),
+                ty: "image".into(),
+                source: Some(format!("assets/channel{}.png", idx)),
                 looping: true,
                 filter: Default::default(),
                 wrap: Default::default(),
@@ -390,11 +433,8 @@ fn fix_mat_constructors(src: &str, warnings: &mut Vec<String>) -> String {
 
     let mat2_needle = "mat2(";
 
-    loop {
-        let pos = match output[search_from..].find(mat2_needle) {
-            Some(p) => search_from + p,
-            None => break,
-        };
+    while let Some(p) = output[search_from..].find(mat2_needle) {
+        let pos = search_from + p;
 
         // Make sure this isn't part of a longer identifier (e.g. imat2)
         if pos > 0 {
@@ -457,7 +497,7 @@ fn fix_mat_constructors(src: &str, warnings: &mut Vec<String>) -> String {
 
             // Find the statement start (work backwards to find ; or { or newline)
             let stmt_start = output[..pos]
-                .rfind(|c: char| c == ';' || c == '{' || c == '\n')
+                .rfind([';', '{', '\n'])
                 .map(|p| p + 1)
                 .unwrap_or(0);
 

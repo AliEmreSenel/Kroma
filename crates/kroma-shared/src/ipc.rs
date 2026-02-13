@@ -50,15 +50,37 @@ pub enum DaemonCommand {
     /// Query real-time system info (CPU, RAM, battery, cursor, audio).
     /// The daemon responds with a `DaemonEvent::SystemInfo`.
     QuerySystemInfo,
+
+    /// Request a single preview frame from the daemon.
+    /// The daemon renders at reduced resolution, JPEG-encodes, and responds
+    /// with `DaemonEvent::PreviewFrame`.
+    RequestPreviewFrame {
+        /// Render width (e.g., 1/4 of monitor width).
+        width: u32,
+        /// Render height.
+        height: u32,
+    },
+
+    /// Start continuous preview frame streaming at the given FPS.
+    StartPreviewStream {
+        width: u32,
+        height: u32,
+        /// Target frames per second for the preview stream.
+        target_fps: u32,
+    },
+
+    /// Stop the preview frame stream.
+    StopPreviewStream,
 }
 
 /// Runtime uniform value (matches types in `config.toml`).
+/// Variant order matters for `#[serde(untagged)]` — more specific types first.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UniformValue {
-    Float(f64),
     Bool(bool),
     Int(i64),
+    Float(f64),
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +124,17 @@ pub enum DaemonEvent {
         audio_level: f32,
         cursor_x: f32,
         cursor_y: f32,
+    },
+
+    /// A single preview frame rendered by the daemon.
+    /// The image data is base64-encoded JPEG.
+    PreviewFrame {
+        /// Base64-encoded JPEG image data.
+        jpeg_base64: String,
+        /// Width of the rendered frame.
+        width: u32,
+        /// Height of the rendered frame.
+        height: u32,
     },
 }
 

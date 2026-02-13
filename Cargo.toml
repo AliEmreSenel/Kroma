@@ -61,6 +61,9 @@ bytemuck = { version = "1", features = ["derive"] }
 # Image decoding
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 
+# Base64 encoding for IPC binary data
+base64 = "0.22"
+
 # Audio
 cpal = "0.15"
 rustfft = "6"
@@ -72,7 +75,7 @@ ffmpeg-next = "8"
 fontdue = "0.9"
 
 # GUI
-iced = { version = "0.13", features = ["tokio", "canvas"] }
+iced = { version = "0.13", features = ["tokio", "canvas", "image"] }
 rfd = "0.15"
 
 # HTTP client

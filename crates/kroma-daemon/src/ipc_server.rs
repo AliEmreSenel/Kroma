@@ -16,6 +16,9 @@ use log::{error, info};
 
 use kroma_shared::ipc::{socket_path, DaemonCommand, DaemonEvent};
 
+/// Return type for [`start`]: join handle, shared status, and preview stream state.
+type IpcStartResult = (JoinHandle<()>, Arc<Mutex<DaemonStatus>>, Arc<Mutex<PreviewStreamState>>);
+
 /// Internal command wrapper that includes an optional response channel.
 ///
 /// For commands that produce results (LiveReload, LoadShade, Reload),
@@ -41,6 +44,23 @@ pub struct DaemonStatus {
     pub cursor_y: f32,
 }
 
+/// Shared state for preview frame streaming.
+pub struct PreviewStreamState {
+    /// Whether streaming is active.
+    pub active: bool,
+    /// Target frames per second for the preview stream.
+    pub target_fps: u32,
+    /// Requested preview width.
+    pub width: u32,
+    /// Requested preview height.
+    pub height: u32,
+    /// Writer to send frames back to the connected client.
+    /// Only set when a streaming client is connected.
+    pub writer: Option<Box<dyn std::io::Write + Send>>,
+    /// Last frame send time for throttling.
+    pub last_frame_time: std::time::Instant,
+}
+
 impl Default for DaemonStatus {
     fn default() -> Self {
         Self {
@@ -59,9 +79,8 @@ impl Default for DaemonStatus {
 
 /// Start the IPC listener on a background thread.
 ///
-/// Returns a join handle and a shared status object that the main loop
-/// should update periodically.
-pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<(JoinHandle<()>, Arc<Mutex<DaemonStatus>>)> {
+/// Returns a join handle, shared status, and shared preview stream state.
+pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<IpcStartResult> {
     let path = socket_path();
 
     // Remove stale socket if it exists
@@ -78,6 +97,16 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<(JoinHandle<()>, Arc<Mut
     let status = Arc::new(Mutex::new(DaemonStatus::default()));
     let status_clone = Arc::clone(&status);
 
+    let preview_state = Arc::new(Mutex::new(PreviewStreamState {
+        active: false,
+        target_fps: 15,
+        width: 480,
+        height: 270,
+        writer: None,
+        last_frame_time: std::time::Instant::now(),
+    }));
+    let preview_state_clone = Arc::clone(&preview_state);
+
     let handle = std::thread::Builder::new()
         .name("kroma-ipc".into())
         .spawn(move || {
@@ -86,6 +115,7 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<(JoinHandle<()>, Arc<Mut
                     Ok(stream) => {
                         let tx = cmd_tx.clone();
                         let status = Arc::clone(&status_clone);
+                        let preview = Arc::clone(&preview_state_clone);
                         std::thread::spawn(move || {
                             let writer = match stream.try_clone() {
                                 Ok(cloned) => cloned,
@@ -138,6 +168,68 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<(JoinHandle<()>, Arc<Mut
                                                     audio_level: s.audio_level,
                                                     cursor_x: s.cursor_x,
                                                     cursor_y: s.cursor_y,
+                                                };
+                                                if let Ok(json) = serde_json::to_string(&event) {
+                                                    let _ = writeln!(writer, "{}", json);
+                                                    let _ = writer.flush();
+                                                }
+                                            }
+                                            Ok(DaemonCommand::StartPreviewStream { width, height, target_fps }) => {
+                                                log::info!("Preview stream started: {}x{} @ {} fps", width, height, target_fps);
+                                                let stream_writer = match writer.try_clone() {
+                                                    Ok(w) => w,
+                                                    Err(e) => {
+                                                        log::warn!("Failed to clone writer for preview: {}", e);
+                                                        continue;
+                                                    }
+                                                };
+                                                {
+                                                    let mut ps = preview.lock().unwrap_or_else(|e| e.into_inner());
+                                                    if ps.writer.is_some() {
+                                                        log::warn!("Preview stream: replacing existing client connection");
+                                                    }
+                                                    ps.active = true;
+                                                    ps.width = width;
+                                                    ps.height = height;
+                                                    ps.target_fps = target_fps;
+                                                    ps.writer = Some(Box::new(stream_writer));
+                                                    ps.last_frame_time = std::time::Instant::now();
+                                                }
+                                                let ack = DaemonEvent::Ready;
+                                                if let Ok(json) = serde_json::to_string(&ack) {
+                                                    let _ = writeln!(writer, "{}", json);
+                                                    let _ = writer.flush();
+                                                }
+                                            }
+                                            Ok(DaemonCommand::StopPreviewStream) => {
+                                                log::info!("Preview stream stopped");
+                                                {
+                                                    let mut ps = preview.lock().unwrap_or_else(|e| e.into_inner());
+                                                    ps.active = false;
+                                                    ps.writer = None;
+                                                }
+                                                let ack = DaemonEvent::Ready;
+                                                if let Ok(json) = serde_json::to_string(&ack) {
+                                                    let _ = writeln!(writer, "{}", json);
+                                                    let _ = writer.flush();
+                                                }
+                                            }
+                                            Ok(DaemonCommand::RequestPreviewFrame { width: _w, height: _h }) => {
+                                                // One-shot frame request — the main loop will
+                                                // capture and send a single frame via response_tx.
+                                                let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+                                                let icmd = InternalCommand {
+                                                    command: DaemonCommand::RequestPreviewFrame { width: _w, height: _h },
+                                                    response_tx: Some(resp_tx),
+                                                };
+                                                if tx.send(icmd).is_err() {
+                                                    return;
+                                                }
+                                                let event = match resp_rx.recv_timeout(Duration::from_secs(5)) {
+                                                    Ok(ev) => ev,
+                                                    Err(_) => DaemonEvent::Error {
+                                                        message: "Preview frame timed out".into(),
+                                                    },
                                                 };
                                                 if let Ok(json) = serde_json::to_string(&event) {
                                                     let _ = writeln!(writer, "{}", json);
@@ -213,9 +305,22 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<(JoinHandle<()>, Arc<Mut
                                     }
                                     Err(e) => {
                                         error!("IPC read error: {}", e);
+                                        // Clean up preview state on disconnect
+                                        {
+                                            let mut ps = preview.lock().unwrap_or_else(|e| e.into_inner());
+                                            ps.active = false;
+                                            ps.writer = None;
+                                        }
                                         return;
                                     }
                                 }
+                            }
+
+                            // Client disconnected — clean up preview state
+                            {
+                                let mut ps = preview.lock().unwrap_or_else(|e| e.into_inner());
+                                ps.active = false;
+                                ps.writer = None;
                             }
                         });
                     }
@@ -227,5 +332,5 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<(JoinHandle<()>, Arc<Mut
         })
         .context("Failed to spawn IPC thread")?;
 
-    Ok((handle, status))
+    Ok((handle, status, preview_state))
 }

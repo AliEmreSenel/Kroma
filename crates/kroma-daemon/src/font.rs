@@ -84,7 +84,7 @@ pub fn rasterize_font_atlas(font_data: &[u8], font_size: f32) -> Result<FontAtla
 
     // Calculate atlas grid dimensions (roughly square)
     let cols = (num_glyphs as f32).sqrt().ceil() as u32;
-    let rows = ((num_glyphs as u32) + cols - 1) / cols;
+    let rows = (num_glyphs as u32).div_ceil(cols);
 
     let atlas_w = cols * cell_w;
     let atlas_h = rows * cell_h;

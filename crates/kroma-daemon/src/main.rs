@@ -31,7 +31,7 @@ fn try_create_video_decoder(
     pkg: &kroma_shared::shade::ShadePackage,
 ) -> Option<video::DefaultVideoDecoder> {
     // Find the first video texture source
-    for (_name, tex_def) in &pkg.config.textures {
+    for tex_def in pkg.config.textures.values() {
         if tex_def.ty == "video" {
             if let Some(ref source) = tex_def.source {
                 // Try loading from temp-extracted data first (for ZIP packages)
@@ -83,7 +83,17 @@ fn extract_video_to_temp(source: &str, data: &[u8]) -> Result<std::path::PathBuf
         .unwrap_or("mp4");
     let temp_dir = std::env::temp_dir().join("kroma-video");
     std::fs::create_dir_all(&temp_dir)?;
-    let temp_path = temp_dir.join(format!("video.{}", extension));
+    // Use a unique filename based on content hash to avoid clobbering
+    // when multiple video textures or daemon instances exist.
+    let hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        source.hash(&mut h);
+        data.len().hash(&mut h);
+        h.finish()
+    };
+    let temp_path = temp_dir.join(format!("video_{:016x}.{}", hash, extension));
     std::fs::write(&temp_path, data)?;
     log::info!("Extracted video to temp: {}", temp_path.display());
     Ok(temp_path)
@@ -100,7 +110,7 @@ fn main() -> Result<()> {
     // 0. Load daemon configuration
     // ---------------------------------------------------------------
     let daemon_config = config::DaemonConfig::load()?;
-    info!("Target FPS: {}, GPU power: {}", daemon_config.target_fps, daemon_config.gpu_power);
+    info!("Target FPS: {}, GPU power: {:?}", daemon_config.target_fps, daemon_config.gpu_power);
 
     // ---------------------------------------------------------------
     // 1. Detect session type and initialize the surface provider
@@ -248,7 +258,7 @@ fn main() -> Result<()> {
     // ---------------------------------------------------------------
     // 2. Start the data provider
     // ---------------------------------------------------------------
-    let data_provider = data::SystemDataProvider::new();
+    let data_provider = data::SystemDataProvider::new()?;
     info!("Data provider initialized");
 
     // ---------------------------------------------------------------
@@ -274,7 +284,7 @@ fn main() -> Result<()> {
     // 3. Start the IPC server (async, background)
     // ---------------------------------------------------------------
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
-    let (_ipc_handle, ipc_status) = ipc_server::start(cmd_tx)?;
+    let (_ipc_handle, ipc_status, preview_stream) = ipc_server::start(cmd_tx)?;
     info!("IPC server listening");
 
     // ---------------------------------------------------------------
@@ -564,6 +574,28 @@ fn main() -> Result<()> {
                 DaemonCommand::QuerySystemInfo => {
                     // Handled inline in ipc_server, shouldn't reach here
                 }
+                DaemonCommand::RequestPreviewFrame { width, height } => {
+                    match render_state.capture_preview_frame(width, height) {
+                        Ok(jpeg_bytes) => {
+                            use base64::Engine;
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
+                            send_response(&response_tx, DaemonEvent::PreviewFrame {
+                                jpeg_base64: b64,
+                                width,
+                                height,
+                            });
+                        }
+                        Err(e) => {
+                            log::warn!("Preview capture failed: {}", e);
+                            send_response(&response_tx, DaemonEvent::Error {
+                                message: format!("Preview capture failed: {}", e),
+                            });
+                        }
+                    }
+                }
+                DaemonCommand::StartPreviewStream { .. } | DaemonCommand::StopPreviewStream => {
+                    // Handled inline in ipc_server
+                }
                 DaemonCommand::LiveReload { glsl_source } => {
                     log::info!("Live reload: {} bytes of GLSL", glsl_source.len());
                     // Translate the raw Shadertoy GLSL with our translator first
@@ -668,11 +700,49 @@ fn main() -> Result<()> {
         render_state.render_frame()?;
         frame = frame.wrapping_add(1);
 
+        // Send preview frame if streaming is active
+        if let Ok(mut ps) = preview_stream.try_lock() {
+            if ps.active {
+                let interval = std::time::Duration::from_secs_f64(1.0 / ps.target_fps.max(1) as f64);
+                if ps.last_frame_time.elapsed() >= interval {
+                    let pw = ps.width;
+                    let ph = ps.height;
+                    match render_state.capture_preview_frame(pw, ph) {
+                        Ok(jpeg_bytes) => {
+                            use base64::Engine;
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
+                            let event = kroma_shared::ipc::DaemonEvent::PreviewFrame {
+                                jpeg_base64: b64,
+                                width: pw,
+                                height: ph,
+                            };
+                            if let Ok(json) = serde_json::to_string(&event) {
+                                if let Some(ref mut w) = ps.writer {
+                                    use std::io::Write;
+                                    if writeln!(w, "{}", json).is_err() || w.flush().is_err() {
+                                        // Writer broken — stop streaming
+                                        ps.active = false;
+                                        ps.writer = None;
+                                        log::info!("Preview stream client disconnected");
+                                    }
+                                }
+                            }
+                            ps.last_frame_time = std::time::Instant::now();
+                        }
+                        Err(e) => {
+                            log::warn!("Preview capture error: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
         // FPS tracking
         fps_counter += 1;
         if fps_timer.elapsed().as_secs_f32() >= 1.0 {
             current_fps = fps_counter as f32 / fps_timer.elapsed().as_secs_f32();
-            if frame % (daemon_config.target_fps * 5) < daemon_config.target_fps {
+            let log_interval = daemon_config.target_fps.max(1) * 5;
+            if frame % log_interval < daemon_config.target_fps.max(1) {
                 info!("FPS: {:.1} | time: {:.1}s | shader: {}",
                     current_fps,
                     start_time.elapsed().as_secs_f32(),

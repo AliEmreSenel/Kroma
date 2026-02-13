@@ -7,6 +7,17 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// GPU power preference.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuPower {
+    /// Prefer low power (integrated) GPU.
+    #[default]
+    Low,
+    /// Prefer high performance (discrete) GPU.
+    High,
+}
+
 /// Daemon-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -26,9 +37,9 @@ pub struct DaemonConfig {
     #[serde(default = "default_true")]
     pub pause_on_inactive: bool,
 
-    /// GPU power preference: "low" or "high".
-    #[serde(default = "default_power")]
-    pub gpu_power: String,
+    /// GPU power preference.
+    #[serde(default)]
+    pub gpu_power: GpuPower,
 
     /// Monitor-specific overrides.
     #[serde(default)]
@@ -53,9 +64,6 @@ fn default_fps() -> u32 {
 fn default_true() -> bool {
     true
 }
-fn default_power() -> String {
-    "low".into()
-}
 
 impl Default for DaemonConfig {
     fn default() -> Self {
@@ -64,7 +72,7 @@ impl Default for DaemonConfig {
             current_shade: None,
             pause_on_fullscreen: true,
             pause_on_inactive: true,
-            gpu_power: "low".into(),
+            gpu_power: GpuPower::Low,
             monitors: Vec::new(),
         }
     }
@@ -116,8 +124,13 @@ impl DaemonConfig {
     }
 
     /// Get the frame budget duration for the target FPS.
+    /// Returns `Duration::ZERO` when `target_fps` is 0 (no frame limiting).
     pub fn frame_budget(&self) -> std::time::Duration {
-        std::time::Duration::from_micros(1_000_000 / self.target_fps.max(1) as u64)
+        if self.target_fps == 0 {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_micros(1_000_000 / self.target_fps as u64)
+        }
     }
 }
 

@@ -53,11 +53,11 @@ impl ShadePackage {
         let preview = ["preview.jpg", "preview.png", "preview.webp"]
             .iter()
             .find_map(|name| {
-                archive.by_name(name).ok().map(|mut entry| {
+                archive.by_name(name).ok().and_then(|mut entry| {
                     let mut buf = Vec::new();
                     entry.read_to_end(&mut buf).ok()?;
                     Some(buf)
-                }).flatten()
+                })
             });
 
         // --- assets/ (optional) ---
@@ -66,6 +66,10 @@ impl ShadePackage {
             let mut entry = archive.by_index(i)?;
             let name = entry.name().to_string();
             if name.starts_with("assets/") && !entry.is_dir() {
+                // Reject path-traversal attempts (e.g., `assets/../../etc/passwd`)
+                if name.contains("..") {
+                    continue;
+                }
                 let mut buf = Vec::new();
                 entry.read_to_end(&mut buf)?;
                 assets.push((name, buf));
