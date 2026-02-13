@@ -104,7 +104,7 @@ unsafe fn find_ptr_offset(conn: &Connection) -> Option<usize> {
         }
         // Validate: a real pointer should be page-aligned or at least 8-byte aligned
         // (malloc returns 16-byte aligned on modern glibc)
-        if val % 8 != 0 {
+        if !val.is_multiple_of(8) {
             warn!("  offset {:2}: 0x{:x} — NOT 8-byte aligned, skipping", off, val);
             continue;
         }
@@ -277,7 +277,8 @@ impl WaylandSurfaceProvider {
                     scale: 1.0,
                 },
                 outputs.first().cloned().unwrap_or_else(|| {
-                    state.output_state.outputs().next().expect("at least one output")
+                    state.output_state.outputs().next()
+                        .unwrap_or_else(|| panic!("No Wayland outputs found — is the compositor running?"))
                 }),
             ));
         }
@@ -324,7 +325,7 @@ impl WaylandSurfaceProvider {
             .context("Second Wayland roundtrip failed")?;
 
         // Update surface configured state
-        let configured = state.configured_surfaces.lock().unwrap();
+        let configured = state.configured_surfaces.lock().unwrap_or_else(|e| e.into_inner());
         for (id, surface) in self.surfaces.iter_mut() {
             if let Some(&(w, h)) = configured.get(id) {
                 surface.configured = true;
@@ -512,7 +513,7 @@ impl LayerShellHandler for WaylandShellState {
         info!("Layer surface configured: {}x{}", w, h);
 
         // Store the configure event
-        let mut configured = self.configured_surfaces.lock().unwrap();
+        let mut configured = self.configured_surfaces.lock().unwrap_or_else(|e| e.into_inner());
         let id = configured.len() as u32;
         configured.insert(id, (w, h));
 

@@ -275,7 +275,10 @@ impl SurfaceProvider for X11SurfaceProvider {
         // Return an Xcb handle for wgpu compatibility.
         let wid = self.get_window_id(monitor.0)
             .ok_or_else(|| anyhow::anyhow!("No X11 window for monitor {}", monitor.0))?;
-        let handle = raw_window_handle::XcbWindowHandle::new(std::num::NonZeroU32::new(wid).unwrap().into());
+        let handle = raw_window_handle::XcbWindowHandle::new(
+            std::num::NonZeroU32::new(wid)
+                .ok_or_else(|| anyhow::anyhow!("X11 window ID is 0 for monitor {}", monitor.0))?
+        );
         Ok(raw_window_handle::RawWindowHandle::Xcb(handle))
     }
 

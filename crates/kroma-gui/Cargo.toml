@@ -26,3 +26,6 @@ rfd.workspace = true
 reqwest.workspace = true
 regex.workspace = true
 zip.workspace = true
+image.workspace = true
+base64.workspace = true
+libc = "0.2"

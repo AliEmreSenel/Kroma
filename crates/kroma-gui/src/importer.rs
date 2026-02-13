@@ -290,8 +290,9 @@ fn extract_shader_from_html(html: &str, shader_id: &str) -> Result<String> {
     // Or: gShaderToy.SetTexture(... and the code inside JS calls
 
     // Strategy: find "renderpass" and extract the "code" field for "type":"image"
+    // Allow one level of nested [...] to handle Shadertoy's "inputs" arrays
     let renderpass_re = regex::Regex::new(
-        r#""renderpass"\s*:\s*\[([^\]]*?"type"\s*:\s*"image"[^\]]*?)\]"#
+        r#""renderpass"\s*:\s*\[((?:[^\[\]]|\[[^\[\]]*?\])*?"type"\s*:\s*"image"(?:[^\[\]]|\[[^\[\]]*?\])*?)\]"#
     ).expect("valid regex");
 
     if let Some(caps) = renderpass_re.captures(html) {
@@ -303,10 +304,12 @@ fn extract_shader_from_html(html: &str, shader_id: &str) -> Result<String> {
             let raw_code = code_caps.get(1).unwrap().as_str();
             // Unescape JSON string escapes
             let code = raw_code
+                .replace("\\\\", "\x00")
                 .replace("\\n", "\n")
                 .replace("\\t", "\t")
+                .replace("\\r", "\r")
                 .replace("\\\"", "\"")
-                .replace("\\\\", "\\");
+                .replace("\x00", "\\");
             return Ok(code);
         }
     }
@@ -320,10 +323,12 @@ fn extract_shader_from_html(html: &str, shader_id: &str) -> Result<String> {
     if let Some(caps) = alt_re.captures(html) {
         let raw_code = caps.get(1).unwrap().as_str();
         let code = raw_code
+            .replace("\\\\", "\x00")
             .replace("\\n", "\n")
             .replace("\\t", "\t")
+            .replace("\\r", "\r")
             .replace("\\\"", "\"")
-            .replace("\\\\", "\\");
+            .replace("\x00", "\\");
         return Ok(code);
     }
 

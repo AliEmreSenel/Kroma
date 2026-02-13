@@ -10,6 +10,9 @@ pub struct ShaderGraph {
     connections: Vec<Connection>,
     next_node_id: u64,
     next_conn_id: u64,
+    /// Helper function definitions collected during GLSL parsing.
+    /// Each entry is `(name, full_glsl_source)` so they can be re-emitted.
+    pub helper_functions: Vec<(String, String)>,
 }
 
 impl Default for ShaderGraph {
@@ -30,6 +33,7 @@ impl ShaderGraph {
             connections: Vec::new(),
             next_node_id: 2,
             next_conn_id: 1,
+            helper_functions: Vec::new(),
         }
     }
 
@@ -68,6 +72,14 @@ impl ShaderGraph {
         self.connections.retain(|c| c.from.node != id && c.to.node != id);
     }
 
+    /// Re-insert a previously removed node (used for undo).
+    ///
+    /// This places the node back into the map without incrementing the ID
+    /// counter, preserving the original `NodeId`.
+    pub fn restore_node(&mut self, node: Node) {
+        self.nodes.insert(node.id, node);
+    }
+
     /// Try to add a connection. Returns None if types are incompatible or
     /// the input port is already connected.
     pub fn add_connection(&mut self, from: PortAddr, to: PortAddr) -> Option<ConnectionId> {
@@ -77,7 +89,12 @@ impl ShaderGraph {
         let from_def = from_node.outputs().get(from.port)?;
         let to_def = to_node.inputs().get(to.port)?;
 
-        if from_def.data_type != to_def.data_type && from_def.data_type != DataType::Float {
+        // Allow connections if types match, or Float can promote to any type,
+        // or any type can be implicitly read as Float (e.g., .x component)
+        if from_def.data_type != to_def.data_type
+            && from_def.data_type != DataType::Float
+            && to_def.data_type != DataType::Float
+        {
             return None;
         }
 
@@ -100,9 +117,10 @@ impl ShaderGraph {
     /// Force-add a connection without validation (used during parsing).
     pub fn force_add_connection(&mut self, from: PortAddr, to: PortAddr) {
         self.connections.retain(|c| c.to != to);
-        let next_id = self.connections.iter().map(|c| c.id.0).max().unwrap_or(0) + 1;
+        let id = ConnectionId(self.next_conn_id);
+        self.next_conn_id += 1;
         self.connections.push(Connection {
-            id: ConnectionId(next_id),
+            id,
             from,
             to,
         });
@@ -158,14 +176,22 @@ impl ShaderGraph {
 
         // Sources: nodes with no incoming edges
         for &id in &node_ids {
-            if in_edges.get(&id).map_or(true, |v| v.is_empty()) {
+            if in_edges.get(&id).is_none_or(|v| v.is_empty()) {
                 depth.insert(id, 0);
                 queue.push_back(id);
             }
         }
 
         // BFS relaxation (longest path in DAG)
+        // Guard against cycles: cap iterations to prevent infinite loops.
+        let max_iterations = node_ids.len() * node_ids.len();
+        let mut iterations = 0;
         while let Some(id) = queue.pop_front() {
+            iterations += 1;
+            if iterations > max_iterations {
+                eprintln!("[kroma-graph] auto_layout: iteration limit reached — graph may contain cycles");
+                break;
+            }
             let d = depth[&id];
             if let Some(successors) = out_edges.get(&id) {
                 for &succ in successors {
@@ -254,6 +280,13 @@ impl ShaderGraph {
         glsl.push_str("// Shadertoy-compatible fragment shader\n\n");
 
         glsl.push_str(&nodes::helper_functions(&self.nodes));
+
+        // Emit helper functions stored during GLSL parsing
+        for (_name, source) in &self.helper_functions {
+            glsl.push_str(source);
+            glsl.push_str("\n\n");
+        }
+
         glsl.push('\n');
 
         glsl.push_str("void mainImage(out vec4 fragColor, in vec2 fragCoord) {\n");
@@ -262,9 +295,9 @@ impl ShaderGraph {
             glsl.push_str(line);
             glsl.push('\n');
         }
-        glsl.push_str("    fragColor = vec4(");
+        glsl.push_str("    fragColor = ");
         glsl.push_str(&color_expr);
-        glsl.push_str(");\n}\n");
+        glsl.push_str(";\n}\n");
 
         Ok(glsl)
     }
@@ -277,8 +310,15 @@ impl ShaderGraph {
         counter: &mut u32,
     ) -> Result<String, String> {
         if let Some(expr) = visited.get(&id) {
+            // A sentinel of "" means we're currently evaluating this node (cycle).
+            if expr.is_empty() {
+                return Err(format!("Cycle detected at node {:?}", id));
+            }
             return Ok(expr.clone());
         }
+
+        // Mark as "currently evaluating" to detect cycles
+        visited.insert(id, String::new());
 
         let node = self.nodes.get(&id).ok_or("Missing node in graph")?;
 
@@ -305,12 +345,88 @@ impl ShaderGraph {
         let var = format!("n{}", counter);
         *counter += 1;
 
-        let snippet = node.kind.codegen(&input_exprs, &var, &node.defaults);
+        let snippet = node.kind.codegen(&input_exprs, &var, &node.defaults, &node.meta);
         if !snippet.is_empty() {
             code.push(snippet);
         }
 
         visited.insert(id, var.clone());
         Ok(var)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compile_empty_graph_uses_default_output() {
+        let graph = ShaderGraph::new();
+        let glsl = graph.compile_glsl().unwrap();
+        assert!(glsl.contains("void mainImage("));
+        // Default output is black with full alpha
+        assert!(glsl.contains("fragColor = vec4(0.0"));
+    }
+
+    #[test]
+    fn compile_time_to_output() {
+        let mut graph = ShaderGraph::new();
+        let time_id = graph.add_node(NodeKind::Time, [0.0, 0.0]);
+        let combine_id = graph.add_node(NodeKind::Combine4, [200.0, 0.0]);
+        // Connect Time→Combine4 port 0
+        graph.add_connection(
+            PortAddr { node: time_id, port: 0 },
+            PortAddr { node: combine_id, port: 0 },
+        );
+        // The Output node is always NodeId(1) in a new graph
+        let output_id = NodeId(1);
+        graph.add_connection(
+            PortAddr { node: combine_id, port: 0 },
+            PortAddr { node: output_id, port: 0 },
+        );
+        let glsl = graph.compile_glsl().unwrap();
+        assert!(glsl.contains("iTime"));
+        assert!(glsl.contains("vec4"));
+        assert!(glsl.contains("fragColor ="));
+    }
+
+    #[test]
+    fn compile_add_node_uses_inferred_type() {
+        let mut graph = ShaderGraph::new();
+        let add_id = graph.add_node(NodeKind::Add, [100.0, 0.0]);
+        let output_id = NodeId(1);
+        graph.add_connection(
+            PortAddr { node: add_id, port: 0 },
+            PortAddr { node: output_id, port: 0 },
+        );
+        let glsl = graph.compile_glsl().unwrap();
+        // Add with default Float inputs should declare a float variable
+        assert!(glsl.contains("float n"));
+    }
+
+    #[test]
+    fn cycle_detection_returns_error() {
+        let mut graph = ShaderGraph::new();
+        let a = graph.add_node(NodeKind::Add, [0.0, 0.0]);
+        let b = graph.add_node(NodeKind::Add, [100.0, 0.0]);
+        // A→B port 0
+        graph.add_connection(
+            PortAddr { node: a, port: 0 },
+            PortAddr { node: b, port: 0 },
+        );
+        // B→A port 0 — creates a cycle
+        graph.add_connection(
+            PortAddr { node: b, port: 0 },
+            PortAddr { node: a, port: 0 },
+        );
+        // Connect B to output to force traversal
+        let output_id = NodeId(1);
+        graph.add_connection(
+            PortAddr { node: b, port: 0 },
+            PortAddr { node: output_id, port: 0 },
+        );
+        let result = graph.compile_glsl();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Cycle"));
     }
 }

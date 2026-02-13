@@ -264,7 +264,8 @@ impl RenderState {
             .iter()
             .find(|f| f.is_srgb())
             .copied()
-            .unwrap_or(surface_caps.formats[0]);
+            .unwrap_or(*surface_caps.formats.first()
+                .context("No supported surface formats found")?);
 
         info!("Surface format: {:?}", format);
 
@@ -279,7 +280,8 @@ impl RenderState {
                 .iter()
                 .find(|m| **m == wgpu::CompositeAlphaMode::Opaque)
                 .copied()
-                .unwrap_or(surface_caps.alpha_modes[0]),
+                .unwrap_or_else(|| surface_caps.alpha_modes.first().copied()
+                    .unwrap_or(wgpu::CompositeAlphaMode::Auto)),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -464,7 +466,8 @@ impl RenderState {
             .iter()
             .find(|f| f.is_srgb())
             .copied()
-            .unwrap_or(surface_caps.formats[0]);
+            .unwrap_or(*surface_caps.formats.first()
+                .context("No supported surface formats found (X11)")?);
 
         info!("Surface format (X11): {:?}", format);
 
@@ -479,7 +482,8 @@ impl RenderState {
                 .iter()
                 .find(|m| **m == wgpu::CompositeAlphaMode::Opaque)
                 .copied()
-                .unwrap_or(surface_caps.alpha_modes[0]),
+                .unwrap_or_else(|| surface_caps.alpha_modes.first().copied()
+                    .unwrap_or(wgpu::CompositeAlphaMode::Auto)),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -665,8 +669,10 @@ impl RenderState {
         // texture slot that the video decoder will overwrite each frame.
         let has_video = pkg.config.textures.values().any(|t| t.ty == "video");
         if has_video && self.textures.is_empty() {
-            let device = self.device.as_ref().unwrap();
-            let queue = self.queue.as_ref().unwrap();
+            let device = self.device.as_ref()
+                .context("GPU not initialised — cannot create video placeholder")?;
+            let queue = self.queue.as_ref()
+                .context("GPU queue not initialised")?;
             let placeholder = Self::create_texture_from_raw_rgba(
                 device, queue,
                 &[0, 0, 0, 255], 1, 1,
@@ -764,8 +770,22 @@ impl RenderState {
         info!("Live reload: compiling {} bytes of GLSL...", glsl_source.len());
         let wgsl_source = glsl_to_wgsl(glsl_source)
             .context("Failed to translate GLSL shader to WGSL")?;
-        // Ensure pipeline layout includes texture bind groups if present
-        if self.texture_bind_group_layout.is_some() {
+        // glsl_to_wgsl always injects CustomUniforms at set=0 binding=1.
+        // Ensure the custom uniform buffer + BGL0 binding exists so the
+        // pipeline layout matches the shader's expected bindings.
+        if self.custom_uniform_buffer.is_none() {
+            let device = self.device.as_ref().context("GPU not initialised")?;
+            let buffer_size = (MAX_CUSTOM_UNIFORMS * std::mem::size_of::<f32>()) as u64;
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("kroma-custom-uniforms"),
+                size: buffer_size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.custom_uniform_buffer = Some(buffer);
+            self.rebuild_bind_group_0()?;
+        } else if self.texture_bind_group_layout.is_some() {
+            // Ensure pipeline layout includes texture bind groups if present
             self.rebuild_pipeline_layout()?;
         }
         self.rebuild_pipeline_with_frag(&wgsl_source)?;
@@ -856,8 +876,7 @@ impl RenderState {
         self.custom_uniform_indices.clear();
         self.custom_uniform_data = vec![0.0; MAX_CUSTOM_UNIFORMS];
 
-        let mut idx = 0;
-        for (name, def) in &config.uniforms {
+        for (idx, (name, def)) in config.uniforms.iter().enumerate() {
             if idx >= MAX_CUSTOM_UNIFORMS {
                 warn!("Maximum {} custom uniform slots reached — ignoring '{}'", MAX_CUSTOM_UNIFORMS, name);
                 break;
@@ -874,7 +893,6 @@ impl RenderState {
             }
 
             self.custom_uniform_indices.insert(name.clone(), idx);
-            idx += 1;
         }
 
         // Create the storage buffer
@@ -1110,7 +1128,8 @@ impl RenderState {
     fn load_package_textures(&mut self, pkg: &ShadePackage) -> Result<()> {
         let device = self.device.as_ref()
             .context("GPU not initialised — cannot load textures")?;
-        let queue = self.queue.as_ref().unwrap();
+        let queue = self.queue.as_ref()
+            .context("GPU queue not initialised")?;
 
         // Clear previous textures
         self.textures.clear();
@@ -1391,7 +1410,6 @@ impl RenderState {
     fn swap_slideshow_texture(&mut self, order_idx: usize) {
         let Some(ref slideshow) = self.slideshow else { return };
         let tex_idx = slideshow.order[order_idx];
-        let Some(ref slideshow) = self.slideshow else { return };
         let tex = &slideshow.all_textures[tex_idx];
 
         // We need to create a new bind group pointing to this texture.
@@ -1402,7 +1420,7 @@ impl RenderState {
             None => return,
         };
 
-        let layout_entries = vec![
+        let mut layout_entries = vec![
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1421,6 +1439,47 @@ impl RenderState {
             },
         ];
 
+        let mut group_entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&tex.view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&tex.sampler),
+            },
+        ];
+
+        // Preserve audio spectrum texture in the bind group if present
+        if let Some(ref audio) = self.audio_spectrum {
+            let tex_binding = 2u32;
+            let samp_binding = 3u32;
+            layout_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: tex_binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            });
+            layout_entries.push(wgpu::BindGroupLayoutEntry {
+                binding: samp_binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+            group_entries.push(wgpu::BindGroupEntry {
+                binding: tex_binding,
+                resource: wgpu::BindingResource::TextureView(&audio.view),
+            });
+            group_entries.push(wgpu::BindGroupEntry {
+                binding: samp_binding,
+                resource: wgpu::BindingResource::Sampler(&audio.sampler),
+            });
+        }
+
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("kroma-slideshow-bgl"),
             entries: &layout_entries,
@@ -1429,16 +1488,7 @@ impl RenderState {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kroma-slideshow-bg"),
             layout: &layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&tex.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&tex.sampler),
-                },
-            ],
+            entries: &group_entries,
         });
 
         self.texture_bind_group_layout = Some(layout);
@@ -1455,21 +1505,25 @@ impl RenderState {
     /// Called once per frame from the render loop with the frame's delta time.
     pub fn update_slideshow(&mut self, dt: f64) {
         let should_advance = if let Some(ref mut slideshow) = self.slideshow {
-            slideshow.timer += dt;
-            if slideshow.timer >= slideshow.interval {
-                slideshow.timer -= slideshow.interval;
-                slideshow.current = (slideshow.current + 1) % slideshow.order.len();
-                true
-            } else {
+            if slideshow.order.is_empty() {
                 false
+            } else {
+                slideshow.timer += dt;
+                if slideshow.timer >= slideshow.interval {
+                    slideshow.timer -= slideshow.interval;
+                    slideshow.current = (slideshow.current + 1) % slideshow.order.len();
+                    true
+                } else {
+                    false
+                }
             }
         } else {
             false
         };
 
-        if should_advance {
-            let idx = self.slideshow.as_ref().unwrap().current;
-            let total = self.slideshow.as_ref().unwrap().all_textures.len();
+        if let (true, Some(ref slideshow)) = (should_advance, &self.slideshow) {
+            let idx = slideshow.current;
+            let total = slideshow.all_textures.len();
             info!("Slideshow: advancing to image {} of {}", idx + 1, total);
             self.swap_slideshow_texture(idx);
         }
@@ -1650,7 +1704,8 @@ impl RenderState {
 
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let device = self.device.as_ref().unwrap();
+        let device = self.device.as_ref()
+            .context("GPU not initialised — cannot render frame")?;
         let pipeline = self.pipeline.as_ref();
         let bind_group = self.bind_group.as_ref();
 
@@ -1694,6 +1749,167 @@ impl RenderState {
         frame.present();
 
         Ok(())
+    }
+
+    /// Render the current shader to an offscreen texture and return JPEG bytes.
+    ///
+    /// This is used for the live preview stream — renders at a small resolution
+    /// and returns base64-encoded JPEG data.
+    pub fn capture_preview_frame(&mut self, width: u32, height: u32) -> Result<Vec<u8>> {
+        let device = self.device.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No GPU device"))?;
+        let queue = self.queue.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No GPU queue"))?;
+        let pipeline = self.pipeline.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No render pipeline"))?;
+        let bind_group = self.bind_group.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No bind group"))?;
+
+        let w = width.max(1);
+        let h = height.max(1);
+
+        // Use the same format as the active pipeline to avoid format mismatch
+        let format = self.surface_config.as_ref()
+            .map(|c| c.format)
+            .unwrap_or(SURFACE_FORMAT);
+
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("preview-capture"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let tex_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Bytes per row must be aligned to 256 for buffer copy
+        let bytes_per_pixel = 4u32;
+        let unpadded_bytes_per_row = w * bytes_per_pixel;
+        let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
+
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("preview-readback"),
+            size: (padded_bytes_per_row * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        // Upload uniforms with preview resolution
+        let mut preview_uniforms = self.uniforms;
+        preview_uniforms.u_resolution = [w as f32, h as f32];
+        if let Some(buf) = self.uniform_buffer.as_ref() {
+            queue.write_buffer(buf, 0, bytemuck::bytes_of(&preview_uniforms));
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("preview-capture-encoder"),
+        });
+
+        // Render pass
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("preview-render-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &tex_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            if let Some(ref tex_bg) = self.texture_bind_group {
+                pass.set_bind_group(1, tex_bg, &[]);
+            }
+            pass.draw(0..3, 0..1);
+        }
+
+        // Copy texture to buffer
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &output_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+
+        queue.submit(std::iter::once(encoder.finish()));
+
+        // Map the buffer and read back pixels
+        let buffer_slice = output_buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device.poll(wgpu::Maintain::Wait);
+
+        rx.recv()
+            .map_err(|_| anyhow::anyhow!("Buffer map channel closed"))?
+            .map_err(|e| anyhow::anyhow!("Buffer map failed: {:?}", e))?;
+
+        // Copy pixel data, removing row padding and converting BGRA → RGBA
+        let data = buffer_slice.get_mapped_range();
+        let mut rgba = Vec::with_capacity((w * h * bytes_per_pixel) as usize);
+        let is_bgra = matches!(format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+        for row in 0..h {
+            let start = (row * padded_bytes_per_row) as usize;
+            let end = start + unpadded_bytes_per_row as usize;
+            let row_data = &data[start..end];
+            for pixel in row_data.chunks_exact(4) {
+                if is_bgra {
+                    rgba.push(pixel[2]); // R (was B)
+                    rgba.push(pixel[1]); // G
+                    rgba.push(pixel[0]); // B (was R)
+                } else {
+                    rgba.push(pixel[0]); // R
+                    rgba.push(pixel[1]); // G
+                    rgba.push(pixel[2]); // B
+                }
+                rgba.push(pixel[3]); // A
+            }
+        }
+        drop(data);
+        output_buffer.unmap();
+
+        // Restore original resolution in uniform buffer
+        if let Some(buf) = self.uniform_buffer.as_ref() {
+            queue.write_buffer(buf, 0, bytemuck::bytes_of(&self.uniforms));
+        }
+
+        // Encode as JPEG — convert RGBA to RGB first (JPEG doesn't support alpha)
+        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
+        for pixel in rgba.chunks_exact(4) {
+            rgb.push(pixel[0]); // R
+            rgb.push(pixel[1]); // G
+            rgb.push(pixel[2]); // B
+        }
+        let img = image::RgbImage::from_raw(w, h, rgb)
+            .ok_or_else(|| anyhow::anyhow!("Failed to create image from pixels"))?;
+        let mut jpeg_bytes = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
+        img.write_to(&mut cursor, image::ImageFormat::Jpeg)
+            .context("JPEG encode failed")?;
+
+        Ok(jpeg_bytes)
     }
 
     /// Check if the GPU has been initialised with a real surface.
@@ -1808,7 +2024,11 @@ fn glsl_to_wgsl(glsl_source: &str) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("WGSL write error: {}", e))?;
 
     // Rename the fragment entry point from "main" to "fs_main"
-    wgsl_source = wgsl_source.replace("fn main(", "fn fs_main(");
+    // Only rename the entry point `fn main(`, not any helper function
+    // containing "main" in its name. Replace just the first occurrence.
+    if let Some(pos) = wgsl_source.find("fn main(") {
+        wgsl_source.replace_range(pos..pos + 8, "fn fs_main(");
+    }
 
     Ok(wgsl_source)
 }

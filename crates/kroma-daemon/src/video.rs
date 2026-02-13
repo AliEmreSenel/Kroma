@@ -108,7 +108,12 @@ impl VideoDecoder for FfmpegVideoDecoder {
 
         let video_stream_index = video_stream.index();
         let time_base = f64::from(video_stream.time_base());
-        let duration = video_stream.duration() as f64 * time_base;
+        let raw_duration = video_stream.duration();
+        let duration = if raw_duration <= 0 {
+            0.0
+        } else {
+            raw_duration as f64 * time_base
+        };
 
         let context_decoder =
             ffmpeg_next::codec::context::Context::from_parameters(video_stream.parameters())?;
@@ -151,6 +156,9 @@ impl VideoDecoder for FfmpegVideoDecoder {
     }
 
     fn seek(&mut self, timestamp: f64) -> Result<()> {
+        if self.time_base <= 0.0 {
+            anyhow::bail!("Cannot seek: stream has invalid time_base ({})", self.time_base);
+        }
         let ts = (timestamp / self.time_base) as i64;
         self.input
             .seek(ts, ..ts)

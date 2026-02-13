@@ -20,13 +20,6 @@ macro_rules! port {
 // We leak Box<[PortDef]> to get &'static [PortDef] because iced requires 'static.
 // This is fine — each variant is called once and cached.
 use std::sync::OnceLock;
-#[allow(unused_macros)]
-macro_rules! static_ports {
-    ($($e:expr),* $(,)?) => {{
-        static PORTS: OnceLock<Vec<PortDef>> = OnceLock::new();
-        PORTS.get_or_init(|| vec![$($e),*]).as_slice()
-    }};
-}
 
 // ---------------------------------------------------------------------------
 // Port definitions per kind
@@ -463,12 +456,21 @@ pub fn default_values(kind: &NodeKind) -> Vec<DefaultValue> {
 // GLSL code generation
 // ---------------------------------------------------------------------------
 
+/// Infer the GLSL type name from the node's defaults.
+/// Defaults to `"float"` if no defaults are available.
+fn infer_type(defaults: &[DefaultValue]) -> &'static str {
+    defaults.first()
+        .map(|d| d.data_type().glsl_type())
+        .unwrap_or("float")
+}
+
 /// Generate a GLSL statement for one node.  `inputs` are the variable names
 /// (or expressions) feeding each input port.  `var` is the output variable name
 /// this node should write to.  `defaults` are the node's configurable default values.
+/// `meta` is optional metadata (GlslExpr: expression template, CustomFunc: function name).
 ///
 /// Returns a string like `float n3 = sin(n1);`.
-pub fn codegen(kind: &NodeKind, inputs: &[String], var: &str, defaults: &[DefaultValue]) -> String {
+pub fn codegen(kind: &NodeKind, inputs: &[String], var: &str, defaults: &[DefaultValue], meta: &Option<String>) -> String {
     use NodeKind::*;
     match kind {
         // Output — handled specially in compile_glsl
@@ -504,45 +506,45 @@ pub fn codegen(kind: &NodeKind, inputs: &[String], var: &str, defaults: &[Defaul
         AudioLevel => format!("float {} = u_audio_level;", var),
         UV => format!("vec2 {} = fragCoord / iResolution.xy;", var),
 
-        // Binary math
-        Add => format!("float {} = {} + {};", var, a(inputs, 0), a(inputs, 1)),
-        Subtract => format!("float {} = {} - {};", var, a(inputs, 0), a(inputs, 1)),
-        Multiply => format!("float {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
-        Divide => format!("float {} = {} / max({}, 0.0001);", var, a(inputs, 0), a(inputs, 1)),
+        // Binary math — type inferred from defaults
+        Add => { let t = infer_type(defaults); format!("{t} {var} = {a} + {b};", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
+        Subtract => { let t = infer_type(defaults); format!("{t} {var} = {a} - {b};", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
+        Multiply => { let t = infer_type(defaults); format!("{t} {var} = {a} * {b};", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
+        Divide => { let t = infer_type(defaults); format!("{t} {var} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
         Power => format!("float {} = pow({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Mod => format!("float {} = mod({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Min => format!("float {} = min({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Max => format!("float {} = max({}, {});", var, a(inputs, 0), a(inputs, 1)),
+        Mod => { let t = infer_type(defaults); format!("{t} {var} = mod({a}, {b});", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
+        Min => { let t = infer_type(defaults); format!("{t} {var} = min({a}, {b});", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
+        Max => { let t = infer_type(defaults); format!("{t} {var} = max({a}, {b});", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
 
-        // Unary math
-        Sqrt => format!("float {} = sqrt(abs({}));", var, a(inputs, 0)),
-        Abs => format!("float {} = abs({});", var, a(inputs, 0)),
-        Negate => format!("float {} = -{};", var, a(inputs, 0)),
-        Sin => format!("float {} = sin({});", var, a(inputs, 0)),
-        Cos => format!("float {} = cos({});", var, a(inputs, 0)),
-        Tan => format!("float {} = tan({});", var, a(inputs, 0)),
-        Asin => format!("float {} = asin(clamp({}, -1.0, 1.0));", var, a(inputs, 0)),
-        Acos => format!("float {} = acos(clamp({}, -1.0, 1.0));", var, a(inputs, 0)),
-        Atan => format!("float {} = atan({});", var, a(inputs, 0)),
+        // Unary math — type inferred from defaults
+        Sqrt => { let t = infer_type(defaults); format!("{} {} = sqrt(abs({}));", t, var, a(inputs, 0)) }
+        Abs => { let t = infer_type(defaults); format!("{} {} = abs({});", t, var, a(inputs, 0)) }
+        Negate => { let t = infer_type(defaults); format!("{} {} = -{};", t, var, a(inputs, 0)) }
+        Sin => { let t = infer_type(defaults); format!("{} {} = sin({});", t, var, a(inputs, 0)) }
+        Cos => { let t = infer_type(defaults); format!("{} {} = cos({});", t, var, a(inputs, 0)) }
+        Tan => { let t = infer_type(defaults); format!("{} {} = tan({});", t, var, a(inputs, 0)) }
+        Asin => { let t = infer_type(defaults); format!("{} {} = asin(clamp({}, -1.0, 1.0));", t, var, a(inputs, 0)) }
+        Acos => { let t = infer_type(defaults); format!("{} {} = acos(clamp({}, -1.0, 1.0));", t, var, a(inputs, 0)) }
+        Atan => { let t = infer_type(defaults); format!("{} {} = atan({});", t, var, a(inputs, 0)) }
         Atan2 => format!("float {} = atan({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Exp => format!("float {} = exp({});", var, a(inputs, 0)),
-        Exp2 => format!("float {} = exp2({});", var, a(inputs, 0)),
-        Log => format!("float {} = log(max({}, 0.0001));", var, a(inputs, 0)),
-        Log2 => format!("float {} = log2(max({}, 0.0001));", var, a(inputs, 0)),
-        Sign => format!("float {} = sign({});", var, a(inputs, 0)),
-        Ceil => format!("float {} = ceil({});", var, a(inputs, 0)),
-        Round => format!("float {} = floor({} + 0.5);", var, a(inputs, 0)), // GLSL 1.30 compat
-        Fract => format!("float {} = fract({});", var, a(inputs, 0)),
-        Floor => format!("float {} = floor({});", var, a(inputs, 0)),
-        Saturate => format!("float {} = clamp({}, 0.0, 1.0);", var, a(inputs, 0)),
-        OneMinus => format!("float {} = 1.0 - {};", var, a(inputs, 0)),
-        InverseSqrt => format!("float {} = inversesqrt(max({}, 0.0001));", var, a(inputs, 0)),
+        Exp => { let t = infer_type(defaults); format!("{} {} = exp({});", t, var, a(inputs, 0)) }
+        Exp2 => { let t = infer_type(defaults); format!("{} {} = exp2({});", t, var, a(inputs, 0)) }
+        Log => { let t = infer_type(defaults); format!("{} {} = log(max({}, 0.0001));", t, var, a(inputs, 0)) }
+        Log2 => { let t = infer_type(defaults); format!("{} {} = log2(max({}, 0.0001));", t, var, a(inputs, 0)) }
+        Sign => { let t = infer_type(defaults); format!("{} {} = sign({});", t, var, a(inputs, 0)) }
+        Ceil => { let t = infer_type(defaults); format!("{} {} = ceil({});", t, var, a(inputs, 0)) }
+        Round => { let t = infer_type(defaults); format!("{} {} = floor({} + 0.5);", t, var, a(inputs, 0)) }
+        Fract => { let t = infer_type(defaults); format!("{} {} = fract({});", t, var, a(inputs, 0)) }
+        Floor => { let t = infer_type(defaults); format!("{} {} = floor({});", t, var, a(inputs, 0)) }
+        Saturate => { let t = infer_type(defaults); format!("{} {} = clamp({}, 0.0, 1.0);", t, var, a(inputs, 0)) }
+        OneMinus => { let t = infer_type(defaults); format!("{} {} = 1.0 - {};", t, var, a(inputs, 0)) }
+        InverseSqrt => { let t = infer_type(defaults); format!("{} {} = inversesqrt(max({}, 0.0001));", t, var, a(inputs, 0)) },
 
         // Ternary
-        Clamp => format!("float {} = clamp({}, {}, {});", var, a(inputs, 0), a(inputs, 1), a(inputs, 2)),
-        Mix => format!("vec4 {} = mix({}, {}, {});", var, a(inputs, 0), a(inputs, 1), a(inputs, 2)),
-        Step => format!("float {} = step({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        SmoothStep => format!("float {} = smoothstep({}, {}, {});", var, a(inputs, 0), a(inputs, 1), a(inputs, 2)),
+        Clamp => { let t = infer_type(defaults); format!("{} {} = clamp({}, {}, {});", t, var, a(inputs, 0), a(inputs, 1), a(inputs, 2)) }
+        Mix => { let t = infer_type(defaults); format!("{} {} = mix({}, {}, {});", t, var, a(inputs, 0), a(inputs, 1), a(inputs, 2)) }
+        Step => { let t = infer_type(defaults); format!("{} {} = step({}, {});", t, var, a(inputs, 0), a(inputs, 1)) }
+        SmoothStep => { let t = infer_type(defaults); format!("{} {} = smoothstep({}, {}, {});", t, var, a(inputs, 0), a(inputs, 1), a(inputs, 2)) }
 
         // Combine
         Combine2 => format!("vec2 {} = vec2({}, {});", var, a(inputs, 0), a(inputs, 1)),
@@ -562,12 +564,12 @@ pub fn codegen(kind: &NodeKind, inputs: &[String], var: &str, defaults: &[Defaul
 
         // Vector ops
         Length => format!("float {} = length({});", var, a(inputs, 0)),
-        Normalize => format!("vec3 {} = normalize({});", var, a(inputs, 0)),
+        Normalize => { let t = infer_type(defaults); format!("{} {} = normalize({});", t, var, a(inputs, 0)) }
         Dot => format!("float {} = dot({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Cross => format!("vec3 {} = cross({}, {});", var, a(inputs, 0), a(inputs, 1)),
+        Cross => { let t = infer_type(defaults); format!("{} {} = cross({}, {});", t, var, a(inputs, 0), a(inputs, 1)) }
         Distance => format!("float {} = distance({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Reflect => format!("vec3 {} = reflect({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Refract => format!("vec3 {} = refract({}, {}, {});", var, a(inputs, 0), a(inputs, 1), a(inputs, 2)),
+        Reflect => { let t = infer_type(defaults); format!("{} {} = reflect({}, {});", t, var, a(inputs, 0), a(inputs, 1)) }
+        Refract => { let t = infer_type(defaults); format!("{} {} = refract({}, {}, {});", t, var, a(inputs, 0), a(inputs, 1), a(inputs, 2)) }
 
         // Colour
         RgbToHsv => format!("vec3 {} = kroma_rgb2hsv({});", var, a(inputs, 0)),
@@ -577,15 +579,32 @@ pub fn codegen(kind: &NodeKind, inputs: &[String], var: &str, defaults: &[Defaul
         ValueNoise => format!("float {} = kroma_vnoise({} * {});", var, a(inputs, 0), a(inputs, 1)),
         Voronoi => format!("float {} = kroma_voronoi({} * {});", var, a(inputs, 0), a(inputs, 1)),
 
-        // Custom GLSL — mix A and B based on UV position and time
-        GlslExpr => format!(
-            "vec4 {} = mix({}, {}, vec4(length({}) * sin({}) * 0.5 + 0.5));",
-            var, a(inputs, 0), a(inputs, 1), a(inputs, 2), a(inputs, 3)
-        ),
+        // Custom GLSL — use stored expression template if available
+        GlslExpr => {
+            if let Some(template) = meta {
+                // Template uses {A} and {B} as placeholders
+                let expr = template
+                    .replace("{A}", a(inputs, 0))
+                    .replace("{B}", a(inputs, 1));
+                // Comparison / boolean / bitwise operators produce scalar results
+                let is_scalar_op = ["==", "!=", ">", "<", ">=", "<=", "&&", "||", "!", "~", "&", "|", "^"]
+                    .iter().any(|op| template.contains(op));
+                if is_scalar_op {
+                    format!("float {} = float({});", var, expr)
+                } else {
+                    format!("vec4 {} = vec4({});", var, expr)
+                }
+            } else {
+                format!(
+                    "vec4 {} = mix({}, {}, vec4(length({}) * sin({}) * 0.5 + 0.5));",
+                    var, a(inputs, 0), a(inputs, 1), a(inputs, 2), a(inputs, 3)
+                )
+            }
+        }
 
         // For loop: iterate count times, accumulating into result
         ForLoop => format!(
-            "vec4 {v} = {init}; for (int i = 0; i < int({count}); i++) {{ {v} += {body} / {count}; }}",
+            "vec4 {v} = {init}; {{ float _kfl = max({count}, 0.0001); for (int i = 0; i < int({count}); i++) {{ {v} += {body} / _kfl; }} }}",
             v = var, init = a(inputs, 0), count = a(inputs, 1), body = a(inputs, 2)
         ),
 
@@ -595,17 +614,34 @@ pub fn codegen(kind: &NodeKind, inputs: &[String], var: &str, defaults: &[Defaul
             v = var, cond = a(inputs, 0), thresh = a(inputs, 1), t = a(inputs, 2), f = a(inputs, 3)
         ),
 
-        // Texture sample
-        TextureSample => format!(
-            "vec4 {v} = texture(iChannel{ch}, {uv});",
-            v = var, ch = a(inputs, 0), uv = a(inputs, 1)
-        ),
+        // Texture sample — channel index is the integer part of the default
+        TextureSample => {
+            let ch_idx = defaults.first()
+                .map(|d| d.to_glsl())
+                .and_then(|s| s.parse::<f32>().ok())
+                .map(|f| f as i32)
+                .unwrap_or(0);
+            format!(
+                "vec4 {v} = texture(iChannel{ch}, {uv});",
+                v = var, ch = ch_idx, uv = a(inputs, 1)
+            )
+        },
 
-        // Custom function call — uses the default expression
-        CustomFunc => format!(
-            "vec4 {v} = vec4({a}, {b}, {c}, {d});",
-            v = var, a = a(inputs, 0), b = a(inputs, 1), c = a(inputs, 2), d = a(inputs, 3)
-        ),
+        // Custom function call — use stored function name if available
+        CustomFunc => {
+            if let Some(func_name) = meta {
+                // Emit a call to the named function with available args
+                let arg_list: Vec<&str> = inputs.iter().map(|s| s.as_str()).collect();
+                let args_str = arg_list.join(", ");
+                format!("vec4 {v} = {fn_name}({args});",
+                    v = var, fn_name = func_name, args = args_str)
+            } else {
+                format!(
+                    "vec4 {v} = vec4({a}, {b}, {c}, {d});",
+                    v = var, a = a(inputs, 0), b = a(inputs, 1), c = a(inputs, 2), d = a(inputs, 3)
+                )
+            }
+        },
     }
 }
 
@@ -660,6 +696,15 @@ float kroma_vnoise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }\n\n",
         );
+    }
+
+    if has(&NodeKind::Voronoi) && !has(&NodeKind::ValueNoise) {
+        // Emit kroma_hash dependency if ValueNoise hasn't already emitted it
+        out.push_str(
+"float kroma_hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
+");
     }
 
     if has(&NodeKind::Voronoi) {

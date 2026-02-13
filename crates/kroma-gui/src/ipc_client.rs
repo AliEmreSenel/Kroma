@@ -114,26 +114,10 @@ pub fn query_status() -> Result<String> {
     Ok(response.trim().to_string())
 }
 
-/// Push raw Shadertoy GLSL to the daemon for live preview rendering.
-///
-/// Returns the `CompileResult` event from the daemon with success/error info.
-pub fn send_live_reload(glsl_source: &str) -> Result<DaemonEvent> {
-    send_command_with_response(&DaemonCommand::LiveReload {
-        glsl_source: glsl_source.to_string(),
-    })
-}
-
 /// Tell the daemon to load a shade package and return compile results.
 #[allow(dead_code)]
 pub fn send_load_with_result(path: &str) -> Result<DaemonEvent> {
     send_command_with_response(&DaemonCommand::LoadShade {
         path: path.to_string(),
     })
-}
-
-/// Query real-time system info from the daemon (CPU, RAM, battery, cursor, audio).
-///
-/// Returns `None` if the daemon is not reachable.
-pub fn query_system_info() -> Option<DaemonEvent> {
-    send_command_with_response(&DaemonCommand::QuerySystemInfo).ok()
 }

@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+
 use glsl::parser::Parse;
 use glsl::syntax::{
     self, BinaryOp, CompoundStatement, Declaration, Expr, ExternalDeclaration,
@@ -29,17 +30,15 @@ use crate::types::*;
 pub fn parse_glsl_to_graph(src: &str) -> ShaderGraph {
     let prepped = prepare_source(src);
 
-    eprintln!("[kroma-graph] Parsing GLSL ({} chars, prepared {} chars)…",
+    #[cfg(debug_assertions)]
+    eprintln!("[kroma-graph] Parsing GLSL ({} chars, prepared {} chars)",
               src.len(), prepped.len());
 
     let tu = match TranslationUnit::parse(&prepped) {
         Ok(tu) => {
+            #[cfg(debug_assertions)]
             eprintln!("[kroma-graph] GLSL parsed OK — {} top-level declarations",
                       tu.0.0.len());
-            // Log the AST structure
-            for decl in &tu.0 {
-                eprintln!("[kroma-graph]   AST decl: {:#?}", decl);
-            }
             tu
         }
         Err(e) => {
@@ -51,15 +50,18 @@ pub fn parse_glsl_to_graph(src: &str) -> ShaderGraph {
     let mut ctx = LowerCtx::new();
     ctx.lower_translation_unit(&tu);
 
-    let node_count = ctx.graph.nodes().count();
-    let conn_count = ctx.graph.connections().len();
-    eprintln!("[kroma-graph] Lowered to graph: {} nodes, {} connections",
-              node_count, conn_count);
+    #[cfg(debug_assertions)]
+    {
+        let node_count = ctx.graph.nodes().count();
+        let conn_count = ctx.graph.connections().len();
+        eprintln!("[kroma-graph] Lowered to graph: {} nodes, {} connections",
+                  node_count, conn_count);
+    }
 
     // Auto-layout nodes based on dependency tree
     ctx.graph.auto_layout();
 
-    // Print node summary (after layout)
+    #[cfg(debug_assertions)]
     for node in ctx.graph.nodes() {
         eprintln!("[kroma-graph]   {:?} → {:?} at ({:.0}, {:.0})",
                   node.id, node.kind, node.position[0], node.position[1]);
@@ -76,28 +78,38 @@ pub fn parse_glsl_to_graph(src: &str) -> ShaderGraph {
 /// Kroma-translated shaders back to Shadertoy-compatible GLSL.
 fn prepare_source(src: &str) -> String {
     let mut lines: Vec<&str> = Vec::new();
+    let mut inside_uniform_block = false;
 
     for line in src.lines() {
         let trimmed = line.trim_start();
 
-        // Skip preprocessor directives (#version, #define, etc.)
-        if trimmed.starts_with('#') {
+        // Skip #version and #extension directives (keep #define and other macros)
+        if trimmed.starts_with("#version") || trimmed.starts_with("#extension") {
             continue;
         }
         // Skip layout(...) declarations (uniform blocks, sampler bindings, outputs)
         if trimmed.starts_with("layout(") || trimmed.starts_with("layout (") {
+            if trimmed.contains("uniform ") && trimmed.contains('{') {
+                inside_uniform_block = true;
+            }
             continue;
         }
         // Skip Kroma auto-generated comment blocks
         if trimmed.starts_with("// ====") || trimmed.starts_with("// Auto-generated") {
             continue;
         }
-        // Skip uniform block contents (inside the Globals block)
+        // Skip uniform declarations (and track block opening)
         if trimmed.starts_with("uniform ") {
+            if trimmed.contains('{') {
+                inside_uniform_block = true;
+            }
             continue;
         }
-        // Skip closing brace of uniform block followed by nothing (};)
-        if trimmed == "};" {
+        // Skip everything inside a uniform block until its closing brace
+        if inside_uniform_block {
+            if trimmed == "};" || trimmed == "}" {
+                inside_uniform_block = false;
+            }
             continue;
         }
 
@@ -119,19 +131,59 @@ fn prepare_source(src: &str) -> String {
             .filter(|l| {
                 let t = l.trim();
                 // Skip injected fragCoord / fragColor locals
-                !(t.starts_with("vec2 fragCoord =") || t.starts_with("vec4 fragColor ="))
-                // Skip kroma_out_color assignment
-                && !t.starts_with("kroma_out_color =")
+                !(t.starts_with("vec2 fragCoord =") || t.starts_with("vec4 fragColor =") || t.starts_with("kroma_out_color ="))
             })
             .collect::<Vec<_>>()
             .join("\n");
-        // Remove the wrapper main() that calls kroma_main()
-        // (it no longer exists after the rename)
     }
 
-    // Remove the `void main() { kroma_main(); }` wrapper if still present
-    stripped = stripped.replace("void main() {\n    kroma_main();\n}", "");
-    stripped = stripped.replace("void main() {\n    mainImage();\n}", "");
+    // Remove the `void main() { kroma_main(); }` wrapper if still present.
+    // Match flexibly regardless of whitespace/indentation.
+    {
+        let src_lines: Vec<&str> = stripped.lines().collect();
+        let mut out_lines: Vec<&str> = Vec::new();
+        let mut skip_depth: Option<u32> = None;
+        for line in &src_lines {
+            let t = line.trim();
+            if skip_depth.is_none() {
+                // Only match `void main(` — NOT `void mainImage(` which is the actual shader function
+                let is_void_main = t.starts_with("void") && t.contains("main(") && !t.contains("mainImage");
+                if is_void_main {
+                    // Check that the body only calls kroma_main() or mainImage()
+                    let body_is_forwarder = t.contains("kroma_main") || (t.contains("mainImage") && !t.contains("void mainImage"));
+                    if body_is_forwarder || t.ends_with('{') {
+                        skip_depth = Some(0);
+                        for ch in t.chars() {
+                            match ch {
+                                '{' => *skip_depth.as_mut().unwrap() += 1,
+                                '}' => {
+                                    let d = skip_depth.as_mut().unwrap();
+                                    *d = d.saturating_sub(1);
+                                    if *d == 0 { skip_depth = None; break; }
+                                }
+                                _ => {}
+                            }
+                        }
+                        continue;
+                    }
+                }
+                out_lines.push(line);
+            } else {
+                for ch in t.chars() {
+                    match ch {
+                        '{' => *skip_depth.as_mut().unwrap() += 1,
+                        '}' => {
+                            let d = skip_depth.as_mut().unwrap();
+                            *d = d.saturating_sub(1);
+                            if *d == 0 { skip_depth = None; break; }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        stripped = out_lines.join("\n");
+    }
 
     // If it already has mainImage, use it directly.
     if stripped.contains("mainImage") {
@@ -197,8 +249,14 @@ impl LowerCtx {
         let name = fd.prototype.name.0.as_str();
         if name == "mainImage" || name == "kroma_main" {
             self.lower_compound(&fd.statement);
+        } else {
+            // Store helper functions so they can be re-emitted during codegen.
+            let mut buf = String::new();
+            glsl::transpiler::glsl::show_function_definition(&mut buf, fd);
+            if !buf.is_empty() {
+                self.graph.helper_functions.push((name.to_string(), buf));
+            }
         }
-        // TODO: helper functions → CustomFunc nodes
     }
 
     fn lower_compound(&mut self, cs: &CompoundStatement) {
@@ -219,10 +277,8 @@ impl LowerCtx {
     fn lower_simple(&mut self, s: &SimpleStatement) {
         match s {
             SimpleStatement::Declaration(d) => self.lower_declaration(d),
-            SimpleStatement::Expression(opt_expr) => {
-                if let Some(e) = opt_expr {
-                    self.lower_expr(e);
-                }
+            SimpleStatement::Expression(Some(e)) => {
+                self.lower_expr(e);
             }
             SimpleStatement::Selection(sel) => self.lower_selection(sel),
             SimpleStatement::Iteration(iter) => self.lower_iteration(iter),
@@ -262,33 +318,38 @@ impl LowerCtx {
 
     fn lower_selection(&mut self, sel: &SelectionStatement) {
         let cond_src = self.lower_expr(&sel.cond);
-        // We create a Conditional node.  We'll lower the then/else bodies
-        // as sub-expressions if they're simple assignments.
         let node_id = self.add_node(NodeKind::Conditional);
 
-        // Connect cond
+        // Connect condition → port 0 ("Cond")
         self.connect(cond_src, PortAddr { node: node_id, port: 0 });
+        // Set Thresh (port 1) to 0.5 as default (condition > 0.5 → true)
+        if let Some(node) = self.graph.node_mut(node_id) {
+            if node.defaults.len() > 1 {
+                node.defaults[1] = DefaultValue::Float(0.5);
+            }
+        }
 
         match &sel.rest {
             SelectionRestStatement::Statement(then_stmt) => {
-                // try to extract the value from the then branch
                 if let Some(val) = self.extract_branch_value(then_stmt) {
-                    self.connect(val, PortAddr { node: node_id, port: 1 }); // "True"
+                    self.connect(val, PortAddr { node: node_id, port: 2 }); // "True"
                 }
             }
             SelectionRestStatement::Else(then_stmt, else_stmt) => {
                 if let Some(val) = self.extract_branch_value(then_stmt) {
-                    self.connect(val, PortAddr { node: node_id, port: 1 });
+                    self.connect(val, PortAddr { node: node_id, port: 2 }); // "True"
                 }
                 if let Some(val) = self.extract_branch_value(else_stmt) {
-                    self.connect(val, PortAddr { node: node_id, port: 2 }); // "False"
+                    self.connect(val, PortAddr { node: node_id, port: 3 }); // "False"
                 }
             }
         }
 
-        // Conditional output is port 0
         // If the branch assigns to a known variable, update the var map.
-        // For now we just keep the node available.
+        // Track which variable was assigned inside branches.
+        if let Some(var_name) = self.extract_branch_assigned_var(&sel.rest) {
+            self.vars.insert(var_name, PortAddr { node: node_id, port: 0 });
+        }
     }
 
     fn extract_branch_value(&mut self, stmt: &Statement) -> Option<PortAddr> {
@@ -443,18 +504,40 @@ impl LowerCtx {
             Expr::Dot(object, field) => self.lower_dot(object, field),
 
             // -- Assignment (as expression) ---
-            Expr::Assignment(lhs, _op, rhs) => {
+            Expr::Assignment(lhs, op, rhs) => {
                 let rhs_src = self.lower_expr(rhs);
+
+                // Handle compound assignment: +=, -=, *=, /=
+                let final_src = match op {
+                    syntax::AssignmentOp::Equal => rhs_src,
+                    compound_op => {
+                        // Get the current value of the LHS variable
+                        let lhs_val = self.lower_expr(lhs);
+                        let kind = match compound_op {
+                            syntax::AssignmentOp::Add => NodeKind::Add,
+                            syntax::AssignmentOp::Sub => NodeKind::Subtract,
+                            syntax::AssignmentOp::Mult => NodeKind::Multiply,
+                            syntax::AssignmentOp::Div => NodeKind::Divide,
+                            syntax::AssignmentOp::Mod => NodeKind::Mod,
+                            _ => NodeKind::Add, // fallback
+                        };
+                        let node_id = self.add_node(kind);
+                        self.connect(lhs_val, PortAddr { node: node_id, port: 0 });
+                        self.connect(rhs_src, PortAddr { node: node_id, port: 1 });
+                        PortAddr { node: node_id, port: 0 }
+                    }
+                };
+
                 // Update var map if lhs is a variable
                 if let Expr::Variable(ident) = lhs.as_ref() {
-                    self.vars.insert(ident.0.clone(), rhs_src);
+                    self.vars.insert(ident.0.clone(), final_src);
 
                     // If this is fragColor, connect to Output
                     if is_frag_color(&ident.0) {
-                        self.connect(rhs_src, PortAddr { node: NodeId(1), port: 0 });
+                        self.connect(final_src, PortAddr { node: NodeId(1), port: 0 });
                     }
                 }
-                rhs_src
+                final_src
             }
 
             // -- PostInc / PostDec (treat as identity for graph) ---
@@ -531,8 +614,8 @@ impl LowerCtx {
     }
 
     fn make_glsl_fallback_binop(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr) -> PortAddr {
-        // For comparison ops we can use a Conditional node or just a GlslExpr
-        let _op_str = match op {
+        // For comparison/logical/bitwise ops store the operator so codegen can reproduce it
+        let op_str = match op {
             BinaryOp::LT => "<",
             BinaryOp::GT => ">",
             BinaryOp::LTE => "<=",
@@ -551,11 +634,9 @@ impl LowerCtx {
         let l = self.lower_expr(lhs);
         let r = self.lower_expr(rhs);
         let node_id = self.add_node(NodeKind::GlslExpr);
-        // Set the expression string as a default
+        // Store the operator expression in the node's meta field
         if let Some(node) = self.graph.node_mut(node_id) {
-            if !node.defaults.is_empty() {
-                // GlslExpr has a Vec4 default; we leave it and just connect inputs
-            }
+            node.meta = Some(format!("{{A}} {} {{B}}", op_str));
         }
         self.connect(l, PortAddr { node: node_id, port: 0 });
         self.connect(r, PortAddr { node: node_id, port: 1 });
@@ -569,9 +650,13 @@ impl LowerCtx {
             UnaryOp::Minus => NodeKind::Negate,
             UnaryOp::Add => return self.lower_expr(operand), // +x = x
             UnaryOp::Not | UnaryOp::Complement => {
-                // No dedicated node — GlslExpr fallback
+                // No dedicated node — GlslExpr fallback with correct operator
                 let src = self.lower_expr(operand);
                 let node_id = self.add_node(NodeKind::GlslExpr);
+                if let Some(node) = self.graph.node_mut(node_id) {
+                    let op_str = if matches!(op, UnaryOp::Not) { "!" } else { "~" };
+                    node.meta = Some(format!("{}{{}}", op_str).replace("{}", "{A}"));
+                }
                 self.connect(src, PortAddr { node: node_id, port: 0 });
                 return PortAddr { node: node_id, port: 0 };
             }
@@ -587,9 +672,15 @@ impl LowerCtx {
 
     fn lower_ternary(&mut self, cond: &Expr, t: &Expr, f: &Expr) -> PortAddr {
         let node_id = self.add_node(NodeKind::Conditional);
+        // Port 0 = Cond, Port 1 = Thresh (default 0.5), Port 2 = True, Port 3 = False
         self.lower_arg_or_default(cond, node_id, 0);
-        self.lower_arg_or_default(t, node_id, 1);
-        self.lower_arg_or_default(f, node_id, 2);
+        if let Some(node) = self.graph.node_mut(node_id) {
+            if node.defaults.len() > 1 {
+                node.defaults[1] = DefaultValue::Float(0.5);
+            }
+        }
+        self.lower_arg_or_default(t, node_id, 2);
+        self.lower_arg_or_default(f, node_id, 3);
         PortAddr { node: node_id, port: 0 }
     }
 
@@ -599,8 +690,17 @@ impl LowerCtx {
         let name = match fun_id {
             FunIdentifier::Identifier(ident) => ident.0.as_str(),
             FunIdentifier::Expr(e) => {
-                // Rare: function pointer or computed call
-                return self.lower_expr(e);
+                // Rare: function pointer or computed call — fall through
+                // to CustomFunc path which processes arguments
+                let node_id = self.add_node(NodeKind::CustomFunc);
+                // Lower the function expression itself as source for meta
+                let fn_src = self.lower_expr(e);
+                self.connect(fn_src, PortAddr { node: node_id, port: 0 });
+                for (i, arg) in args.iter().enumerate().take(3) {
+                    let src = self.lower_expr(arg);
+                    self.connect(src, PortAddr { node: node_id, port: i + 1 });
+                }
+                return PortAddr { node: node_id, port: 0 };
             }
         };
 
@@ -692,21 +792,33 @@ impl LowerCtx {
             }
         }
 
-        // Texture sampling
+        // Texture sampling: port 0 = Channel (Float), port 1 = UV (Vec2)
         if name == "texture" || name.starts_with("texture2D") {
             let node_id = self.add_node(NodeKind::TextureSample);
+            // Extract channel index from sampler name (iChannel0 → 0, iChannel1 → 1, etc.)
+            if let Some(Expr::Variable(ref ident)) = args.first() {
+                if let Some(ch) = ident.0.strip_prefix("iChannel").and_then(|s| s.parse::<f32>().ok()) {
+                    if let Some(node) = self.graph.node_mut(node_id) {
+                        node.defaults[0] = DefaultValue::Float(ch);
+                    }
+                }
+            }
+            // Connect UV to port 1
             if args.len() >= 2 {
                 let uv = self.lower_expr(&args[1]);
-                self.connect(uv, PortAddr { node: node_id, port: 0 });
+                self.connect(uv, PortAddr { node: node_id, port: 1 });
             }
             return PortAddr { node: node_id, port: 0 };
         }
 
-        // Fallback: CustomFunc node
+        // Fallback: CustomFunc node — stores the function name
         let node_id = self.add_node(NodeKind::CustomFunc);
-        for (i, arg) in args.iter().enumerate() {
+        if let Some(node) = self.graph.node_mut(node_id) {
+            node.meta = Some(name.to_string());
+        }
+        // CustomFunc has 4 input ports (A, B, C, D) — clamp to available ports
+        for (i, arg) in args.iter().enumerate().take(4) {
             let src = self.lower_expr(arg);
-            // CustomFunc has input ports 0..n
             self.connect(src, PortAddr { node: node_id, port: i });
         }
         PortAddr { node: node_id, port: 0 }
@@ -751,13 +863,37 @@ impl LowerCtx {
         let node_id = self.add_node(kind);
 
         // Handle mixed-size args: vec4(vec2, float, float), vec4(vec3, float), etc.
+        // Track actual component width consumed by each argument.
         let mut port_idx = 0;
         for arg in args {
             if port_idx >= components {
                 break;
             }
-            self.lower_arg_or_default(arg, node_id, port_idx);
-            port_idx += 1;
+            // Estimate the width of this argument
+            let arg_width = self.estimate_expr_width(arg);
+            if arg_width > 1 && port_idx + arg_width <= components {
+                // Multi-component argument: split it and connect individual components
+                let src = self.lower_expr(arg);
+                let split_kind = match arg_width {
+                    2 => NodeKind::SplitVec2,
+                    3 => NodeKind::SplitVec3,
+                    _ => NodeKind::SplitVec4,
+                };
+                let split_id = self.add_node(split_kind);
+                self.connect(src, PortAddr { node: split_id, port: 0 });
+                for comp in 0..arg_width {
+                    if port_idx < components {
+                        self.connect(
+                            PortAddr { node: split_id, port: comp },
+                            PortAddr { node: node_id, port: port_idx },
+                        );
+                        port_idx += 1;
+                    }
+                }
+            } else {
+                self.lower_arg_or_default(arg, node_id, port_idx);
+                port_idx += 1;
+            }
         }
 
         PortAddr { node: node_id, port: 0 }
@@ -782,10 +918,8 @@ impl LowerCtx {
         if is_swizzle(field_str) {
             let n_components = field_str.len();
             if n_components == 1 {
-                // Single component → SplitVec
-                let split_kind = NodeKind::SplitVec4; // conservative
-                let node_id = self.add_node(split_kind);
-                self.connect(obj_src, PortAddr { node: node_id, port: 0 });
+                // Single component → SplitVec sized to match input width
+                let width = self.estimate_expr_width(object);
                 let component_port = match field_str.chars().next() {
                     Some('x' | 'r' | 's') => 0,
                     Some('y' | 'g' | 't') => 1,
@@ -793,10 +927,56 @@ impl LowerCtx {
                     Some('w' | 'a' | 'q') => 3,
                     _ => 0,
                 };
+                // If the requested component is beyond the input's width,
+                // return 0.0 (e.g. iMouse.z when Mouse outputs vec2)
+                if component_port >= width {
+                    return self.make_float_const(0.0);
+                }
+                let split_kind = match width {
+                    2 => NodeKind::SplitVec2,
+                    3 => NodeKind::SplitVec3,
+                    _ => NodeKind::SplitVec4,
+                };
+                let node_id = self.add_node(split_kind);
+                self.connect(obj_src, PortAddr { node: node_id, port: 0 });
                 return PortAddr { node: node_id, port: component_port };
             }
-            // Multi-component swizzle → just pass through for now
-            return obj_src;
+            // Multi-component swizzle → Split then Combine (sized to input)
+            let width = self.estimate_expr_width(object);
+            let split_kind = match width {
+                2 => NodeKind::SplitVec2,
+                3 => NodeKind::SplitVec3,
+                _ => NodeKind::SplitVec4,
+            };
+            let split_id = self.add_node(split_kind);
+            self.connect(obj_src, PortAddr { node: split_id, port: 0 });
+
+            let combine_kind = match n_components {
+                2 => NodeKind::Combine2,
+                3 => NodeKind::Combine3,
+                _ => NodeKind::Combine4,
+            };
+            let combine_id = self.add_node(combine_kind);
+            for (i, ch) in field_str.chars().enumerate() {
+                let split_port = match ch {
+                    'x' | 'r' | 's' => 0,
+                    'y' | 'g' | 't' => 1,
+                    'z' | 'b' | 'p' => 2,
+                    'w' | 'a' | 'q' => 3,
+                    _ => 0,
+                };
+                // If split_port is beyond the input width, use 0.0 constant
+                let src = if split_port >= width {
+                    self.make_float_const(0.0)
+                } else {
+                    PortAddr { node: split_id, port: split_port }
+                };
+                self.connect(
+                    src,
+                    PortAddr { node: combine_id, port: i },
+                );
+            }
+            return PortAddr { node: combine_id, port: 0 };
         }
 
         // Non-swizzle member access — just pass through
@@ -847,6 +1027,105 @@ impl LowerCtx {
     fn make_glsl_fallback(&mut self, _expr: &Expr) -> PortAddr {
         let node_id = self.add_node(NodeKind::GlslExpr);
         PortAddr { node: node_id, port: 0 }
+    }
+
+    /// Extract the variable name assigned in a conditional branch.
+    fn extract_branch_assigned_var(&self, rest: &SelectionRestStatement) -> Option<String> {
+        match rest {
+            SelectionRestStatement::Statement(stmt) => self.extract_assigned_var_from_stmt(stmt),
+            SelectionRestStatement::Else(then_stmt, _else_stmt) => {
+                self.extract_assigned_var_from_stmt(then_stmt)
+            }
+        }
+    }
+
+    fn extract_assigned_var_from_stmt(&self, stmt: &Statement) -> Option<String> {
+        match stmt {
+            Statement::Simple(boxed) => match boxed.as_ref() {
+                SimpleStatement::Expression(Some(Expr::Assignment(lhs, _, _))) => {
+                    if let Expr::Variable(ident) = lhs.as_ref() {
+                        Some(ident.0.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            Statement::Compound(cs) => {
+                cs.statement_list.last().and_then(|s| self.extract_assigned_var_from_stmt(s))
+            }
+        }
+    }
+
+    /// Estimate the vector width of an expression (1=float, 2=vec2, 3=vec3, 4=vec4).
+    fn estimate_expr_width(&self, expr: &Expr) -> usize {
+        match expr {
+            Expr::FloatConst(_) | Expr::DoubleConst(_) | Expr::IntConst(_)
+            | Expr::UIntConst(_) | Expr::BoolConst(_) => 1,
+            Expr::Variable(ident) => {
+                // Check if it's a known variable with a known width
+                if let Some(addr) = self.vars.get(ident.0.as_str()) {
+                    if let Some(node) = self.graph.node(addr.node) {
+                        let outputs = node.outputs();
+                        if let Some(out) = outputs.get(addr.port) {
+                            return match out.data_type {
+                                DataType::Float => 1,
+                                DataType::Vec2 => 2,
+                                DataType::Vec3 => 3,
+                                DataType::Vec4 => 4,
+                            };
+                        }
+                    }
+                }
+                match ident.0.as_str() {
+                    "iResolution" => 3,
+                    "u_resolution" | "fragCoord" | "gl_FragCoord" => 2,
+                    "iMouse" => 4,
+                    _ => 1,
+                }
+            }
+            Expr::FunCall(FunIdentifier::Identifier(ident), args) => {
+                match ident.0.as_str() {
+                    "vec2" => 2,
+                    "vec3" => 3,
+                    "vec4" => 4,
+                    "float" | "int" | "uint" | "sin" | "cos" | "tan" | "abs"
+                    | "floor" | "ceil" | "fract" | "sqrt" | "length" | "dot"
+                    | "distance" | "step" | "sign" | "mod" | "pow" | "min" | "max" => 1,
+                    "normalize" | "cross" | "reflect" | "refract" => {
+                        // These return the same dimension as their first argument
+                        if !args.is_empty() {
+                            self.estimate_expr_width(&args[0])
+                        } else {
+                            3
+                        }
+                    }
+                    "mix" | "clamp" | "smoothstep" => {
+                        if !args.is_empty() {
+                            self.estimate_expr_width(&args[0])
+                        } else {
+                            1
+                        }
+                    }
+                    _ => 1,
+                }
+            }
+            Expr::Dot(_, field) => {
+                let field_str = &field.0;
+                if is_swizzle(field_str) {
+                    field_str.len()
+                } else {
+                    1
+                }
+            }
+            Expr::Binary(_op, lhs, rhs) => {
+                // Arithmetic on vectors preserves the wider operand's width
+                let lw = self.estimate_expr_width(lhs);
+                let rw = self.estimate_expr_width(rhs);
+                lw.max(rw)
+            }
+            _ => 1,
+        }
     }
 }
 

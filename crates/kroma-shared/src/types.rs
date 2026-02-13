@@ -121,8 +121,10 @@ impl ShaderUniforms {
 /// The type of wallpaper this shade package provides.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum WallpaperMode {
     /// Custom fragment shader (may optionally reference textures).
+    #[default]
     Shader,
     /// Static image wallpaper — no shader needed.
     Image,
@@ -132,11 +134,6 @@ pub enum WallpaperMode {
     Slideshow,
 }
 
-impl Default for WallpaperMode {
-    fn default() -> Self {
-        Self::Shader
-    }
-}
 
 /// Root of a `.shade` package's `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,31 +242,25 @@ pub struct UniformDef {
 /// Texture filtering mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum TextureFilter {
+    #[default]
     Linear,
     Nearest,
 }
 
-impl Default for TextureFilter {
-    fn default() -> Self {
-        Self::Linear
-    }
-}
 
 /// Texture wrapping (address) mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum TextureWrap {
     Repeat,
+    #[default]
     Clamp,
     Mirror,
 }
 
-impl Default for TextureWrap {
-    fn default() -> Self {
-        Self::Clamp
-    }
-}
 
 /// A texture channel binding.
 #[derive(Debug, Clone, Serialize, Deserialize)]

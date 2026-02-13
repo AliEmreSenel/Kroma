@@ -83,8 +83,14 @@ Newline-delimited JSON. Commands: LoadShade, SetUniform, Pause, Resume, Reload, 
 - Shade package editor
 
 ### In Progress 🔧
+- **GUI v2 Overhaul** — Full modular rewrite (see `GUI_DESIGN.md`)
+  - IDE-style docking system (drag-split-tab)
+  - Command-based undo/redo across all operations
+  - Sub-graph navigation (ForLoop/Conditional/CustomFunc) with breadcrumbs
+  - Async IPC with live daemon-rendered preview frames
+  - Rich asset previews (image/video/font inline)
+  - User-selectable themes (5 built-in)
+  - Drag-and-drop everywhere (assets, nodes, panels)
+  - Full error tolerance — nothing crashes
 - GLSL ↔ Node sync
 - IPC compile error feedback
-- Project files view
-- Multi-mode editing
-- Font/programmatic texture support

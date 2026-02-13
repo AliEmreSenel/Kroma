@@ -324,8 +324,8 @@ impl NodeKind {
     }
 
     /// Generate the GLSL expression for this node.
-    pub fn codegen(&self, inputs: &[String], var_name: &str, defaults: &[DefaultValue]) -> String {
-        crate::nodes::codegen(self, inputs, var_name, defaults)
+    pub fn codegen(&self, inputs: &[String], var_name: &str, defaults: &[DefaultValue], meta: &Option<String>) -> String {
+        crate::nodes::codegen(self, inputs, var_name, defaults, meta)
     }
 }
 
@@ -344,12 +344,18 @@ pub struct Node {
     pub defaults: Vec<DefaultValue>,
     /// Whether the node is currently selected.
     pub selected: bool,
+    /// Optional metadata string.
+    ///
+    /// - `GlslExpr`: the GLSL expression text (e.g. `"a < b"`)
+    /// - `CustomFunc`: the function name (e.g. `"myHelper"`)
+    /// - Other node kinds: `None`
+    pub meta: Option<String>,
 }
 
 impl Node {
     pub fn new(id: NodeId, kind: NodeKind, position: [f32; 2]) -> Self {
         let defaults = kind.default_values();
-        Self { id, kind, position, defaults, selected: false }
+        Self { id, kind, position, defaults, selected: false, meta: None }
     }
 
     pub fn inputs(&self) -> &[PortDef] {
@@ -421,4 +427,53 @@ pub fn palette() -> Vec<(&'static str, Vec<NodeKind>)> {
             NodeKind::TextureSample, NodeKind::CustomFunc,
         ]),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_value_float_to_glsl() {
+        let v = DefaultValue::Float(1.5);
+        assert_eq!(v.to_glsl(), "1.500000");
+    }
+
+    #[test]
+    fn default_value_vec2_to_glsl() {
+        let v = DefaultValue::Vec2([1.0, 2.0]);
+        assert_eq!(v.to_glsl(), "vec2(1.000000, 2.000000)");
+    }
+
+    #[test]
+    fn default_value_vec3_to_glsl() {
+        let v = DefaultValue::Vec3([1.0, 2.0, 3.0]);
+        let glsl = v.to_glsl();
+        assert!(glsl.starts_with("vec3("));
+        assert!(glsl.contains("3.000000"));
+    }
+
+    #[test]
+    fn default_value_vec4_to_glsl() {
+        let v = DefaultValue::Vec4([0.1, 0.2, 0.3, 1.0]);
+        let glsl = v.to_glsl();
+        assert!(glsl.starts_with("vec4("));
+        assert!(glsl.contains("1.000000"));
+    }
+
+    #[test]
+    fn default_value_data_type_matches() {
+        assert_eq!(DefaultValue::Float(0.0).data_type(), DataType::Float);
+        assert_eq!(DefaultValue::Vec2([0.0; 2]).data_type(), DataType::Vec2);
+        assert_eq!(DefaultValue::Vec3([0.0; 3]).data_type(), DataType::Vec3);
+        assert_eq!(DefaultValue::Vec4([0.0; 4]).data_type(), DataType::Vec4);
+    }
+
+    #[test]
+    fn data_type_glsl_type_names() {
+        assert_eq!(DataType::Float.glsl_type(), "float");
+        assert_eq!(DataType::Vec2.glsl_type(), "vec2");
+        assert_eq!(DataType::Vec3.glsl_type(), "vec3");
+        assert_eq!(DataType::Vec4.glsl_type(), "vec4");
+    }
 }
