@@ -17,7 +17,11 @@ use log::{error, info};
 use kroma_shared::ipc::{socket_path, DaemonCommand, DaemonEvent};
 
 /// Return type for [`start`]: join handle, shared status, and preview stream state.
-type IpcStartResult = (JoinHandle<()>, Arc<Mutex<DaemonStatus>>, Arc<Mutex<PreviewStreamState>>);
+type IpcStartResult = (
+    JoinHandle<()>,
+    Arc<Mutex<DaemonStatus>>,
+    Arc<Mutex<PreviewStreamState>>,
+);
 
 /// Internal command wrapper that includes an optional response channel.
 ///

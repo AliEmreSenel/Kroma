@@ -15,6 +15,7 @@ toml.workspace = true
 log.workspace = true
 regex.workspace = true
 zip.workspace = true
+memmap2.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 raw-window-handle.workspace = true

@@ -20,42 +20,49 @@ fn word_regex(word: &str) -> Regex {
 
 /// Statically compiled regexes for UNIFORM_MAP and SEMANTIC_MAP replacements.
 static UNIFORM_REGEXES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    UNIFORM_MAP.iter().map(|&(from, to)| (word_regex(from), to)).collect()
+    UNIFORM_MAP
+        .iter()
+        .map(|&(from, to)| (word_regex(from), to))
+        .collect()
 });
 
 static SEMANTIC_REGEXES: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    SEMANTIC_MAP.iter().map(|&(from, to)| (word_regex(from), to)).collect()
+    SEMANTIC_MAP
+        .iter()
+        .map(|&(from, to)| (word_regex(from), to))
+        .collect()
 });
 
-static TEXTURE_FIX_REGEXES: LazyLock<Vec<(Regex, &'static str, &'static str, &'static str)>> = LazyLock::new(|| {
-    [
-        ("texture2D", "texture"),
-        ("textureCube", "texture"),
-        ("texture2DLod", "textureLod"),
-        ("textureCubeLod", "textureLod"),
-    ].iter().map(|&(old, new)| (word_regex(old), new, old, new)).collect()
-});
+static TEXTURE_FIX_REGEXES: LazyLock<Vec<(Regex, &'static str, &'static str, &'static str)>> =
+    LazyLock::new(|| {
+        [
+            ("texture2D", "texture"),
+            ("textureCube", "texture"),
+            ("texture2DLod", "textureLod"),
+            ("textureCubeLod", "textureLod"),
+        ]
+        .iter()
+        .map(|&(old, new)| (word_regex(old), new, old, new))
+        .collect()
+    });
 
-static VERSION_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"#version\s+\d+(\s+\w+)?\s*\n?").expect("valid regex")
-});
+static VERSION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"#version\s+\d+(\s+\w+)?\s*\n?").expect("valid regex"));
 
 static PRECISION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\bprecision\s+(lowp|mediump|highp)\s+\w+\s*;\s*\n?").expect("valid regex")
 });
 
-static HAS_MAIN_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\bvoid\s+mainImage\s*\(").expect("valid regex")
-});
+static HAS_MAIN_IMAGE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bvoid\s+mainImage\s*\(").expect("valid regex"));
 
 static MAIN_IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"void\s+mainImage\s*\(\s*out\s+vec4\s+(\w+)\s*,\s*(?:in\s+)?vec2\s+(\w+)\s*\)")
         .expect("valid regex")
 });
 
-static CHANNEL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\biChannel(\d+)\b").expect("valid regex")
-});
+static CHANNEL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\biChannel(\d+)\b").expect("valid regex"));
 
 /// Result of a successful translation.
 #[derive(Debug, Clone)]
@@ -100,9 +107,8 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
     // Early-out: detect already-translated Kroma shaders
     // ------------------------------------------------------------------
     if source.contains("kroma_main") || source.contains("kroma_out_color") {
-        warnings.push(
-            "Shader appears to already be in Kroma format — skipping translation.".into(),
-        );
+        warnings
+            .push("Shader appears to already be in Kroma format — skipping translation.".into());
         return TranslationResult {
             shader_source: source.to_string(),
             config: ShadeConfig {
@@ -120,6 +126,7 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
                 audio: Default::default(),
                 slideshow: Default::default(),
                 fonts: Default::default(),
+                buffers: Default::default(),
             },
             warnings,
         };
@@ -178,7 +185,10 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
     // where I is the sequential binding index (position in sorted channels).
     for (binding_idx, idx) in sorted_channels.iter().enumerate() {
         let from = format!("iChannel{}", idx);
-        let to = format!("sampler2D(kroma_tex_{}, kroma_samp_{})", binding_idx, binding_idx);
+        let to = format!(
+            "sampler2D(kroma_tex_{}, kroma_samp_{})",
+            binding_idx, binding_idx
+        );
         let re = word_regex(&from);
         output = re.replace_all(&output, to.as_str()).to_string();
     }
@@ -199,8 +209,14 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
         let main_image_re = &*MAIN_IMAGE_RE;
 
         if let Some(caps) = main_image_re.captures(&output) {
-            let frag_color_name = caps.get(1).map(|m| m.as_str().to_string()).unwrap_or_else(|| "fragColor".into());
-            let frag_coord_name = caps.get(2).map(|m| m.as_str().to_string()).unwrap_or_else(|| "fragCoord".into());
+            let frag_color_name = caps
+                .get(1)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_else(|| "fragColor".into());
+            let frag_coord_name = caps
+                .get(2)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_else(|| "fragCoord".into());
 
             // Replace signature with void kroma_main()
             output = main_image_re
@@ -243,8 +259,7 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
                             }
                         }
                         if let Some(pos) = close_pos {
-                            let writeback =
-                                format!("    kroma_out_color = {};\n", frag_color_name);
+                            let writeback = format!("    kroma_out_color = {};\n", frag_color_name);
                             output.insert_str(pos, &writeback);
                         }
                     }
@@ -359,6 +374,7 @@ layout(location = 0) out vec4 kroma_out_color;
         textures,
         slideshow: Default::default(),
         fonts: Default::default(),
+        buffers: Default::default(),
     };
 
     TranslationResult {
@@ -401,19 +417,31 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // Should use separate texture2D + sampler, combined via sampler2D()
         assert!(result.shader_source.contains("kroma_tex_0"));
         assert!(result.shader_source.contains("kroma_samp_0"));
-        assert!(result.shader_source.contains("sampler2D(kroma_tex_0, kroma_samp_0)"));
-        assert!(result.shader_source.contains("uniform texture2D kroma_tex_0"));
-        assert!(result.shader_source.contains("uniform sampler kroma_samp_0"));
+        assert!(result
+            .shader_source
+            .contains("sampler2D(kroma_tex_0, kroma_samp_0)"));
+        assert!(result
+            .shader_source
+            .contains("uniform texture2D kroma_tex_0"));
+        assert!(result
+            .shader_source
+            .contains("uniform sampler kroma_samp_0"));
         assert!(result.config.textures.contains_key("channel0"));
     }
 
     #[test]
     fn generates_uniform_header() {
         let result = translate(SIMPLE_SHADERTOY, "Test", "T");
-        assert!(result.shader_source.contains("layout(set = 0, binding = 0) uniform Globals"));
-        assert!(result.shader_source.contains("layout(set = 0, binding = 1) readonly buffer CustomUniforms"));
+        assert!(result
+            .shader_source
+            .contains("layout(set = 0, binding = 0) uniform Globals"));
+        assert!(result
+            .shader_source
+            .contains("layout(set = 0, binding = 1) readonly buffer CustomUniforms"));
         assert!(result.shader_source.contains("float custom_data[32]"));
-        assert!(result.shader_source.contains("layout(location = 0) out vec4 kroma_out_color"));
+        assert!(result
+            .shader_source
+            .contains("layout(location = 0) out vec4 kroma_out_color"));
         assert!(result.shader_source.contains("float u_time;"));
         assert!(result.shader_source.contains("void main()"));
     }
@@ -490,10 +518,7 @@ fn fix_mat_constructors(src: &str, warnings: &mut Vec<String>) -> String {
             // with `vec4 _kmN_ = expr;` inserted before the statement.
             let var = format!("_km{}_", counter);
             counter += 1;
-            let replacement = format!(
-                "mat2({v}[0], {v}[1], {v}[2], {v}[3])",
-                v = var
-            );
+            let replacement = format!("mat2({v}[0], {v}[1], {v}[2], {v}[3])", v = var);
 
             // Find the statement start (work backwards to find ; or { or newline)
             let stmt_start = output[..pos]

@@ -163,9 +163,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 "#;
     let result = translator::translate(src, "Multi Channel", "Author");
     // Should use separate texture2D + sampler with sampler2D() combinator
-    assert!(result.shader_source.contains("sampler2D(kroma_tex_0, kroma_samp_0)"));
-    assert!(result.shader_source.contains("sampler2D(kroma_tex_1, kroma_samp_1)"));
-    assert!(result.shader_source.contains("sampler2D(kroma_tex_2, kroma_samp_2)"));
+    assert!(result
+        .shader_source
+        .contains("sampler2D(kroma_tex_0, kroma_samp_0)"));
+    assert!(result
+        .shader_source
+        .contains("sampler2D(kroma_tex_1, kroma_samp_1)"));
+    assert!(result
+        .shader_source
+        .contains("sampler2D(kroma_tex_2, kroma_samp_2)"));
     assert!(result.config.textures.contains_key("channel0"));
     assert!(result.config.textures.contains_key("channel1"));
     assert!(result.config.textures.contains_key("channel2"));

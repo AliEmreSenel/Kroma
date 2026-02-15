@@ -134,7 +134,6 @@ pub enum WallpaperMode {
     Slideshow,
 }
 
-
 /// Root of a `.shade` package's `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShadeConfig {
@@ -154,6 +153,10 @@ pub struct ShadeConfig {
     pub slideshow: SlideshowConfig,
     #[serde(default)]
     pub fonts: std::collections::HashMap<String, FontDef>,
+    /// Render buffer passes (multi-pass shaders, Shadertoy-style).
+    /// Keys are buffer names like "A", "B", "C", "D".
+    #[serde(default)]
+    pub buffers: std::collections::HashMap<String, BufferDef>,
 }
 
 /// Package metadata.
@@ -222,9 +225,15 @@ impl Default for AudioConfig {
     }
 }
 
-fn bool_true() -> bool { true }
-fn default_audio_source() -> String { "desktop".into() }
-fn default_fft_bands() -> usize { 512 }
+fn bool_true() -> bool {
+    true
+}
+fn default_audio_source() -> String {
+    "desktop".into()
+}
+fn default_fft_bands() -> usize {
+    512
+}
 
 /// A user-tweakable uniform definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,7 +258,6 @@ pub enum TextureFilter {
     Nearest,
 }
 
-
 /// Texture wrapping (address) mode.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -260,7 +268,6 @@ pub enum TextureWrap {
     Clamp,
     Mirror,
 }
-
 
 /// A texture channel binding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,4 +332,37 @@ pub struct FontDef {
 
 fn default_font_size() -> f32 {
     32.0
+}
+
+/// A render buffer pass definition (multi-pass rendering).
+///
+/// Shadertoy-style Buffer A/B/C/D passes that render to offscreen
+/// textures which can be sampled by subsequent passes and the main shader.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BufferDef {
+    /// Fragment shader file for this buffer (relative to package root).
+    /// e.g. "buffer_a.frag"
+    pub shader: String,
+    /// Input channels that this buffer reads from.
+    /// Can reference other buffers ("BufferA", "BufferB") or regular textures.
+    #[serde(default)]
+    pub inputs: Vec<BufferInput>,
+    /// Whether this buffer feeds back to itself (reads its own previous frame).
+    #[serde(default)]
+    pub feedback: bool,
+}
+
+/// An input channel for a buffer pass.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BufferInput {
+    /// Channel index (0-3).
+    pub channel: u32,
+    /// Source: "BufferA", "BufferB", "BufferC", "BufferD", or an asset name.
+    pub source: String,
+    /// Texture filter for this input.
+    #[serde(default)]
+    pub filter: TextureFilter,
+    /// Texture wrap mode for this input.
+    #[serde(default)]
+    pub wrap: TextureWrap,
 }

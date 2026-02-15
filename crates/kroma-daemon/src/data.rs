@@ -43,14 +43,12 @@ impl SystemDataProvider {
         let sys_clone = Arc::clone(&sys);
         std::thread::Builder::new()
             .name("kroma-sysinfo".into())
-            .spawn(move || {
-                loop {
-                    std::thread::sleep(Duration::from_secs(1));
-                    {
-                        let mut s = sys_clone.lock().unwrap_or_else(|e| e.into_inner());
-                        s.refresh_cpu_usage();
-                        s.refresh_memory();
-                    }
+            .spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(1));
+                {
+                    let mut s = sys_clone.lock().unwrap_or_else(|e| e.into_inner());
+                    s.refresh_cpu_usage();
+                    s.refresh_memory();
                 }
             })
             .context("Failed to spawn sysinfo thread")?;
@@ -140,8 +138,7 @@ fn query_hyprland_cursor() -> anyhow::Result<Vec2> {
     let instance_sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
         .map_err(|_| anyhow::anyhow!("HYPRLAND_INSTANCE_SIGNATURE not set"))?;
 
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/tmp".into());
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
 
     let socket_path = format!("{}/hypr/{}/.socket.sock", runtime_dir, instance_sig);
     let mut stream = UnixStream::connect(&socket_path)?;

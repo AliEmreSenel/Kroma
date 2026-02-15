@@ -95,8 +95,7 @@ impl VideoDecoder for FfmpegVideoDecoder {
     where
         Self: Sized,
     {
-        ffmpeg_next::init()
-            .map_err(|e| anyhow::anyhow!("Failed to initialize FFmpeg: {}", e))?;
+        ffmpeg_next::init().map_err(|e| anyhow::anyhow!("Failed to initialize FFmpeg: {}", e))?;
 
         let input = ffmpeg_next::format::input(&path)
             .map_err(|e| anyhow::anyhow!("Failed to open video '{}': {}", path.display(), e))?;
@@ -134,7 +133,10 @@ impl VideoDecoder for FfmpegVideoDecoder {
 
         log::info!(
             "FFmpeg video decoder: {}x{}, {:.1}s duration, stream {}",
-            width, height, duration, video_stream_index
+            width,
+            height,
+            duration,
+            video_stream_index
         );
 
         Ok(Self {
@@ -157,7 +159,10 @@ impl VideoDecoder for FfmpegVideoDecoder {
 
     fn seek(&mut self, timestamp: f64) -> Result<()> {
         if self.time_base <= 0.0 {
-            anyhow::bail!("Cannot seek: stream has invalid time_base ({})", self.time_base);
+            anyhow::bail!(
+                "Cannot seek: stream has invalid time_base ({})",
+                self.time_base
+            );
         }
         let ts = (timestamp / self.time_base) as i64;
         self.input

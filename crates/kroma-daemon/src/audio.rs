@@ -95,7 +95,10 @@ impl SharedAudioState {
 
 impl AudioProvider for SharedAudioState {
     fn get_spectrum(&self) -> Vec<f32> {
-        self.spectrum.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.spectrum
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn get_level(&self) -> f32 {
@@ -121,7 +124,7 @@ impl CpalAudioProvider {
     /// Set `source` to "desktop" (default), "microphone", or a specific device name.
     pub fn new_with_source(source: &str) -> anyhow::Result<Self> {
         use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-        use rustfft::{FftPlanner, num_complex::Complex};
+        use rustfft::{num_complex::Complex, FftPlanner};
 
         let host = cpal::default_host();
 
@@ -149,11 +152,13 @@ impl CpalAudioProvider {
 
                 let monitor_device = if let Some(ref monitor_name) = pa_monitor {
                     log::info!("Audio: PulseAudio default sink monitor: {}", monitor_name);
-                    host.input_devices().ok().and_then(|devices| {
+
+                    // First try: direct match against cpal device names (works when
+                    // cpal exposes PulseAudio names directly).
+                    let direct = host.input_devices().ok().and_then(|devices| {
                         devices
                             .filter_map(|d| {
                                 let name = d.name().ok()?;
-                                // Try exact match first, then partial
                                 if name == *monitor_name || name.contains(monitor_name.as_str()) {
                                     Some(d)
                                 } else {
@@ -161,7 +166,49 @@ impl CpalAudioProvider {
                                 }
                             })
                             .next()
-                    })
+                    });
+
+                    if direct.is_some() {
+                        direct
+                    } else {
+                        // cpal on Linux uses ALSA as its host, so device names are
+                        // ALSA PCM names (e.g. "pulse", "pipewire", "default") — NOT
+                        // PulseAudio source names. Set PULSE_SOURCE so that when we
+                        // open an ALSA device routed through PulseAudio/PipeWire, it
+                        // captures from the monitor source instead of the default mic.
+                        log::info!(
+                            "Audio: no direct cpal match; setting PULSE_SOURCE={} \
+                             and using PulseAudio/PipeWire ALSA device",
+                            monitor_name
+                        );
+                        std::env::set_var("PULSE_SOURCE", monitor_name);
+
+                        // Prefer the "pulse" or "pipewire" ALSA device, then "default"
+                        host.input_devices().ok().and_then(|devices| {
+                            let all: Vec<_> = devices.collect();
+                            let preference = ["pipewire", "pulse", "default"];
+                            for pref in &preference {
+                                for d in &all {
+                                    if let Ok(name) = d.name() {
+                                        if name == *pref {
+                                            log::info!(
+                                                "Audio: using ALSA device '{}' with PULSE_SOURCE override",
+                                                name
+                                            );
+                                            // Re-enumerate to get an owned device
+                                            drop(all);
+                                            return host.input_devices().ok().and_then(|mut devs| {
+                                                devs.find(|d2| {
+                                                    d2.name().ok().as_deref() == Some(pref)
+                                                })
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            None
+                        })
+                    }
                 } else {
                     log::warn!("Audio: pactl not available, cannot detect default sink monitor");
                     None
@@ -177,7 +224,10 @@ impl CpalAudioProvider {
                         for d in &all {
                             if let Ok(name) = d.name() {
                                 if name.to_lowercase().contains(".monitor") {
-                                    log::info!("Audio: found monitor device via substring: {}", name);
+                                    log::info!(
+                                        "Audio: found monitor device via substring: {}",
+                                        name
+                                    );
                                     // We need to return owned device, re-enumerate
                                     drop(all);
                                     return host.input_devices().ok().and_then(|mut devs| {
@@ -194,7 +244,10 @@ impl CpalAudioProvider {
                                     || lower.contains("desktop")
                                     || lower.contains("output")
                                 {
-                                    log::info!("Audio: found fallback device via substring: {}", name);
+                                    log::info!(
+                                        "Audio: found fallback device via substring: {}",
+                                        name
+                                    );
                                     drop(all);
                                     return host.input_devices().ok().and_then(|mut devs| {
                                         devs.find(|d2| d2.name().ok().as_deref() == Some(&name))
@@ -215,13 +268,17 @@ impl CpalAudioProvider {
                     // Return an error so the caller can use SilentAudioProvider.
                     log::error!("Audio: no monitor/loopback device found for desktop audio capture. \
                         Ensure PipeWire/PulseAudio is running and has a monitor source for your output device.");
-                    return Err(anyhow::anyhow!("No desktop audio monitor source found. \
-                        Run 'pactl list sources short' to see available sources."));
+                    return Err(anyhow::anyhow!(
+                        "No desktop audio monitor source found. \
+                        Run 'pactl list sources short' to see available sources."
+                    ));
                 }
             }
             device_name => {
                 // User specified a device name directly
-                let device = host.input_devices().ok()
+                let device = host
+                    .input_devices()
+                    .ok()
                     .and_then(|devices| {
                         devices
                             .filter_map(|d| {
@@ -244,11 +301,16 @@ impl CpalAudioProvider {
         let device_name = device.name().unwrap_or_else(|_| "unknown".into());
         log::info!("Audio input device: {}", device_name);
 
-        let config = device.default_input_config()
+        let config = device
+            .default_input_config()
             .map_err(|e| anyhow::anyhow!("Failed to get audio input config: {}", e))?;
 
-        log::info!("Audio config: {} channels, {} Hz, {:?}",
-            config.channels(), config.sample_rate().0, config.sample_format());
+        log::info!(
+            "Audio config: {} channels, {} Hz, {:?}",
+            config.channels(),
+            config.sample_rate().0,
+            config.sample_format()
+        );
 
         let state = SharedAudioState::new();
         let (spectrum_writer, level_writer) = state.writer_handles();
@@ -259,7 +321,8 @@ impl CpalAudioProvider {
         let fft = Arc::new(fft);
 
         // Ring buffer for accumulating samples
-        let sample_buffer: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::with_capacity(FFT_SIZE * 2)));
+        let sample_buffer: Arc<Mutex<Vec<f32>>> =
+            Arc::new(Mutex::new(Vec::with_capacity(FFT_SIZE * 2)));
 
         let sample_buf_clone = Arc::clone(&sample_buffer);
         let fft_clone = Arc::clone(&fft);
@@ -275,7 +338,8 @@ impl CpalAudioProvider {
                 let mut fft_input = vec![Complex::new(0.0f32, 0.0); FFT_SIZE];
                 let hann_window: Vec<f32> = (0..FFT_SIZE)
                     .map(|i| {
-                        0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32).cos())
+                        0.5 * (1.0
+                            - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32).cos())
                     })
                     .collect();
 
@@ -317,7 +381,8 @@ impl CpalAudioProvider {
                     let mut spectrum = vec![0.0f32; SPECTRUM_BANDS];
                     let bins_per_band = half as f32 / SPECTRUM_BANDS as f32;
 
-                    for (band, spectrum_val) in spectrum.iter_mut().enumerate().take(SPECTRUM_BANDS) {
+                    for (band, spectrum_val) in spectrum.iter_mut().enumerate().take(SPECTRUM_BANDS)
+                    {
                         let start_bin = (band as f32 * bins_per_band) as usize;
                         let end_bin = ((band + 1) as f32 * bins_per_band) as usize;
                         let end_bin = end_bin.min(half);
@@ -336,7 +401,9 @@ impl CpalAudioProvider {
                         }
                     }
 
-                    *spectrum_writer_fft.lock().unwrap_or_else(|e| e.into_inner()) = spectrum;
+                    *spectrum_writer_fft
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = spectrum;
                 }
             })
             .map_err(|e| anyhow::anyhow!("Failed to spawn FFT thread: {}", e))?;
@@ -374,9 +441,8 @@ impl CpalAudioProvider {
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         let mut buffer = buf.lock().unwrap_or_else(|e| e.into_inner());
                         for chunk in data.chunks(channels) {
-                            let mono: f32 = chunk.iter()
-                                .map(|&s| s as f32 / 32768.0)
-                                .sum::<f32>() / channels as f32;
+                            let mono: f32 = chunk.iter().map(|&s| s as f32 / 32768.0).sum::<f32>()
+                                / channels as f32;
                             buffer.push(mono);
                         }
                         if buffer.len() > FFT_SIZE * 4 {
@@ -411,7 +477,8 @@ impl CpalAudioProvider {
         }
         .map_err(|e| anyhow::anyhow!("Failed to build audio input stream: {}", e))?;
 
-        stream.play()
+        stream
+            .play()
             .map_err(|e| anyhow::anyhow!("Failed to start audio stream: {}", e))?;
 
         log::info!("Audio capture started on '{}'", device_name);
@@ -421,9 +488,7 @@ impl CpalAudioProvider {
         // that needs to be shared across threads.
         Box::leak(Box::new(stream));
 
-        Ok(Self {
-            state,
-        })
+        Ok(Self { state })
     }
 
     /// Convenience constructor that defaults to desktop audio.
@@ -470,7 +535,11 @@ fn get_default_sink_monitor() -> Option<String> {
 
     // The monitor source is conventionally "<sink_name>.monitor"
     let monitor_name = format!("{}.monitor", sink_name);
-    log::debug!("Default sink: {} → monitor source: {}", sink_name, monitor_name);
+    log::debug!(
+        "Default sink: {} → monitor source: {}",
+        sink_name,
+        monitor_name
+    );
     Some(monitor_name)
 }
 
