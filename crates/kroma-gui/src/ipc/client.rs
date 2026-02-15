@@ -53,7 +53,7 @@ pub fn ipc_subscription() -> Subscription<(IpcEvent, Option<IpcHandle>)> {
 
 /// The background worker that maintains a persistent daemon connection.
 fn ipc_worker() -> impl iced::futures::Stream<Item = (IpcEvent, Option<IpcHandle>)> {
-    iced::stream::channel(64, |mut output| async move {
+    iced::stream::channel(256, |mut output| async move {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
 
         // Build the handle upfront so we can share it with the GUI,
@@ -69,25 +69,21 @@ fn ipc_worker() -> impl iced::futures::Stream<Item = (IpcEvent, Option<IpcHandle
             match UnixStream::connect(&path).await {
                 Ok(stream) => {
                     reconnect_attempt = 0;
-                    let _ = output.send((IpcEvent::Connected, Some(handle.clone()))).await;
+                    let _ = output
+                        .send((IpcEvent::Connected, Some(handle.clone())))
+                        .await;
 
                     // Run the read/write loop on this connection
                     match run_connection(stream, &mut cmd_rx, &mut output).await {
                         Ok(()) => {
                             // Connection closed gracefully
                             let _ = output
-                                .send((
-                                    IpcEvent::Disconnected("Connection closed".into()),
-                                    None,
-                                ))
+                                .send((IpcEvent::Disconnected("Connection closed".into()), None))
                                 .await;
                         }
                         Err(e) => {
                             let _ = output
-                                .send((
-                                    IpcEvent::Disconnected(format!("{}", e)),
-                                    None,
-                                ))
+                                .send((IpcEvent::Disconnected(format!("{}", e)), None))
                                 .await;
                         }
                     }
@@ -108,15 +104,18 @@ fn ipc_worker() -> impl iced::futures::Stream<Item = (IpcEvent, Option<IpcHandle
 
             // Exponential backoff before reconnect
             reconnect_attempt += 1;
-            let backoff = (1u64 << reconnect_attempt.min(3)).min(max_backoff_secs);
-            let _ = output
-                .send((
-                    IpcEvent::Reconnecting {
-                        attempt: reconnect_attempt,
-                    },
-                    None,
-                ))
-                .await;
+            let backoff = (1u64 << reconnect_attempt.min(4)).min(max_backoff_secs);
+            // Only send reconnecting event for early attempts to avoid channel flooding
+            if reconnect_attempt <= 5 {
+                let _ = output
+                    .send((
+                        IpcEvent::Reconnecting {
+                            attempt: reconnect_attempt,
+                        },
+                        None,
+                    ))
+                    .await;
+            }
             tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
         }
     })

@@ -40,8 +40,8 @@ impl X11SurfaceProvider {
 
     /// Connect to the X11 display.
     pub fn connect(&mut self) -> Result<()> {
-        let (conn, screen_num) = RustConnection::connect(None)
-            .context("Failed to connect to X11 display")?;
+        let (conn, screen_num) =
+            RustConnection::connect(None).context("Failed to connect to X11 display")?;
         info!("Connected to X11 display (screen {})", screen_num);
         self.screen_num = screen_num;
         self.conn = Some(conn);
@@ -78,11 +78,7 @@ impl X11SurfaceProvider {
     }
 
     /// Query RandR for monitor configuration.
-    fn query_randr_monitors(
-        &self,
-        conn: &RustConnection,
-        root: u32,
-    ) -> Result<Vec<MonitorConfig>> {
+    fn query_randr_monitors(&self, conn: &RustConnection, root: u32) -> Result<Vec<MonitorConfig>> {
         use x11rb::protocol::randr::ConnectionExt as _;
 
         let mut monitors = Vec::new();
@@ -137,25 +133,29 @@ impl X11SurfaceProvider {
         // Intern required atoms
         let net_wm_window_type = conn
             .intern_atom(false, b"_NET_WM_WINDOW_TYPE")?
-            .reply()?.atom;
+            .reply()?
+            .atom;
         let net_wm_window_type_desktop = conn
             .intern_atom(false, b"_NET_WM_WINDOW_TYPE_DESKTOP")?
-            .reply()?.atom;
-        let net_wm_state = conn
-            .intern_atom(false, b"_NET_WM_STATE")?
-            .reply()?.atom;
+            .reply()?
+            .atom;
+        let net_wm_state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
         let net_wm_state_below = conn
             .intern_atom(false, b"_NET_WM_STATE_BELOW")?
-            .reply()?.atom;
+            .reply()?
+            .atom;
         let net_wm_state_sticky = conn
             .intern_atom(false, b"_NET_WM_STATE_STICKY")?
-            .reply()?.atom;
+            .reply()?
+            .atom;
         let net_wm_state_skip_taskbar = conn
             .intern_atom(false, b"_NET_WM_STATE_SKIP_TASKBAR")?
-            .reply()?.atom;
+            .reply()?
+            .atom;
         let net_wm_state_skip_pager = conn
             .intern_atom(false, b"_NET_WM_STATE_SKIP_PAGER")?
-            .reply()?.atom;
+            .reply()?
+            .atom;
 
         for monitor in &self.monitors {
             let window_id = conn.generate_id()?;
@@ -215,8 +215,7 @@ impl X11SurfaceProvider {
             self.windows.push((monitor.id.0, window_id));
             info!(
                 "Created X11 desktop window 0x{:x} for {} ({}x{} @ {}, {})",
-                window_id, monitor.name, monitor.width, monitor.height,
-                monitor.x, monitor.y
+                window_id, monitor.name, monitor.width, monitor.height, monitor.x, monitor.y
             );
         }
 
@@ -225,8 +224,9 @@ impl X11SurfaceProvider {
         // Wait for the first Expose/ConfigureNotify
         while let Ok(event) = conn.wait_for_event() {
             match event {
-                x11rb::protocol::Event::Expose(_) |
-                x11rb::protocol::Event::ConfigureNotify(_) => break,
+                x11rb::protocol::Event::Expose(_) | x11rb::protocol::Event::ConfigureNotify(_) => {
+                    break
+                }
                 _ => {}
             }
         }
@@ -245,7 +245,8 @@ impl X11SurfaceProvider {
     /// using the Xlib backend. We use x11rb for window management but
     /// convert to wgpu-compatible handles.
     pub fn get_window_id(&self, monitor_id: u32) -> Option<u32> {
-        self.windows.iter()
+        self.windows
+            .iter()
             .find(|(mid, _)| *mid == monitor_id)
             .map(|(_, wid)| *wid)
     }
@@ -267,17 +268,15 @@ impl SurfaceProvider for X11SurfaceProvider {
         Ok(())
     }
 
-    fn create_surface(
-        &self,
-        monitor: MonitorId,
-    ) -> Result<raw_window_handle::RawWindowHandle> {
+    fn create_surface(&self, monitor: MonitorId) -> Result<raw_window_handle::RawWindowHandle> {
         // X11 backend uses window IDs directly via get_window_id().
         // Return an Xcb handle for wgpu compatibility.
-        let wid = self.get_window_id(monitor.0)
+        let wid = self
+            .get_window_id(monitor.0)
             .ok_or_else(|| anyhow::anyhow!("No X11 window for monitor {}", monitor.0))?;
         let handle = raw_window_handle::XcbWindowHandle::new(
             std::num::NonZeroU32::new(wid)
-                .ok_or_else(|| anyhow::anyhow!("X11 window ID is 0 for monitor {}", monitor.0))?
+                .ok_or_else(|| anyhow::anyhow!("X11 window ID is 0 for monitor {}", monitor.0))?,
         );
         Ok(raw_window_handle::RawWindowHandle::Xcb(handle))
     }

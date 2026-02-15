@@ -3,16 +3,17 @@
 //! Panels are self-contained UI modules with their own state, view, and
 //! update logic. The docking system composes them into the workspace layout.
 
-pub mod dashboard;
-pub mod node_editor;
-pub mod code_editor;
 pub mod asset_browser;
 pub mod asset_preview;
-pub mod properties;
+pub mod code_editor;
+pub mod dashboard;
+pub mod designer;
+pub mod error_log;
+pub mod import;
 pub mod library;
 pub mod live_preview;
-pub mod import;
-pub mod error_log;
+pub mod node_editor;
+pub mod properties;
 pub mod settings;
 
 use iced::Element;
@@ -28,6 +29,7 @@ use crate::Message;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PanelId {
     Dashboard,
+    Designer,
     NodeEditor,
     CodeEditor,
     AssetBrowser,
@@ -45,6 +47,7 @@ impl PanelId {
     pub fn title(&self) -> &'static str {
         match self {
             Self::Dashboard => "Dashboard",
+            Self::Designer => "Designer",
             Self::NodeEditor => "Node Editor",
             Self::CodeEditor => "Code Editor",
             Self::AssetBrowser => "Assets",
@@ -70,8 +73,12 @@ impl std::fmt::Display for PanelId {
 // ---------------------------------------------------------------------------
 
 /// Shared context passed to all panels for reading global app state.
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 pub struct AppContext<'a> {
+    // --- Theme ---
+    /// Color and spacing tokens for the active theme.
+    pub tokens: &'a crate::theme::ThemeTokens,
+
     // --- Core ---
     /// Whether the daemon is connected.
     pub daemon_connected: bool,
@@ -103,7 +110,7 @@ pub struct AppContext<'a> {
 
     // --- Shade project ---
     pub shade_config: &'a kroma_shared::types::ShadeConfig,
-    pub shade_package: Option<&'a kroma_shared::shade::ShadePackage>,
+    pub shade_package: Option<&'a kroma_shared::shade::LiveShadePackage>,
     pub shade_selected_file: Option<&'a str>,
     pub shade_config_toml: &'a iced::widget::text_editor::Content,
     pub shade_shader_content: &'a iced::widget::text_editor::Content,
@@ -112,6 +119,26 @@ pub struct AppContext<'a> {
     pub shade_new_uniform_type: &'a str,
     pub shade_new_texture_name: &'a str,
     pub shade_new_texture_type: &'a str,
+    /// Current shade edit mode ("settings", "toml", "code", "nodes", "preview").
+    pub shade_edit_mode: &'a str,
+    /// Shade graph for node editing.
+    pub shade_graph: &'a crate::editor::ShaderGraph,
+    /// Shade graph canvas state.
+    pub shade_graph_canvas: &'a crate::editor::canvas::GraphCanvas,
+    /// Sub-graph data for shade graph.
+    #[allow(dead_code)]
+    pub shade_subgraphs: &'a std::collections::HashMap<
+        kroma_graph::types::NodeId,
+        (
+            crate::editor::ShaderGraph,
+            crate::editor::canvas::GraphCanvas,
+        ),
+    >,
+    /// Navigation path for shade sub-graphs.
+    #[allow(dead_code)]
+    pub shade_nav_path: &'a [kroma_graph::types::NodeId],
+    /// Human-readable labels for shade nav path (computed from root graph).
+    pub shade_nav_labels: Vec<String>,
 
     // --- Editor ---
     pub editor_glsl_content: &'a iced::widget::text_editor::Content,
@@ -125,7 +152,13 @@ pub struct AppContext<'a> {
     /// Current sub-graph navigation path for editor (stack of NodeIds).
     pub editor_nav_path: &'a [kroma_graph::types::NodeId],
     /// Sub-graph data for editor.
-    pub editor_subgraphs: &'a std::collections::HashMap<kroma_graph::types::NodeId, (crate::editor::ShaderGraph, crate::editor::canvas::GraphCanvas)>,
+    pub editor_subgraphs: &'a std::collections::HashMap<
+        kroma_graph::types::NodeId,
+        (
+            crate::editor::ShaderGraph,
+            crate::editor::canvas::GraphCanvas,
+        ),
+    >,
 
     // --- Live Preview ---
     /// Latest decoded preview frame from daemon.
@@ -136,6 +169,12 @@ pub struct AppContext<'a> {
     // --- Settings ---
     /// Shadertoy API key (owned by KromaApp, exposed here for SettingsPanel).
     pub api_key: &'a str,
+    /// Whether a file is being hovered over the window (drag-drop indicator).
+    pub drop_hover_active: bool,
+    /// Available audio sources from PulseAudio/PipeWire.
+    pub available_audio_sources: &'a [String],
+    /// Active video player state for asset preview playback.
+    pub video_player: Option<&'a crate::video::VideoPlayerState>,
 }
 
 /// Trait that every dockable panel implements.

@@ -1,8 +1,8 @@
 //! Node catalogue — port definitions, default values, and GLSL codegen for
 //! every [`NodeKind`].
 
-use std::collections::HashMap;
 use crate::types::{DataType, DefaultValue, Node, NodeId, NodeKind, PortDef, PortDirection};
+use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
 // Macros for concise port definitions
@@ -10,10 +10,18 @@ use crate::types::{DataType, DefaultValue, Node, NodeId, NodeKind, PortDef, Port
 
 macro_rules! port {
     (in $name:expr, $ty:ident) => {
-        PortDef { name: $name.into(), data_type: DataType::$ty, direction: PortDirection::Input }
+        PortDef {
+            name: $name.into(),
+            data_type: DataType::$ty,
+            direction: PortDirection::Input,
+        }
     };
     (out $name:expr, $ty:ident) => {
-        PortDef { name: $name.into(), data_type: DataType::$ty, direction: PortDirection::Output }
+        PortDef {
+            name: $name.into(),
+            data_type: DataType::$ty,
+            direction: PortDirection::Output,
+        }
     };
 }
 
@@ -29,10 +37,8 @@ pub fn inputs(kind: &NodeKind) -> &'static [PortDef] {
     use NodeKind::*;
     match kind {
         // --- no inputs ---
-        Time | DeltaTime | Frame | Resolution | Mouse | CpuUsage | RamUsage
-        | Battery | AudioLevel | UV | FloatConst | Vec2Const | Vec3Const | ColorConst => {
-            &[]
-        }
+        Time | DeltaTime | Frame | Resolution | Mouse | CpuUsage | RamUsage | Battery
+        | AudioLevel | UV | FloatConst | Vec2Const | Vec3Const | ColorConst => &[],
 
         // Output takes a vec4 colour
         Output => {
@@ -43,16 +49,13 @@ pub fn inputs(kind: &NodeKind) -> &'static [PortDef] {
         // Binary math (A op B)
         Add | Subtract | Multiply | Divide | Power | Mod | Min | Max => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "A", Float),
-                port!(in "B", Float),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(in "A", Float), port!(in "B", Float)])
+                .as_slice()
         }
 
         // Unary math
-        Sqrt | Abs | Negate | Sin | Cos | Tan | Asin | Acos | Atan
-        | Exp | Exp2 | Log | Log2 | Sign | Ceil | Round
-        | Fract | Floor | Saturate | OneMinus | InverseSqrt => {
+        Sqrt | Abs | Negate | Sin | Cos | Tan | Asin | Acos | Atan | Exp | Exp2 | Log | Log2
+        | Sign | Ceil | Round | Fract | Floor | Saturate | OneMinus | InverseSqrt => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
             P.get_or_init(|| vec![port!(in "Value", Float)]).as_slice()
         }
@@ -60,75 +63,84 @@ pub fn inputs(kind: &NodeKind) -> &'static [PortDef] {
         // Atan2(y, x)
         Atan2 => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "Y", Float),
-                port!(in "X", Float),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(in "Y", Float), port!(in "X", Float)])
+                .as_slice()
         }
 
         // Clamp(Value, Min, Max)
         Clamp => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "Value", Float),
-                port!(in "Min", Float),
-                port!(in "Max", Float),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(in "Value", Float),
+                    port!(in "Min", Float),
+                    port!(in "Max", Float),
+                ]
+            })
+            .as_slice()
         }
 
         // Mix(A, B, Factor)
         Mix => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "A", Vec4),
-                port!(in "B", Vec4),
-                port!(in "Factor", Float),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(in "A", Vec4),
+                    port!(in "B", Vec4),
+                    port!(in "Factor", Float),
+                ]
+            })
+            .as_slice()
         }
 
         // Step(Edge, Value)
         Step => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "Edge", Float),
-                port!(in "Value", Float),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(in "Edge", Float), port!(in "Value", Float)])
+                .as_slice()
         }
 
         // SmoothStep(Edge0, Edge1, Value)
         SmoothStep => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "Edge0", Float),
-                port!(in "Edge1", Float),
-                port!(in "Value", Float),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(in "Edge0", Float),
+                    port!(in "Edge1", Float),
+                    port!(in "Value", Float),
+                ]
+            })
+            .as_slice()
         }
 
         // Vector combine
         Combine2 => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "X", Float),
-                port!(in "Y", Float),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(in "X", Float), port!(in "Y", Float)])
+                .as_slice()
         }
         Combine3 => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "X", Float),
-                port!(in "Y", Float),
-                port!(in "Z", Float),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(in "X", Float),
+                    port!(in "Y", Float),
+                    port!(in "Z", Float),
+                ]
+            })
+            .as_slice()
         }
         Combine4 => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "X", Float),
-                port!(in "Y", Float),
-                port!(in "Z", Float),
-                port!(in "W", Float),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(in "X", Float),
+                    port!(in "Y", Float),
+                    port!(in "Z", Float),
+                    port!(in "W", Float),
+                ]
+            })
+            .as_slice()
         }
 
         // Vector split
@@ -152,39 +164,34 @@ pub fn inputs(kind: &NodeKind) -> &'static [PortDef] {
         }
         Dot => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "A", Vec3),
-                port!(in "B", Vec3),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(in "A", Vec3), port!(in "B", Vec3)])
+                .as_slice()
         }
         Cross => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "A", Vec3),
-                port!(in "B", Vec3),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(in "A", Vec3), port!(in "B", Vec3)])
+                .as_slice()
         }
         Distance => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "A", Vec3),
-                port!(in "B", Vec3),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(in "A", Vec3), port!(in "B", Vec3)])
+                .as_slice()
         }
         Reflect => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "I", Vec3),
-                port!(in "N", Vec3),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(in "I", Vec3), port!(in "N", Vec3)])
+                .as_slice()
         }
         Refract => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "I", Vec3),
-                port!(in "N", Vec3),
-                port!(in "Eta", Float),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(in "I", Vec3),
+                    port!(in "N", Vec3),
+                    port!(in "Eta", Float),
+                ]
+            })
+            .as_slice()
         }
 
         // Colour
@@ -196,62 +203,166 @@ pub fn inputs(kind: &NodeKind) -> &'static [PortDef] {
         // Procedural
         ValueNoise | Voronoi => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "UV", Vec2),
-                port!(in "Scale", Float),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(in "UV", Vec2), port!(in "Scale", Float)])
+                .as_slice()
         }
 
         // Custom GLSL expression: takes 4 generic vec4 inputs + UV + time
         GlslExpr => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "A", Vec4),
-                port!(in "B", Vec4),
-                port!(in "UV", Vec2),
-                port!(in "Time", Float),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(in "A", Vec4),
+                    port!(in "B", Vec4),
+                    port!(in "UV", Vec2),
+                    port!(in "Time", Float),
+                ]
+            })
+            .as_slice()
+        }
+
+        // Comparison / logical binary ops (A op B)
+        LessThan | GreaterThan | LessEqual | GreaterEqual | Equal | NotEqual
+        | LogicalAnd | LogicalOr | BitAnd | BitOr | BitXor | LeftShift | RightShift => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "A", Float), port!(in "B", Float)])
+                .as_slice()
+        }
+
+        // Unary logical / bitwise
+        LogicalNot | BitNot => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "Value", Float)]).as_slice()
+        }
+
+        // Matrix constructors: 4 float inputs + meta stores full arg expression
+        Mat2 | Mat3 | Mat4 => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| {
+                vec![
+                    port!(in "V0", Float),
+                    port!(in "V1", Float),
+                    port!(in "V2", Float),
+                    port!(in "V3", Float),
+                ]
+            })
+            .as_slice()
         }
 
         // For Loop: Initial value, Count, Body expression
         ForLoop => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "Initial", Vec4),
-                port!(in "Count", Float),
-                port!(in "Body", Vec4),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(in "Initial", Vec4),
+                    port!(in "Count", Float),
+                    port!(in "Body", Vec4),
+                ]
+            })
+            .as_slice()
         }
 
         // Conditional: Condition, Threshold, TrueVal, FalseVal
         Conditional => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "Cond", Float),
-                port!(in "Thresh", Float),
-                port!(in "True", Vec4),
-                port!(in "False", Vec4),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(in "Cond", Float),
+                    port!(in "Thresh", Float),
+                    port!(in "True", Vec4),
+                    port!(in "False", Vec4),
+                ]
+            })
+            .as_slice()
         }
 
         // Texture sample: Channel index (float), UV
         TextureSample => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "Channel", Float),
-                port!(in "UV", Vec2),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(in "Channel", Float), port!(in "UV", Vec2)])
+                .as_slice()
         }
 
-        // Custom function: up to 4 generic inputs
+        // Custom function: up to 8 generic inputs
         CustomFunc => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(in "A", Vec4),
-                port!(in "B", Vec4),
-                port!(in "C", Vec4),
-                port!(in "D", Vec4),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(in "A", Vec4),
+                    port!(in "B", Vec4),
+                    port!(in "C", Vec4),
+                    port!(in "D", Vec4),
+                    port!(in "E", Vec4),
+                    port!(in "F", Vec4),
+                    port!(in "G", Vec4),
+                    port!(in "H", Vec4),
+                ]
+            })
+            .as_slice()
+        }
+
+        // --- Mixed-type constructors ---
+        Combine4FromVec3Float => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "XYZ", Vec3), port!(in "W", Float)])
+                .as_slice()
+        }
+        Combine4FromVec2Vec2 => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "XY", Vec2), port!(in "ZW", Vec2)])
+                .as_slice()
+        }
+        Combine4FromVec2FloatFloat => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| {
+                vec![
+                    port!(in "XY", Vec2),
+                    port!(in "Z", Float),
+                    port!(in "W", Float),
+                ]
+            })
+            .as_slice()
+        }
+        Combine3FromVec2Float => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "XY", Vec2), port!(in "Z", Float)])
+                .as_slice()
+        }
+
+        // --- Vec2 binary math ---
+        AddVec2 | SubtractVec2 | MultiplyVec2 | DivideVec2 => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "A", Vec2), port!(in "B", Vec2)])
+                .as_slice()
+        }
+        MultiplyVec2Scalar | DivideVec2Scalar => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "V", Vec2), port!(in "S", Float)])
+                .as_slice()
+        }
+
+        // --- Vec3 binary math ---
+        AddVec3 | SubtractVec3 | MultiplyVec3 | DivideVec3 => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "A", Vec3), port!(in "B", Vec3)])
+                .as_slice()
+        }
+        MultiplyVec3Scalar | DivideVec3Scalar => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "V", Vec3), port!(in "S", Float)])
+                .as_slice()
+        }
+
+        // --- Vec4 binary math ---
+        AddVec4 | SubtractVec4 | MultiplyVec4 | DivideVec4 => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "A", Vec4), port!(in "B", Vec4)])
+                .as_slice()
+        }
+        MultiplyVec4Scalar | DivideVec4Scalar => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(in "V", Vec4), port!(in "S", Float)])
+                .as_slice()
         }
     }
 }
@@ -262,8 +373,8 @@ pub fn outputs(kind: &NodeKind) -> &'static [PortDef] {
         Output => &[], // terminal node
 
         // Single float output
-        FloatConst | Time | DeltaTime | Frame | CpuUsage | RamUsage
-        | Battery | AudioLevel | Length | Dot | Distance | ValueNoise | Voronoi => {
+        FloatConst | Time | DeltaTime | Frame | CpuUsage | RamUsage | Battery | AudioLevel
+        | Length | Dot | Distance | ValueNoise | Voronoi => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
             P.get_or_init(|| vec![port!(out "Value", Float)]).as_slice()
         }
@@ -287,16 +398,17 @@ pub fn outputs(kind: &NodeKind) -> &'static [PortDef] {
         }
 
         // Math — pass through same type (we default to float)
-        Add | Subtract | Multiply | Divide | Power | Mod | Min | Max
-        | Sqrt | Abs | Negate | Sin | Cos | Tan | Asin | Acos | Atan | Atan2
-        | Exp | Exp2 | Log | Log2 | Sign | Ceil | Round
-        | Fract | Floor | Step | Saturate | OneMinus | InverseSqrt => {
+        Add | Subtract | Multiply | Divide | Power | Mod | Min | Max | Sqrt | Abs | Negate
+        | Sin | Cos | Tan | Asin | Acos | Atan | Atan2 | Exp | Exp2 | Log | Log2 | Sign | Ceil
+        | Round | Fract | Floor | Step | Saturate | OneMinus | InverseSqrt => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![port!(out "Result", Float)]).as_slice()
+            P.get_or_init(|| vec![port!(out "Result", Float)])
+                .as_slice()
         }
         Clamp | SmoothStep => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![port!(out "Result", Float)]).as_slice()
+            P.get_or_init(|| vec![port!(out "Result", Float)])
+                .as_slice()
         }
         Mix => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
@@ -320,31 +432,80 @@ pub fn outputs(kind: &NodeKind) -> &'static [PortDef] {
         // Split outputs — multiple ports
         SplitVec2 => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(out "X", Float),
-                port!(out "Y", Float),
-            ]).as_slice()
+            P.get_or_init(|| vec![port!(out "X", Float), port!(out "Y", Float)])
+                .as_slice()
         }
         SplitVec3 => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(out "X", Float),
-                port!(out "Y", Float),
-                port!(out "Z", Float),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(out "X", Float),
+                    port!(out "Y", Float),
+                    port!(out "Z", Float),
+                ]
+            })
+            .as_slice()
         }
         SplitVec4 => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![
-                port!(out "X", Float),
-                port!(out "Y", Float),
-                port!(out "Z", Float),
-                port!(out "W", Float),
-            ]).as_slice()
+            P.get_or_init(|| {
+                vec![
+                    port!(out "X", Float),
+                    port!(out "Y", Float),
+                    port!(out "Z", Float),
+                    port!(out "W", Float),
+                ]
+            })
+            .as_slice()
         }
 
         // Custom GLSL expression outputs vec4
         GlslExpr | ForLoop | Conditional | TextureSample | CustomFunc => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(out "Result", Vec4)]).as_slice()
+        }
+
+        // Comparison / logical / bitwise → single float result
+        LessThan | GreaterThan | LessEqual | GreaterEqual | Equal | NotEqual
+        | LogicalAnd | LogicalOr | LogicalNot | BitAnd | BitOr | BitXor | BitNot
+        | LeftShift | RightShift => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(out "Result", Float)]).as_slice()
+        }
+
+        // Matrix constructors → Vec4 output (closest available type)
+        Mat2 | Mat3 | Mat4 => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(out "Matrix", Vec4)]).as_slice()
+        }
+
+        // --- Mixed-type constructors ---
+        Combine4FromVec3Float | Combine4FromVec2Vec2 | Combine4FromVec2FloatFloat => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(out "Vec", Vec4)]).as_slice()
+        }
+        Combine3FromVec2Float => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(out "Vec", Vec3)]).as_slice()
+        }
+
+        // --- Vec2 math outputs ---
+        AddVec2 | SubtractVec2 | MultiplyVec2 | MultiplyVec2Scalar | DivideVec2
+        | DivideVec2Scalar => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(out "Result", Vec2)]).as_slice()
+        }
+
+        // --- Vec3 math outputs ---
+        AddVec3 | SubtractVec3 | MultiplyVec3 | MultiplyVec3Scalar | DivideVec3
+        | DivideVec3Scalar => {
+            static P: OnceLock<Vec<PortDef>> = OnceLock::new();
+            P.get_or_init(|| vec![port!(out "Result", Vec3)]).as_slice()
+        }
+
+        // --- Vec4 math outputs ---
+        AddVec4 | SubtractVec4 | MultiplyVec4 | MultiplyVec4Scalar | DivideVec4
+        | DivideVec4Scalar => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
             P.get_or_init(|| vec![port!(out "Result", Vec4)]).as_slice()
         }
@@ -370,23 +531,30 @@ pub fn default_values(kind: &NodeKind) -> Vec<DefaultValue> {
         }
 
         // Unary
-        Sqrt | Abs | Negate | Sin | Cos | Tan | Asin | Acos | Atan
-        | Exp | Exp2 | Log | Log2 | Sign | Ceil | Round
-        | Fract | Floor | Saturate | OneMinus | InverseSqrt => {
+        Sqrt | Abs | Negate | Sin | Cos | Tan | Asin | Acos | Atan | Exp | Exp2 | Log | Log2
+        | Sign | Ceil | Round | Fract | Floor | Saturate | OneMinus | InverseSqrt => {
             vec![DefaultValue::Float(0.0)]
         }
 
         // Atan2
         Atan2 => vec![DefaultValue::Float(0.0), DefaultValue::Float(1.0)],
 
-        Clamp => vec![DefaultValue::Float(0.0), DefaultValue::Float(0.0), DefaultValue::Float(1.0)],
+        Clamp => vec![
+            DefaultValue::Float(0.0),
+            DefaultValue::Float(0.0),
+            DefaultValue::Float(1.0),
+        ],
         Mix => vec![
             DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
             DefaultValue::Vec4([1.0, 1.0, 1.0, 1.0]),
             DefaultValue::Float(0.5),
         ],
         Step => vec![DefaultValue::Float(0.5), DefaultValue::Float(0.0)],
-        SmoothStep => vec![DefaultValue::Float(0.0), DefaultValue::Float(1.0), DefaultValue::Float(0.5)],
+        SmoothStep => vec![
+            DefaultValue::Float(0.0),
+            DefaultValue::Float(1.0),
+            DefaultValue::Float(0.5),
+        ],
 
         Combine2 => vec![DefaultValue::Float(0.0); 2],
         Combine3 => vec![DefaultValue::Float(0.0); 3],
@@ -409,16 +577,30 @@ pub fn default_values(kind: &NodeKind) -> Vec<DefaultValue> {
 
         RgbToHsv | HsvToRgb => vec![DefaultValue::Vec3([1.0, 0.0, 0.0])],
 
-        ValueNoise | Voronoi => vec![
-            DefaultValue::Vec2([0.0, 0.0]),
-            DefaultValue::Float(10.0),
-        ],
+        ValueNoise | Voronoi => vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Float(10.0)],
 
         // Custom GLSL expression: A (vec4), B (vec4), UV (vec2), Time (float)
         GlslExpr => vec![
             DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
             DefaultValue::Vec4([1.0, 1.0, 1.0, 1.0]),
             DefaultValue::Vec2([0.0, 0.0]),
+            DefaultValue::Float(0.0),
+        ],
+
+        // Comparison / logical binary ops
+        LessThan | GreaterThan | LessEqual | GreaterEqual | Equal | NotEqual
+        | LogicalAnd | LogicalOr | BitAnd | BitOr | BitXor | LeftShift | RightShift => {
+            vec![DefaultValue::Float(0.0), DefaultValue::Float(0.0)]
+        }
+
+        // Unary logical / bitwise
+        LogicalNot | BitNot => vec![DefaultValue::Float(0.0)],
+
+        // Matrix constructors
+        Mat2 | Mat3 | Mat4 => vec![
+            DefaultValue::Float(0.0),
+            DefaultValue::Float(0.0),
+            DefaultValue::Float(0.0),
             DefaultValue::Float(0.0),
         ],
 
@@ -435,17 +617,48 @@ pub fn default_values(kind: &NodeKind) -> Vec<DefaultValue> {
             DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
         ],
 
-        TextureSample => vec![
-            DefaultValue::Float(0.0),
-            DefaultValue::Vec2([0.0, 0.0]),
-        ],
+        TextureSample => vec![DefaultValue::Float(0.0), DefaultValue::Vec2([0.0, 0.0])],
 
         CustomFunc => vec![
             DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
             DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
             DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
             DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
+            DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
+            DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
+            DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
+            DefaultValue::Vec4([0.0, 0.0, 0.0, 1.0]),
         ],
+
+        // --- Mixed-type constructors ---
+        Combine4FromVec3Float => vec![DefaultValue::Vec3([0.0, 0.0, 0.0]), DefaultValue::Float(0.0)],
+        Combine4FromVec2Vec2 => vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Vec2([0.0, 0.0])],
+        Combine4FromVec2FloatFloat => vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Float(0.0), DefaultValue::Float(0.0)],
+        Combine3FromVec2Float => vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Float(0.0)],
+
+        // --- Vec2 binary math ---
+        AddVec2 | SubtractVec2 | MultiplyVec2 | DivideVec2 => {
+            vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Vec2([0.0, 0.0])]
+        }
+        MultiplyVec2Scalar | DivideVec2Scalar => {
+            vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Float(1.0)]
+        }
+
+        // --- Vec3 binary math ---
+        AddVec3 | SubtractVec3 | MultiplyVec3 | DivideVec3 => {
+            vec![DefaultValue::Vec3([0.0, 0.0, 0.0]), DefaultValue::Vec3([0.0, 0.0, 0.0])]
+        }
+        MultiplyVec3Scalar | DivideVec3Scalar => {
+            vec![DefaultValue::Vec3([0.0, 0.0, 0.0]), DefaultValue::Float(1.0)]
+        }
+
+        // --- Vec4 binary math ---
+        AddVec4 | SubtractVec4 | MultiplyVec4 | DivideVec4 => {
+            vec![DefaultValue::Vec4([0.0, 0.0, 0.0, 0.0]), DefaultValue::Vec4([0.0, 0.0, 0.0, 0.0])]
+        }
+        MultiplyVec4Scalar | DivideVec4Scalar => {
+            vec![DefaultValue::Vec4([0.0, 0.0, 0.0, 0.0]), DefaultValue::Float(1.0)]
+        }
 
         // Uniform nodes have no inputs
         _ => vec![],
@@ -459,7 +672,8 @@ pub fn default_values(kind: &NodeKind) -> Vec<DefaultValue> {
 /// Infer the GLSL type name from the node's defaults.
 /// Defaults to `"float"` if no defaults are available.
 fn infer_type(defaults: &[DefaultValue]) -> &'static str {
-    defaults.first()
+    defaults
+        .first()
         .map(|d| d.data_type().glsl_type())
         .unwrap_or("float")
 }
@@ -470,7 +684,13 @@ fn infer_type(defaults: &[DefaultValue]) -> &'static str {
 /// `meta` is optional metadata (GlslExpr: expression template, CustomFunc: function name).
 ///
 /// Returns a string like `float n3 = sin(n1);`.
-pub fn codegen(kind: &NodeKind, inputs: &[String], var: &str, defaults: &[DefaultValue], meta: &Option<String>) -> String {
+pub fn codegen(
+    kind: &NodeKind,
+    inputs: &[String],
+    var: &str,
+    defaults: &[DefaultValue],
+    meta: &Option<String>,
+) -> String {
     use NodeKind::*;
     match kind {
         // Output — handled specially in compile_glsl
@@ -602,6 +822,43 @@ pub fn codegen(kind: &NodeKind, inputs: &[String], var: &str, defaults: &[Defaul
             }
         }
 
+        // Comparison
+        LessThan => format!("float {} = float({} < {});", var, a(inputs, 0), a(inputs, 1)),
+        GreaterThan => format!("float {} = float({} > {});", var, a(inputs, 0), a(inputs, 1)),
+        LessEqual => format!("float {} = float({} <= {});", var, a(inputs, 0), a(inputs, 1)),
+        GreaterEqual => format!("float {} = float({} >= {});", var, a(inputs, 0), a(inputs, 1)),
+        Equal => format!("float {} = float({} == {});", var, a(inputs, 0), a(inputs, 1)),
+        NotEqual => format!("float {} = float({} != {});", var, a(inputs, 0), a(inputs, 1)),
+
+        // Logical
+        LogicalAnd => format!("float {} = float({} > 0.0 && {} > 0.0);", var, a(inputs, 0), a(inputs, 1)),
+        LogicalOr => format!("float {} = float({} > 0.0 || {} > 0.0);", var, a(inputs, 0), a(inputs, 1)),
+        LogicalNot => format!("float {} = float(!({} > 0.0));", var, a(inputs, 0)),
+
+        // Bitwise
+        BitAnd => format!("int {v}_i = int({a}) & int({b}); float {v} = float({v}_i);", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        BitOr => format!("int {v}_i = int({a}) | int({b}); float {v} = float({v}_i);", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        BitXor => format!("int {v}_i = int({a}) ^ int({b}); float {v} = float({v}_i);", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        BitNot => format!("int {v}_i = ~int({a}); float {v} = float({v}_i);", v = var, a = a(inputs, 0)),
+        LeftShift => format!("int {v}_i = int({a}) << int({b}); float {v} = float({v}_i);", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        RightShift => format!("int {v}_i = int({a}) >> int({b}); float {v} = float({v}_i);", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+
+        // Matrix constructors — use meta for the full argument expression
+        Mat2 | Mat3 | Mat4 => {
+            let type_name = match kind {
+                Mat2 => "mat2",
+                Mat3 => "mat3",
+                Mat4 => "mat4",
+                _ => unreachable!(),
+            };
+            if let Some(tmpl) = meta {
+                format!("{} {} = {};", type_name, var, tmpl)
+            } else {
+                let args: Vec<&str> = inputs.iter().map(|s| s.as_str()).collect();
+                format!("{} {} = {}({});", type_name, var, type_name, args.join(", "))
+            }
+        }
+
         // For loop: iterate count times, accumulating into result
         ForLoop => format!(
             "vec4 {v} = {init}; {{ float _kfl = max({count}, 0.0001); for (int i = 0; i < int({count}); i++) {{ {v} += {body} / _kfl; }} }}",
@@ -627,11 +884,15 @@ pub fn codegen(kind: &NodeKind, inputs: &[String], var: &str, defaults: &[Defaul
             )
         },
 
-        // Custom function call — use stored function name if available
+        // Custom function call — meta format: "funcname" or "funcname:N"
         CustomFunc => {
-            if let Some(func_name) = meta {
-                // Emit a call to the named function with available args
-                let arg_list: Vec<&str> = inputs.iter().map(|s| s.as_str()).collect();
+            if let Some(raw_meta) = meta {
+                let (func_name, arg_count) = if let Some((n, c)) = raw_meta.split_once(':') {
+                    (n, c.parse::<usize>().unwrap_or(inputs.len()))
+                } else {
+                    (raw_meta.as_str(), inputs.len())
+                };
+                let arg_list: Vec<&str> = inputs.iter().take(arg_count).map(|s| s.as_str()).collect();
                 let args_str = arg_list.join(", ");
                 format!("vec4 {v} = {fn_name}({args});",
                     v = var, fn_name = func_name, args = args_str)
@@ -642,6 +903,36 @@ pub fn codegen(kind: &NodeKind, inputs: &[String], var: &str, defaults: &[Defaul
                 )
             }
         },
+
+        // --- Mixed-type constructors ---
+        Combine4FromVec3Float => format!("vec4 {} = vec4({}, {});", var, a(inputs, 0), a(inputs, 1)),
+        Combine4FromVec2Vec2 => format!("vec4 {} = vec4({}, {});", var, a(inputs, 0), a(inputs, 1)),
+        Combine4FromVec2FloatFloat => format!("vec4 {} = vec4({}, {}, {});", var, a(inputs, 0), a(inputs, 1), a(inputs, 2)),
+        Combine3FromVec2Float => format!("vec3 {} = vec3({}, {});", var, a(inputs, 0), a(inputs, 1)),
+
+        // --- Vec2 math ---
+        AddVec2 => format!("vec2 {} = {} + {};", var, a(inputs, 0), a(inputs, 1)),
+        SubtractVec2 => format!("vec2 {} = {} - {};", var, a(inputs, 0), a(inputs, 1)),
+        MultiplyVec2 => format!("vec2 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
+        MultiplyVec2Scalar => format!("vec2 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
+        DivideVec2 => format!("vec2 {v} = {a} / max(abs({b}), vec2(0.0001)) * sign({b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        DivideVec2Scalar => format!("vec2 {v} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+
+        // --- Vec3 math ---
+        AddVec3 => format!("vec3 {} = {} + {};", var, a(inputs, 0), a(inputs, 1)),
+        SubtractVec3 => format!("vec3 {} = {} - {};", var, a(inputs, 0), a(inputs, 1)),
+        MultiplyVec3 => format!("vec3 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
+        MultiplyVec3Scalar => format!("vec3 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
+        DivideVec3 => format!("vec3 {v} = {a} / max(abs({b}), vec3(0.0001)) * sign({b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        DivideVec3Scalar => format!("vec3 {v} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+
+        // --- Vec4 math ---
+        AddVec4 => format!("vec4 {} = {} + {};", var, a(inputs, 0), a(inputs, 1)),
+        SubtractVec4 => format!("vec4 {} = {} - {};", var, a(inputs, 0), a(inputs, 1)),
+        MultiplyVec4 => format!("vec4 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
+        MultiplyVec4Scalar => format!("vec4 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
+        DivideVec4 => format!("vec4 {v} = {a} / max(abs({b}), vec4(0.0001)) * sign({b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        DivideVec4Scalar => format!("vec4 {v} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
     }
 }
 
@@ -659,7 +950,7 @@ pub fn helper_functions(nodes: &HashMap<NodeId, Node>) -> String {
 
     if has(&NodeKind::RgbToHsv) {
         out.push_str(
-"vec3 kroma_rgb2hsv(vec3 c) {
+            "vec3 kroma_rgb2hsv(vec3 c) {
     vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
     vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
     vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
@@ -672,7 +963,7 @@ pub fn helper_functions(nodes: &HashMap<NodeId, Node>) -> String {
 
     if has(&NodeKind::HsvToRgb) {
         out.push_str(
-"vec3 kroma_hsv2rgb(vec3 c) {
+            "vec3 kroma_hsv2rgb(vec3 c) {
     vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
     vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
     return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
@@ -682,7 +973,7 @@ pub fn helper_functions(nodes: &HashMap<NodeId, Node>) -> String {
 
     if has(&NodeKind::ValueNoise) {
         out.push_str(
-"float kroma_hash(vec2 p) {
+            "float kroma_hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
 float kroma_vnoise(vec2 p) {
@@ -701,15 +992,16 @@ float kroma_vnoise(vec2 p) {
     if has(&NodeKind::Voronoi) && !has(&NodeKind::ValueNoise) {
         // Emit kroma_hash dependency if ValueNoise hasn't already emitted it
         out.push_str(
-"float kroma_hash(vec2 p) {
+            "float kroma_hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
 }
-");
+",
+        );
     }
 
     if has(&NodeKind::Voronoi) {
         out.push_str(
-"float kroma_voronoi(vec2 p) {
+            "float kroma_voronoi(vec2 p) {
     vec2 n = floor(p);
     vec2 f = fract(p);
     float md = 8.0;

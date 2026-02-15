@@ -3,6 +3,10 @@
 //! Each theme provides a complete set of color/spacing tokens that all
 //! panels use for consistent styling.
 
+pub mod tokens;
+
+pub use tokens::ThemeTokens;
+
 // ---------------------------------------------------------------------------
 // Built-in theme names
 // ---------------------------------------------------------------------------
@@ -48,6 +52,17 @@ impl KromaThemeId {
             Self::Nord => iced::Theme::Nord,
             Self::Dracula => iced::Theme::Dracula,
             Self::OneDark => iced::Theme::Ferra, // closest dark theme
+        }
+    }
+
+    /// Get the full set of Kroma color/spacing tokens for this theme.
+    pub fn tokens(&self) -> ThemeTokens {
+        match self {
+            Self::TokyoNight => tokens::tokyo_night(),
+            Self::CatppuccinMocha => tokens::catppuccin_mocha(),
+            Self::Nord => tokens::nord(),
+            Self::Dracula => tokens::dracula(),
+            Self::OneDark => tokens::one_dark(),
         }
     }
 }

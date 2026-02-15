@@ -29,18 +29,18 @@ pub enum HyprlandEvent {
 fn hyprland_socket2_path() -> Result<String> {
     let instance_sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
         .context("HYPRLAND_INSTANCE_SIGNATURE not set — not running under Hyprland?")?;
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .unwrap_or_else(|_| "/tmp".into());
-    Ok(format!("{}/hypr/{}/.socket2.sock", runtime_dir, instance_sig))
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+    Ok(format!(
+        "{}/hypr/{}/.socket2.sock",
+        runtime_dir, instance_sig
+    ))
 }
 
 /// Start the Hyprland event listener on a background thread.
 ///
 /// Events are sent through `tx`. The returned `JoinHandle` can be used
 /// to monitor the thread, but it runs indefinitely until disconnected.
-pub fn start_listener(
-    tx: Sender<HyprlandEvent>,
-) -> Result<std::thread::JoinHandle<()>> {
+pub fn start_listener(tx: Sender<HyprlandEvent>) -> Result<std::thread::JoinHandle<()>> {
     let socket_path = hyprland_socket2_path()?;
     info!("Connecting to Hyprland event socket: {}", socket_path);
 

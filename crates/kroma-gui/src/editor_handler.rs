@@ -45,8 +45,7 @@ impl KromaApp {
                         if self.editor_text_mode {
                             self.shader_graph = editor::parse_glsl_to_graph(&src);
                         } else {
-                            self.editor_glsl_content =
-                                text_editor::Content::with_text(&src);
+                            self.editor_glsl_content = text_editor::Content::with_text(&src);
                         }
                     }
                     Err(e) => {
@@ -104,10 +103,7 @@ impl KromaApp {
                         self.graph_canvas = editor::canvas::GraphCanvas::default();
                         let n = self.shader_graph.nodes().count();
                         let c = self.shader_graph.connections().len();
-                        self.log_msg(format!(
-                            "Parsed GLSL → {} nodes, {} connections",
-                            n, c
-                        ));
+                        self.log_msg(format!("Parsed GLSL → {} nodes, {} connections", n, c));
                     }
                 }
             }
@@ -149,16 +145,14 @@ impl KromaApp {
                     Message::EditorLoadGlslResult,
                 );
             }
-            Message::EditorLoadGlslResult(Some(path)) => {
-                match std::fs::read_to_string(&path) {
-                    Ok(source) => {
-                        self.editor_glsl_content = text_editor::Content::with_text(&source);
-                        self.editor_text_mode = true;
-                        self.log_msg(format!("Loaded: {}", path.display()));
-                    }
-                    Err(e) => self.log_msg(format!("Failed to read: {}", e)),
+            Message::EditorLoadGlslResult(Some(path)) => match std::fs::read_to_string(&path) {
+                Ok(source) => {
+                    self.editor_glsl_content = text_editor::Content::with_text(&source);
+                    self.editor_text_mode = true;
+                    self.log_msg(format!("Loaded: {}", path.display()));
                 }
-            }
+                Err(e) => self.log_msg(format!("Failed to read: {}", e)),
+            },
             Message::EditorLoadGlslResult(None) => {}
             _ => {} // Not an editor message — ignore
         }

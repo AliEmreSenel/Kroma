@@ -93,9 +93,7 @@ pub fn rasterize_font_atlas(font_data: &[u8], font_size: f32) -> Result<FontAtla
     let mut rgba = vec![0u8; (atlas_w * atlas_h * 4) as usize];
     let mut glyphs = Vec::with_capacity(num_glyphs);
 
-    for (i, ((metrics, bitmap), &ch)) in
-        rasterized.iter().zip(chars.iter()).enumerate()
-    {
+    for (i, ((metrics, bitmap), &ch)) in rasterized.iter().zip(chars.iter()).enumerate() {
         let col = (i as u32) % cols;
         let row = (i as u32) / cols;
         let base_x = col * cell_w + 1; // +1 for padding
@@ -111,7 +109,7 @@ pub fn rasterize_font_atlas(font_data: &[u8], font_size: f32) -> Result<FontAtla
 
                 if dst_idx + 3 < rgba.len() && src_idx < bitmap.len() {
                     let alpha = bitmap[src_idx];
-                    rgba[dst_idx] = 255;     // R
+                    rgba[dst_idx] = 255; // R
                     rgba[dst_idx + 1] = 255; // G
                     rgba[dst_idx + 2] = 255; // B
                     rgba[dst_idx + 3] = alpha; // A

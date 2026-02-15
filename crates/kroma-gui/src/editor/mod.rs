@@ -6,11 +6,7 @@
 pub mod canvas;
 
 // Re-export everything from kroma-graph so the rest of kroma-gui can use it.
-pub use kroma_graph::{
-    graph::ShaderGraph,
-    lowering::parse_glsl_to_graph,
-    types::*,
-};
+pub use kroma_graph::{graph::ShaderGraph, lowering::parse_glsl_to_graph, types::*};
 
 // Re-export sub-modules
 

@@ -81,11 +81,10 @@ impl Default for DaemonConfig {
 impl DaemonConfig {
     /// Returns the config file path.
     pub fn config_path() -> PathBuf {
-        let config_dir = std::env::var("XDG_CONFIG_HOME")
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                format!("{}/.config", home)
-            });
+        let config_dir = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            format!("{}/.config", home)
+        });
         PathBuf::from(config_dir).join("kroma").join("config.toml")
     }
 
@@ -114,8 +113,7 @@ impl DaemonConfig {
             std::fs::create_dir_all(parent)?;
         }
 
-        let content = toml::to_string_pretty(self)
-            .context("Failed to serialize config")?;
+        let content = toml::to_string_pretty(self).context("Failed to serialize config")?;
         std::fs::write(&path, content)
             .with_context(|| format!("Failed to write config: {}", path.display()))?;
 
@@ -161,7 +159,10 @@ mod tests {
 
     #[test]
     fn frame_budget_calculation() {
-        let cfg = DaemonConfig { target_fps: 60, ..Default::default() };
+        let cfg = DaemonConfig {
+            target_fps: 60,
+            ..Default::default()
+        };
         let budget = cfg.frame_budget();
         // 1_000_000 / 60 = 16_666 microseconds
         assert_eq!(budget.as_micros(), 16666);

@@ -90,59 +90,36 @@ impl DockNode {
     /// The default layout preset:
     /// ```text
     /// ┌──────────┬─────────────────┬───────────┐
-    /// │ Library  │   Node Editor   │Properties │
+    /// │ Asset    │  Asset Preview  │   Live    │
+    /// │ Browser  │  (context-aware │  Preview  │
+    /// │          │   main view)    │  (daemon) │
     /// │          │                 │           │
-    /// │          │                 │           │
-    /// │          ├─────────────────┤           │
-    /// │          │ Code/Preview    │           │
     /// ├──────────┴─────────────────┴───────────┤
-    /// │  Error Log  │  Dashboard  │  Import   │
-    /// └──────────────────────────────────────────┘
+    /// │  Error Log                             │
+    /// └────────────────────────────────────────┘
     /// ```
     pub fn default_layout() -> Self {
-        // Bottom bar: Error Log + Dashboard + Import as tabs
-        let bottom = DockNode::Leaf {
-            tabs: vec![PanelId::ErrorLog, PanelId::Dashboard, PanelId::Import],
-            active: 0,
-        };
+        // Bottom bar: Error Log only
+        let bottom = DockNode::leaf(PanelId::ErrorLog);
 
-        // Left sidebar: Library + Asset Browser as tabs
-        let left_sidebar = DockNode::Leaf {
-            tabs: vec![PanelId::Library, PanelId::AssetBrowser],
-            active: 0,
-        };
+        // Left sidebar: Asset Browser
+        let left_sidebar = DockNode::leaf(PanelId::AssetBrowser);
 
-        // Right sidebar: Properties + Settings as tabs
-        let right_sidebar = DockNode::Leaf {
-            tabs: vec![PanelId::Properties, PanelId::Settings],
-            active: 0,
-        };
+        // Right sidebar: Live Preview
+        let right_sidebar = DockNode::leaf(PanelId::LivePreview);
 
-        // Center top: Node Editor
-        let center_top = DockNode::leaf(PanelId::NodeEditor);
-
-        // Center bottom: Code Editor + Live Preview + Asset Preview as tabs
-        let center_bottom = DockNode::Leaf {
-            tabs: vec![
-                PanelId::CodeEditor,
-                PanelId::LivePreview,
-                PanelId::AssetPreview,
-            ],
-            active: 0,
-        };
-
-        // Center area: top (node editor) / bottom (code + preview)
-        let center = DockNode::vsplit(0.6, center_top, center_bottom);
+        // Center: Main view — Asset Preview (context-aware)
+        let center = DockNode::leaf(PanelId::AssetPreview);
 
         // Main area: left sidebar | center | right sidebar
         let main_area = DockNode::hsplit(
             0.18,
             left_sidebar,
-            DockNode::hsplit(0.75, center, right_sidebar),
+            DockNode::hsplit(0.78, center, right_sidebar),
         );
 
         // Root: main area / bottom bar
-        DockNode::vsplit(0.75, main_area, bottom)
+        DockNode::vsplit(0.78, main_area, bottom)
     }
 
     // -----------------------------------------------------------------------
@@ -208,32 +185,30 @@ impl DockNode {
     /// Insert a panel at a target path with a drop zone.
     pub fn insert_panel(&mut self, panel_id: PanelId, path: &[PathDir], zone: DropZone) {
         match (self, path.first()) {
-            (node @ DockNode::Leaf { .. }, None) => {
-                match zone {
-                    DropZone::Center => {
-                        if let DockNode::Leaf { tabs, active, .. } = node {
-                            tabs.push(panel_id);
-                            *active = tabs.len() - 1;
-                        }
-                    }
-                    DropZone::Left => {
-                        let existing = std::mem::replace(node, DockNode::Empty);
-                        *node = DockNode::hsplit(0.3, DockNode::leaf(panel_id), existing);
-                    }
-                    DropZone::Right => {
-                        let existing = std::mem::replace(node, DockNode::Empty);
-                        *node = DockNode::hsplit(0.7, existing, DockNode::leaf(panel_id));
-                    }
-                    DropZone::Top => {
-                        let existing = std::mem::replace(node, DockNode::Empty);
-                        *node = DockNode::vsplit(0.3, DockNode::leaf(panel_id), existing);
-                    }
-                    DropZone::Bottom => {
-                        let existing = std::mem::replace(node, DockNode::Empty);
-                        *node = DockNode::vsplit(0.7, existing, DockNode::leaf(panel_id));
+            (node @ DockNode::Leaf { .. }, None) => match zone {
+                DropZone::Center => {
+                    if let DockNode::Leaf { tabs, active, .. } = node {
+                        tabs.push(panel_id);
+                        *active = tabs.len() - 1;
                     }
                 }
-            }
+                DropZone::Left => {
+                    let existing = std::mem::replace(node, DockNode::Empty);
+                    *node = DockNode::hsplit(0.3, DockNode::leaf(panel_id), existing);
+                }
+                DropZone::Right => {
+                    let existing = std::mem::replace(node, DockNode::Empty);
+                    *node = DockNode::hsplit(0.7, existing, DockNode::leaf(panel_id));
+                }
+                DropZone::Top => {
+                    let existing = std::mem::replace(node, DockNode::Empty);
+                    *node = DockNode::vsplit(0.3, DockNode::leaf(panel_id), existing);
+                }
+                DropZone::Bottom => {
+                    let existing = std::mem::replace(node, DockNode::Empty);
+                    *node = DockNode::vsplit(0.7, existing, DockNode::leaf(panel_id));
+                }
+            },
             (DockNode::Split { left, right, .. }, Some(&dir)) => {
                 let child = match dir {
                     PathDir::Left => left.as_mut(),
@@ -425,17 +400,11 @@ mod tests {
         tree.collect_panels(&mut panels);
 
         // Should contain all standard panels
-        assert!(panels.contains(&PanelId::Dashboard));
-        assert!(panels.contains(&PanelId::NodeEditor));
-        assert!(panels.contains(&PanelId::CodeEditor));
+        // Dashboard has its own screen, Import is a popup — neither in dock tree
         assert!(panels.contains(&PanelId::AssetBrowser));
         assert!(panels.contains(&PanelId::AssetPreview));
-        assert!(panels.contains(&PanelId::Properties));
-        assert!(panels.contains(&PanelId::Library));
         assert!(panels.contains(&PanelId::LivePreview));
-        assert!(panels.contains(&PanelId::Import));
         assert!(panels.contains(&PanelId::ErrorLog));
-        assert!(panels.contains(&PanelId::Settings));
     }
 
     #[test]
@@ -494,10 +463,17 @@ mod tests {
     fn insert_panel_split() {
         let mut tree = DockNode::leaf(PanelId::Dashboard);
         tree.insert_panel(PanelId::Settings, &[], DropZone::Right);
-        if let DockNode::Split { axis, left, right, .. } = &tree {
+        if let DockNode::Split {
+            axis, left, right, ..
+        } = &tree
+        {
             assert_eq!(*axis, SplitAxis::Horizontal);
-            assert!(matches!(left.as_ref(), DockNode::Leaf { tabs, .. } if tabs == &[PanelId::Dashboard]));
-            assert!(matches!(right.as_ref(), DockNode::Leaf { tabs, .. } if tabs == &[PanelId::Settings]));
+            assert!(
+                matches!(left.as_ref(), DockNode::Leaf { tabs, .. } if tabs == &[PanelId::Dashboard])
+            );
+            assert!(
+                matches!(right.as_ref(), DockNode::Leaf { tabs, .. } if tabs == &[PanelId::Settings])
+            );
         } else {
             panic!("Expected Split");
         }
@@ -507,7 +483,10 @@ mod tests {
     fn find_panel_in_tree() {
         let tree = DockNode::default_layout();
         let path = tree.find_panel(PanelId::NodeEditor, &mut Vec::new());
-        assert!(path.is_some(), "NodeEditor should be findable in default layout");
+        assert!(
+            path.is_some(),
+            "NodeEditor should be findable in default layout"
+        );
     }
 
     /// Regression test: dropping a panel from the left child of a split onto
@@ -523,11 +502,11 @@ mod tests {
         let mut state = DockState {
             root: DockNode::hsplit(
                 0.5,
-                DockNode::leaf(PanelId::Dashboard),        // A at [Left]
+                DockNode::leaf(PanelId::Dashboard), // A at [Left]
                 DockNode::hsplit(
                     0.5,
-                    DockNode::leaf(PanelId::Settings),      // B at [Right, Left]
-                    DockNode::leaf(PanelId::ErrorLog),      // C at [Right, Right]
+                    DockNode::leaf(PanelId::Settings), // B at [Right, Left]
+                    DockNode::leaf(PanelId::ErrorLog), // C at [Right, Right]
                 ),
             ),
         };
@@ -566,7 +545,15 @@ mod tests {
         };
         tree.insert_panel_at_index(PanelId::Settings, &[], 1);
         if let DockNode::Leaf { tabs, active, .. } = &tree {
-            assert_eq!(tabs, &[PanelId::Dashboard, PanelId::Settings, PanelId::ErrorLog, PanelId::Import]);
+            assert_eq!(
+                tabs,
+                &[
+                    PanelId::Dashboard,
+                    PanelId::Settings,
+                    PanelId::ErrorLog,
+                    PanelId::Import
+                ]
+            );
             assert_eq!(*active, 1);
         } else {
             panic!("Expected Leaf");

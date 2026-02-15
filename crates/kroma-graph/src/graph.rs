@@ -1,8 +1,8 @@
 //! The shader graph — nodes, connections, and GLSL compilation.
 
-use std::collections::{HashMap, VecDeque};
-use crate::types::*;
 use crate::nodes;
+use crate::types::*;
+use std::collections::{HashMap, VecDeque};
 
 /// The complete node graph — nodes + connections.
 pub struct ShaderGraph {
@@ -65,11 +65,17 @@ impl ShaderGraph {
     }
 
     pub fn remove_node(&mut self, id: NodeId) {
-        if self.nodes.get(&id).map(|n| n.kind == NodeKind::Output).unwrap_or(false) {
+        if self
+            .nodes
+            .get(&id)
+            .map(|n| n.kind == NodeKind::Output)
+            .unwrap_or(false)
+        {
             return;
         }
         self.nodes.remove(&id);
-        self.connections.retain(|c| c.from.node != id && c.to.node != id);
+        self.connections
+            .retain(|c| c.from.node != id && c.to.node != id);
     }
 
     /// Re-insert a previously removed node (used for undo).
@@ -119,11 +125,7 @@ impl ShaderGraph {
         self.connections.retain(|c| c.to != to);
         let id = ConnectionId(self.next_conn_id);
         self.next_conn_id += 1;
-        self.connections.push(Connection {
-            id,
-            from,
-            to,
-        });
+        self.connections.push(Connection { id, from, to });
     }
 
     pub fn connections_mut(&mut self) -> &mut Vec<Connection> {
@@ -132,7 +134,10 @@ impl ShaderGraph {
 
     /// Find the connection feeding a specific input port.
     fn input_source(&self, addr: PortAddr) -> Option<PortAddr> {
-        self.connections.iter().find(|c| c.to == addr).map(|c| c.from)
+        self.connections
+            .iter()
+            .find(|c| c.to == addr)
+            .map(|c| c.from)
     }
 
     // -----------------------------------------------------------------------
@@ -165,8 +170,14 @@ impl ShaderGraph {
             out_edges.insert(*id, Vec::new());
         }
         for conn in &self.connections {
-            in_edges.entry(conn.to.node).or_default().push(conn.from.node);
-            out_edges.entry(conn.from.node).or_default().push(conn.to.node);
+            in_edges
+                .entry(conn.to.node)
+                .or_default()
+                .push(conn.from.node);
+            out_edges
+                .entry(conn.from.node)
+                .or_default()
+                .push(conn.to.node);
         }
 
         // Compute depth via longest-path from sources (ensures nodes feeding
@@ -189,7 +200,9 @@ impl ShaderGraph {
         while let Some(id) = queue.pop_front() {
             iterations += 1;
             if iterations > max_iterations {
-                eprintln!("[kroma-graph] auto_layout: iteration limit reached — graph may contain cycles");
+                eprintln!(
+                    "[kroma-graph] auto_layout: iteration limit reached — graph may contain cycles"
+                );
                 break;
             }
             let d = depth[&id];
@@ -211,7 +224,9 @@ impl ShaderGraph {
 
         // Ensure the Output node sits in the rightmost column
         let max_depth = depth.values().copied().max().unwrap_or(0);
-        if let Some(output_id) = self.nodes.values()
+        if let Some(output_id) = self
+            .nodes
+            .values()
             .find(|n| n.kind == NodeKind::Output)
             .map(|n| n.id)
         {
@@ -235,7 +250,8 @@ impl ShaderGraph {
         for (col_idx, col_nodes) in columns.iter().enumerate() {
             let x = MARGIN_X + col_idx as f32 * COL_SPACING;
             // Centre the column vertically
-            let col_height = col_nodes.len() as f32 * (NODE_HEIGHT_ESTIMATE + ROW_SPACING) - ROW_SPACING;
+            let col_height =
+                col_nodes.len() as f32 * (NODE_HEIGHT_ESTIMATE + ROW_SPACING) - ROW_SPACING;
             let start_y = MARGIN_Y + (600.0 - col_height).max(0.0) / 2.0;
             for (row_idx, &id) in col_nodes.iter().enumerate() {
                 let y = start_y + row_idx as f32 * (NODE_HEIGHT_ESTIMATE + ROW_SPACING);
@@ -252,17 +268,26 @@ impl ShaderGraph {
 
     /// Compile the graph into a standalone Shadertoy-compatible GLSL fragment.
     pub fn compile_glsl(&self) -> Result<String, String> {
-        let output_node = self.nodes.values().find(|n| n.kind == NodeKind::Output)
+        let output_node = self
+            .nodes
+            .values()
+            .find(|n| n.kind == NodeKind::Output)
             .ok_or("No Output node in graph")?;
 
         let mut visited: HashMap<NodeId, String> = HashMap::new();
         let mut code_lines: Vec<String> = Vec::new();
         let mut counter = 0u32;
 
-        let color_input = PortAddr { node: output_node.id, port: 0 };
+        let color_input = PortAddr {
+            node: output_node.id,
+            port: 0,
+        };
         let color_expr = if let Some(source) = self.input_source(color_input) {
-            let src_expr = self.eval_node(source.node, &mut visited, &mut code_lines, &mut counter)?;
-            let src_node = self.nodes.get(&source.node)
+            let src_expr =
+                self.eval_node(source.node, &mut visited, &mut code_lines, &mut counter)?;
+            let src_node = self
+                .nodes
+                .get(&source.node)
                 .ok_or_else(|| format!("Missing node {} referenced by connection", source.node))?;
             if src_node.outputs().len() > 1 {
                 format!("{}_o{}", src_expr, source.port)
@@ -270,7 +295,9 @@ impl ShaderGraph {
                 src_expr
             }
         } else {
-            output_node.defaults.first()
+            output_node
+                .defaults
+                .first()
                 .map(|d| d.to_glsl())
                 .unwrap_or_else(|| "vec4(0.0, 0.0, 0.0, 1.0)".into())
         };
@@ -312,6 +339,25 @@ impl ShaderGraph {
         if let Some(expr) = visited.get(&id) {
             // A sentinel of "" means we're currently evaluating this node (cycle).
             if expr.is_empty() {
+                // Walk the graph to check if there's a ForLoop node in the
+                // currently-evaluating set (all entries with "" sentinel).
+                // For-loop bodies naturally reference the loop variable, creating
+                // cycles that should be broken with a placeholder variable.
+                let has_loop_in_stack = visited.iter().any(|(nid, val)| {
+                    val.is_empty()
+                        && self
+                            .nodes
+                            .get(nid)
+                            .map_or(false, |n| matches!(n.kind, NodeKind::ForLoop))
+                });
+                if has_loop_in_stack {
+                    // Break the cycle — use the node's label or a generated name
+                    let node = self.nodes.get(&id);
+                    let cycle_var = node
+                        .and_then(|n| n.label.clone())
+                        .unwrap_or_else(|| format!("_cyc{}", counter));
+                    return Ok(cycle_var);
+                }
                 return Err(format!("Cycle detected at node {:?}", id));
             }
             return Ok(expr.clone());
@@ -327,25 +373,43 @@ impl ShaderGraph {
             let addr = PortAddr { node: id, port: i };
             let expr = if let Some(source) = self.input_source(addr) {
                 let src_expr = self.eval_node(source.node, visited, code, counter)?;
-                let src_node = self.nodes.get(&source.node)
-                    .ok_or_else(|| format!("Missing node {} referenced by connection", source.node))?;
+                let src_node = self.nodes.get(&source.node).ok_or_else(|| {
+                    format!("Missing node {} referenced by connection", source.node)
+                })?;
                 if src_node.outputs().len() > 1 {
                     format!("{}_o{}", src_expr, source.port)
                 } else {
                     src_expr
                 }
             } else {
-                node.defaults.get(i)
+                node.defaults
+                    .get(i)
                     .map(|d| d.to_glsl())
                     .unwrap_or_else(|| "0.0".to_string())
             };
             input_exprs.push(expr);
         }
 
-        let var = format!("n{}", counter);
-        *counter += 1;
+        let var = if let Some(ref name) = node.label {
+            // Use original variable name, with counter suffix if already used
+            let candidate = name.clone();
+            if visited.values().any(|v| v == &candidate) {
+                let deduped = format!("{}_{}", name, counter);
+                *counter += 1;
+                deduped
+            } else {
+                *counter += 1;
+                candidate
+            }
+        } else {
+            let v = format!("n{}", counter);
+            *counter += 1;
+            v
+        };
 
-        let snippet = node.kind.codegen(&input_exprs, &var, &node.defaults, &node.meta);
+        let snippet = node
+            .kind
+            .codegen(&input_exprs, &var, &node.defaults, &node.meta);
         if !snippet.is_empty() {
             code.push(snippet);
         }
@@ -375,14 +439,26 @@ mod tests {
         let combine_id = graph.add_node(NodeKind::Combine4, [200.0, 0.0]);
         // Connect Time→Combine4 port 0
         graph.add_connection(
-            PortAddr { node: time_id, port: 0 },
-            PortAddr { node: combine_id, port: 0 },
+            PortAddr {
+                node: time_id,
+                port: 0,
+            },
+            PortAddr {
+                node: combine_id,
+                port: 0,
+            },
         );
         // The Output node is always NodeId(1) in a new graph
         let output_id = NodeId(1);
         graph.add_connection(
-            PortAddr { node: combine_id, port: 0 },
-            PortAddr { node: output_id, port: 0 },
+            PortAddr {
+                node: combine_id,
+                port: 0,
+            },
+            PortAddr {
+                node: output_id,
+                port: 0,
+            },
         );
         let glsl = graph.compile_glsl().unwrap();
         assert!(glsl.contains("iTime"));
@@ -396,8 +472,14 @@ mod tests {
         let add_id = graph.add_node(NodeKind::Add, [100.0, 0.0]);
         let output_id = NodeId(1);
         graph.add_connection(
-            PortAddr { node: add_id, port: 0 },
-            PortAddr { node: output_id, port: 0 },
+            PortAddr {
+                node: add_id,
+                port: 0,
+            },
+            PortAddr {
+                node: output_id,
+                port: 0,
+            },
         );
         let glsl = graph.compile_glsl().unwrap();
         // Add with default Float inputs should declare a float variable
@@ -410,20 +492,17 @@ mod tests {
         let a = graph.add_node(NodeKind::Add, [0.0, 0.0]);
         let b = graph.add_node(NodeKind::Add, [100.0, 0.0]);
         // A→B port 0
-        graph.add_connection(
-            PortAddr { node: a, port: 0 },
-            PortAddr { node: b, port: 0 },
-        );
+        graph.add_connection(PortAddr { node: a, port: 0 }, PortAddr { node: b, port: 0 });
         // B→A port 0 — creates a cycle
-        graph.add_connection(
-            PortAddr { node: b, port: 0 },
-            PortAddr { node: a, port: 0 },
-        );
+        graph.add_connection(PortAddr { node: b, port: 0 }, PortAddr { node: a, port: 0 });
         // Connect B to output to force traversal
         let output_id = NodeId(1);
         graph.add_connection(
             PortAddr { node: b, port: 0 },
-            PortAddr { node: output_id, port: 0 },
+            PortAddr {
+                node: output_id,
+                port: 0,
+            },
         );
         let result = graph.compile_glsl();
         assert!(result.is_err());

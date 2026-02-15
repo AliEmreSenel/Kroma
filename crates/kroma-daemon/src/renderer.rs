@@ -127,6 +127,28 @@ struct SlideshowState {
     _crossfade: f64,
 }
 
+/// State for a single render buffer pass (multi-pass rendering).
+#[allow(dead_code)]
+struct BufferPassState {
+    /// Name of this buffer (e.g. "A", "B", "C", "D").
+    name: String,
+    /// Render pipeline for this buffer pass.
+    pipeline: wgpu::RenderPipeline,
+    /// Bind group for this pass (uniforms + inputs).
+    bind_group: wgpu::BindGroup,
+    /// Current render target texture.
+    texture: wgpu::Texture,
+    /// Texture view for rendering to.
+    texture_view: wgpu::TextureView,
+    /// Texture view for sampling from (used by subsequent passes).
+    sampler_view: wgpu::TextureView,
+    /// Previous frame texture (for feedback buffers).
+    prev_texture: Option<wgpu::Texture>,
+    prev_view: Option<wgpu::TextureView>,
+    /// Whether this buffer uses self-feedback.
+    feedback: bool,
+}
+
 /// Holds the entire wgpu render state.
 pub struct RenderState {
     /// Current shader uniforms (CPU side).
@@ -163,6 +185,9 @@ pub struct RenderState {
 
     /// Current fragment shader source (WGSL).
     current_frag_wgsl: String,
+
+    /// Multi-pass buffer states (Shadertoy-style Buffer A/B/C/D).
+    buffer_passes: Vec<BufferPassState>,
 }
 
 impl RenderState {
@@ -191,6 +216,7 @@ impl RenderState {
             audio_spectrum: None,
             slideshow: None,
             current_frag_wgsl: DEFAULT_FRAG_WGSL.to_string(),
+            buffer_passes: Vec::new(),
         })
     }
 
@@ -246,7 +272,10 @@ impl RenderState {
         .context("No GPU adapter compatible with the Wayland surface")?;
 
         let adapter_info = adapter.get_info();
-        info!("GPU adapter: {} ({:?})", adapter_info.name, adapter_info.backend);
+        info!(
+            "GPU adapter: {} ({:?})",
+            adapter_info.name, adapter_info.backend
+        );
 
         let (device, queue) = pollster_block(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -264,8 +293,12 @@ impl RenderState {
             .iter()
             .find(|f| f.is_srgb())
             .copied()
-            .unwrap_or(*surface_caps.formats.first()
-                .context("No supported surface formats found")?);
+            .unwrap_or(
+                *surface_caps
+                    .formats
+                    .first()
+                    .context("No supported surface formats found")?,
+            );
 
         info!("Surface format: {:?}", format);
 
@@ -280,8 +313,13 @@ impl RenderState {
                 .iter()
                 .find(|m| **m == wgpu::CompositeAlphaMode::Opaque)
                 .copied()
-                .unwrap_or_else(|| surface_caps.alpha_modes.first().copied()
-                    .unwrap_or(wgpu::CompositeAlphaMode::Auto)),
+                .unwrap_or_else(|| {
+                    surface_caps
+                        .alpha_modes
+                        .first()
+                        .copied()
+                        .unwrap_or(wgpu::CompositeAlphaMode::Auto)
+                }),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -297,20 +335,19 @@ impl RenderState {
         });
 
         // Bind group layout
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("kroma-bgl"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("kroma-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kroma-bg"),
@@ -381,7 +418,10 @@ impl RenderState {
         self.vert_module = Some(vert_module);
         self.surface_config = Some(surface_config);
 
-        info!("GPU pipeline initialised with real surface ({}x{})", width, height);
+        info!(
+            "GPU pipeline initialised with real surface ({}x{})",
+            width, height
+        );
         Ok(())
     }
 
@@ -412,15 +452,14 @@ impl RenderState {
         let libx11 = unsafe { libloading::Library::new("libX11.so.6") }
             .or_else(|_| unsafe { libloading::Library::new("libX11.so") })
             .context("Failed to load libX11 — is X11 installed?")?;
-        let x_open_display: libloading::Symbol<unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_void>
-            = unsafe { libx11.get(b"XOpenDisplay") }
-                .context("XOpenDisplay not found in libX11")?;
+        let x_open_display: libloading::Symbol<
+            unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_void,
+        > = unsafe { libx11.get(b"XOpenDisplay") }.context("XOpenDisplay not found in libX11")?;
         let display_ptr = x_open_display(std::ptr::null());
         if display_ptr.is_null() {
             anyhow::bail!("Failed to open X11 display via Xlib");
         }
-        let display_nn = NonNull::new(display_ptr)
-            .context("Xlib display pointer is null")?;
+        let display_nn = NonNull::new(display_ptr).context("Xlib display pointer is null")?;
         // Keep libx11 alive for the lifetime of the process (leak it)
         std::mem::forget(libx11);
 
@@ -449,7 +488,10 @@ impl RenderState {
         .context("No GPU adapter compatible with the X11 surface")?;
 
         let adapter_info = adapter.get_info();
-        info!("GPU adapter (X11): {} ({:?})", adapter_info.name, adapter_info.backend);
+        info!(
+            "GPU adapter (X11): {} ({:?})",
+            adapter_info.name, adapter_info.backend
+        );
 
         let (device, queue) = pollster_block(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -466,8 +508,12 @@ impl RenderState {
             .iter()
             .find(|f| f.is_srgb())
             .copied()
-            .unwrap_or(*surface_caps.formats.first()
-                .context("No supported surface formats found (X11)")?);
+            .unwrap_or(
+                *surface_caps
+                    .formats
+                    .first()
+                    .context("No supported surface formats found (X11)")?,
+            );
 
         info!("Surface format (X11): {:?}", format);
 
@@ -482,8 +528,13 @@ impl RenderState {
                 .iter()
                 .find(|m| **m == wgpu::CompositeAlphaMode::Opaque)
                 .copied()
-                .unwrap_or_else(|| surface_caps.alpha_modes.first().copied()
-                    .unwrap_or(wgpu::CompositeAlphaMode::Auto)),
+                .unwrap_or_else(|| {
+                    surface_caps
+                        .alpha_modes
+                        .first()
+                        .copied()
+                        .unwrap_or(wgpu::CompositeAlphaMode::Auto)
+                }),
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -498,20 +549,19 @@ impl RenderState {
             mapped_at_creation: false,
         });
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("kroma-bgl"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("kroma-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kroma-bg"),
@@ -579,7 +629,10 @@ impl RenderState {
         self.vert_module = Some(vert_module);
         self.surface_config = Some(surface_config);
 
-        info!("GPU pipeline initialised with X11 surface ({}x{})", width, height);
+        info!(
+            "GPU pipeline initialised with X11 surface ({}x{})",
+            width, height
+        );
         Ok(())
     }
 
@@ -618,20 +671,19 @@ impl RenderState {
         });
 
         // Bind group layout
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("kroma-bgl"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                }],
-            });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("kroma-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kroma-bg"),
@@ -661,6 +713,8 @@ impl RenderState {
     pub fn load_shade(&mut self, pkg: &ShadePackage) -> Result<()> {
         // Reset slideshow state
         self.slideshow = None;
+        // Clear any existing buffer passes from the previous shader
+        self.buffer_passes.clear();
 
         // Load all textures from package assets (images, fonts, etc.)
         self.load_package_textures(pkg)?;
@@ -669,13 +723,17 @@ impl RenderState {
         // texture slot that the video decoder will overwrite each frame.
         let has_video = pkg.config.textures.values().any(|t| t.ty == "video");
         if has_video && self.textures.is_empty() {
-            let device = self.device.as_ref()
+            let device = self
+                .device
+                .as_ref()
                 .context("GPU not initialised — cannot create video placeholder")?;
-            let queue = self.queue.as_ref()
-                .context("GPU queue not initialised")?;
+            let queue = self.queue.as_ref().context("GPU queue not initialised")?;
             let placeholder = Self::create_texture_from_raw_rgba(
-                device, queue,
-                &[0, 0, 0, 255], 1, 1,
+                device,
+                queue,
+                &[0, 0, 0, 255],
+                1,
+                1,
                 "video-placeholder",
             );
             self.textures.push(placeholder);
@@ -711,7 +769,10 @@ impl RenderState {
             });
 
             self.swap_slideshow_texture(0);
-            info!("Slideshow initialized: {} textures, {:.1}s interval", count, config.interval);
+            info!(
+                "Slideshow initialized: {} textures, {:.1}s interval",
+                count, config.interval
+            );
         }
 
         // Initialize custom uniforms (creates storage buffer + rebuilds BGL0).
@@ -720,7 +781,10 @@ impl RenderState {
 
         match &pkg.shader_source {
             Some(glsl_source) => {
-                info!("Compiling shade shader ({} bytes GLSL)...", glsl_source.len());
+                info!(
+                    "Compiling shade shader ({} bytes GLSL)...",
+                    glsl_source.len()
+                );
 
                 let wgsl_source = match glsl_to_wgsl(glsl_source) {
                     Ok(wgsl) => wgsl,
@@ -732,7 +796,10 @@ impl RenderState {
                     }
                 };
 
-                info!("GLSL→WGSL translation successful ({} bytes WGSL)", wgsl_source.len());
+                info!(
+                    "GLSL→WGSL translation successful ({} bytes WGSL)",
+                    wgsl_source.len()
+                );
                 self.rebuild_pipeline_with_frag(&wgsl_source)?;
                 self.current_frag_wgsl = wgsl_source;
             }
@@ -741,7 +808,10 @@ impl RenderState {
                 // If there are textures (images, video, fonts), sample the first one.
                 // Otherwise, show a gradient.
                 let default_wgsl = if !self.textures.is_empty() || self.slideshow.is_some() {
-                    info!("Using default texture sampler shader ({} textures loaded)", self.textures.len());
+                    info!(
+                        "Using default texture sampler shader ({} textures loaded)",
+                        self.textures.len()
+                    );
                     IMAGE_SAMPLER_FRAG_WGSL.to_string()
                 } else {
                     info!("No textures or shader — using default gradient");
@@ -752,8 +822,11 @@ impl RenderState {
             }
         }
 
-        info!("Shade package '{}' loaded successfully ({} textures)",
-            pkg.config.meta.name, self.textures.len());
+        info!(
+            "Shade package '{}' loaded successfully ({} textures)",
+            pkg.config.meta.name,
+            self.textures.len()
+        );
         Ok(())
     }
 
@@ -767,9 +840,12 @@ impl RenderState {
 
     /// Hot-reload: takes raw Shadertoy-compatible GLSL, translates and loads it.
     pub fn load_glsl_source(&mut self, glsl_source: &str) -> Result<()> {
-        info!("Live reload: compiling {} bytes of GLSL...", glsl_source.len());
-        let wgsl_source = glsl_to_wgsl(glsl_source)
-            .context("Failed to translate GLSL shader to WGSL")?;
+        info!(
+            "Live reload: compiling {} bytes of GLSL...",
+            glsl_source.len()
+        );
+        let wgsl_source =
+            glsl_to_wgsl(glsl_source).context("Failed to translate GLSL shader to WGSL")?;
         // glsl_to_wgsl always injects CustomUniforms at set=0 binding=1.
         // Ensure the custom uniform buffer + BGL0 binding exists so the
         // pipeline layout matches the shader's expected bindings.
@@ -796,14 +872,19 @@ impl RenderState {
 
     /// Rebuild the render pipeline with a new fragment shader.
     fn rebuild_pipeline_with_frag(&mut self, frag_wgsl: &str) -> Result<()> {
-        let device = self.device.as_ref()
-            .context("GPU not initialised")?;
-        let pipeline_layout = self.pipeline_layout.as_ref()
+        let device = self.device.as_ref().context("GPU not initialised")?;
+        let pipeline_layout = self
+            .pipeline_layout
+            .as_ref()
             .context("Pipeline layout not available")?;
-        let vert_module = self.vert_module.as_ref()
+        let vert_module = self
+            .vert_module
+            .as_ref()
             .context("Vertex shader not available")?;
 
-        let format = self.surface_config.as_ref()
+        let format = self
+            .surface_config
+            .as_ref()
             .map(|c| c.format)
             .unwrap_or(SURFACE_FORMAT);
 
@@ -857,7 +938,13 @@ impl RenderState {
             if idx < MAX_CUSTOM_UNIFORMS {
                 self.custom_uniform_data[idx] = match value {
                     UniformValue::Float(v) => *v as f32,
-                    UniformValue::Bool(b) => if *b { 1.0 } else { 0.0 },
+                    UniformValue::Bool(b) => {
+                        if *b {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
                     UniformValue::Int(i) => *i as f32,
                 };
             }
@@ -869,7 +956,10 @@ impl RenderState {
     ///
     /// Called after loading a shade package. Maps uniform names from config
     /// to sequential indices in a storage buffer.
-    pub fn init_custom_uniforms(&mut self, config: &kroma_shared::types::ShadeConfig) -> Result<()> {
+    pub fn init_custom_uniforms(
+        &mut self,
+        config: &kroma_shared::types::ShadeConfig,
+    ) -> Result<()> {
         let device = self.device.as_ref().context("GPU not initialised")?;
 
         // Map uniform names to indices
@@ -878,7 +968,10 @@ impl RenderState {
 
         for (idx, (name, def)) in config.uniforms.iter().enumerate() {
             if idx >= MAX_CUSTOM_UNIFORMS {
-                warn!("Maximum {} custom uniform slots reached — ignoring '{}'", MAX_CUSTOM_UNIFORMS, name);
+                warn!(
+                    "Maximum {} custom uniform slots reached — ignoring '{}'",
+                    MAX_CUSTOM_UNIFORMS, name
+                );
                 break;
             }
 
@@ -887,7 +980,13 @@ impl RenderState {
                 self.custom_uniform_data[idx] = match default {
                     toml::Value::Float(v) => *v as f32,
                     toml::Value::Integer(v) => *v as f32,
-                    toml::Value::Boolean(v) => if *v { 1.0 } else { 0.0 },
+                    toml::Value::Boolean(v) => {
+                        if *v {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
                     _ => 0.0,
                 };
             }
@@ -908,34 +1007,36 @@ impl RenderState {
         // Rebuild bind group 0 to include both uniform buffer and storage buffer
         self.rebuild_bind_group_0()?;
 
-        info!("Custom uniforms initialized: {} slots mapped", self.custom_uniform_indices.len());
+        info!(
+            "Custom uniforms initialized: {} slots mapped",
+            self.custom_uniform_indices.len()
+        );
         Ok(())
     }
 
     /// Rebuild bind group 0 to include both the main uniform buffer and custom uniform storage buffer.
     fn rebuild_bind_group_0(&mut self) -> Result<()> {
         let device = self.device.as_ref().context("GPU not initialised")?;
-        let uniform_buf = self.uniform_buffer.as_ref().context("Uniform buffer missing")?;
+        let uniform_buf = self
+            .uniform_buffer
+            .as_ref()
+            .context("Uniform buffer missing")?;
 
-        let mut layout_entries = vec![
-            wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
+        let mut layout_entries = vec![wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
             },
-        ];
+            count: None,
+        }];
 
-        let mut group_entries = vec![
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buf.as_entire_binding(),
-            },
-        ];
+        let mut group_entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: uniform_buf.as_entire_binding(),
+        }];
 
         if let Some(ref custom_buf) = self.custom_uniform_buffer {
             layout_entries.push(wgpu::BindGroupLayoutEntry {
@@ -1126,10 +1227,11 @@ impl RenderState {
 
     /// Load all textures referenced by a shade package's config.
     fn load_package_textures(&mut self, pkg: &ShadePackage) -> Result<()> {
-        let device = self.device.as_ref()
+        let device = self
+            .device
+            .as_ref()
             .context("GPU not initialised — cannot load textures")?;
-        let queue = self.queue.as_ref()
-            .context("GPU queue not initialised")?;
+        let queue = self.queue.as_ref().context("GPU queue not initialised")?;
 
         // Clear previous textures
         self.textures.clear();
@@ -1142,7 +1244,10 @@ impl RenderState {
 
         for (name, def) in &tex_defs {
             if self.textures.len() >= MAX_TEXTURE_SLOTS {
-                warn!("Maximum {} texture slots reached — ignoring '{}'", MAX_TEXTURE_SLOTS, name);
+                warn!(
+                    "Maximum {} texture slots reached — ignoring '{}'",
+                    MAX_TEXTURE_SLOTS, name
+                );
                 break;
             }
 
@@ -1166,21 +1271,31 @@ impl RenderState {
             };
 
             // Find the asset data in the package
-            let asset_data = pkg.assets.iter()
+            let asset_data = pkg
+                .assets
+                .iter()
                 .find(|(path, _)| path == &source || path.ends_with(&source))
                 .map(|(_, data)| data.as_slice());
 
             match asset_data {
                 Some(bytes) => {
                     match Self::create_texture_from_bytes(
-                        device, queue, bytes, name, &def.filter, &def.wrap,
+                        device,
+                        queue,
+                        bytes,
+                        name,
+                        &def.filter,
+                        &def.wrap,
                     ) {
                         Ok(tex) => self.textures.push(tex),
                         Err(e) => warn!("Failed to load texture '{}': {}", name, e),
                     }
                 }
                 None => {
-                    warn!("Asset '{}' not found in package for texture '{}'", source, name);
+                    warn!(
+                        "Asset '{}' not found in package for texture '{}'",
+                        source, name
+                    );
                 }
             }
         }
@@ -1195,7 +1310,9 @@ impl RenderState {
                 }
 
                 // Find font data in package assets
-                let font_data = pkg.assets.iter()
+                let font_data = pkg
+                    .assets
+                    .iter()
                     .find(|(path, _)| path == &font_def.source || path.ends_with(&font_def.source))
                     .map(|(_, data)| data.as_slice());
 
@@ -1204,17 +1321,26 @@ impl RenderState {
                         Ok(atlas) => {
                             // Upload the atlas RGBA texture
                             let tex = Self::create_texture_from_raw_rgba(
-                                device, queue,
-                                &atlas.rgba_data, atlas.width, atlas.height,
+                                device,
+                                queue,
+                                &atlas.rgba_data,
+                                atlas.width,
+                                atlas.height,
                                 &format!("font-{}", name),
                             );
                             self.textures.push(tex);
-                            info!("Font atlas '{}' loaded as texture ({}x{})", name, atlas.width, atlas.height);
+                            info!(
+                                "Font atlas '{}' loaded as texture ({}x{})",
+                                name, atlas.width, atlas.height
+                            );
                         }
                         Err(e) => warn!("Failed to rasterize font '{}': {}", name, e),
                     }
                 } else {
-                    warn!("Font source '{}' not found in package for '{}'", font_def.source, name);
+                    warn!(
+                        "Font source '{}' not found in package for '{}'",
+                        font_def.source, name
+                    );
                 }
             }
         }
@@ -1328,8 +1454,10 @@ impl RenderState {
         // Rebuild pipeline layout to include texture bind group
         self.rebuild_pipeline_layout()?;
 
-        info!("Texture bind group built ({} textures, {} entries)",
-            num_textures, entry_count);
+        info!(
+            "Texture bind group built ({} textures, {} entries)",
+            num_textures, entry_count
+        );
         Ok(())
     }
 
@@ -1408,7 +1536,9 @@ impl RenderState {
     ///
     /// Rebuilds bind group so the GPU sees the new texture.
     fn swap_slideshow_texture(&mut self, order_idx: usize) {
-        let Some(ref slideshow) = self.slideshow else { return };
+        let Some(ref slideshow) = self.slideshow else {
+            return;
+        };
         let tex_idx = slideshow.order[order_idx];
         let tex = &slideshow.all_textures[tex_idx];
 
@@ -1623,13 +1753,17 @@ impl RenderState {
     /// Rebuild the pipeline layout to include both uniform and texture bind groups.
     fn rebuild_pipeline_layout(&mut self) -> Result<()> {
         let device = self.device.as_ref().context("GPU not initialised")?;
-        let bgl0 = self.bind_group_layout.as_ref().context("Uniform BGL missing")?;
+        let bgl0 = self
+            .bind_group_layout
+            .as_ref()
+            .context("Uniform BGL missing")?;
 
-        let layouts: Vec<&wgpu::BindGroupLayout> = if let Some(ref tex_bgl) = self.texture_bind_group_layout {
-            vec![bgl0, tex_bgl]
-        } else {
-            vec![bgl0]
-        };
+        let layouts: Vec<&wgpu::BindGroupLayout> =
+            if let Some(ref tex_bgl) = self.texture_bind_group_layout {
+                vec![bgl0, tex_bgl]
+            } else {
+                vec![bgl0]
+            };
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("kroma-pl"),
@@ -1688,7 +1822,9 @@ impl RenderState {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 // Reconfigure the surface
-                if let (Some(device), Some(config)) = (self.device.as_ref(), self.surface_config.as_ref()) {
+                if let (Some(device), Some(config)) =
+                    (self.device.as_ref(), self.surface_config.as_ref())
+                {
                     surface.configure(device, config);
                 }
                 return Ok(());
@@ -1702,9 +1838,13 @@ impl RenderState {
             }
         };
 
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let device = self.device.as_ref()
+        let device = self
+            .device
+            .as_ref()
             .context("GPU not initialised — cannot render frame")?;
         let pipeline = self.pipeline.as_ref();
         let bind_group = self.bind_group.as_ref();
@@ -1712,6 +1852,8 @@ impl RenderState {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("kroma-frame"),
         });
+
+        // TODO: render buffer passes here (multi-pass Buffer A/B/C/D)
 
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1756,26 +1898,40 @@ impl RenderState {
     /// This is used for the live preview stream — renders at a small resolution
     /// and returns base64-encoded JPEG data.
     pub fn capture_preview_frame(&mut self, width: u32, height: u32) -> Result<Vec<u8>> {
-        let device = self.device.as_ref()
+        let device = self
+            .device
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No GPU device"))?;
-        let queue = self.queue.as_ref()
+        let queue = self
+            .queue
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No GPU queue"))?;
-        let pipeline = self.pipeline.as_ref()
+        let pipeline = self
+            .pipeline
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No render pipeline"))?;
-        let bind_group = self.bind_group.as_ref()
+        let bind_group = self
+            .bind_group
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No bind group"))?;
 
         let w = width.max(1);
         let h = height.max(1);
 
         // Use the same format as the active pipeline to avoid format mismatch
-        let format = self.surface_config.as_ref()
+        let format = self
+            .surface_config
+            .as_ref()
             .map(|c| c.format)
             .unwrap_or(SURFACE_FORMAT);
 
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("preview-capture"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1848,7 +2004,11 @@ impl RenderState {
                     rows_per_image: Some(h),
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
 
         queue.submit(std::iter::once(encoder.finish()));
@@ -1868,8 +2028,10 @@ impl RenderState {
         // Copy pixel data, removing row padding and converting BGRA → RGBA
         let data = buffer_slice.get_mapped_range();
         let mut rgba = Vec::with_capacity((w * h * bytes_per_pixel) as usize);
-        let is_bgra = matches!(format,
-            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb);
+        let is_bgra = matches!(
+            format,
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+        );
         for row in 0..h {
             let start = (row * padded_bytes_per_row) as usize;
             let end = start + unpadded_bytes_per_row as usize;
@@ -2002,23 +2164,18 @@ fn glsl_to_wgsl(glsl_source: &str) -> Result<String> {
         block_ctx_dump_prefix: None,
     };
 
-    let module = naga::front::spv::parse_u8_slice(
-        bytemuck::cast_slice(spirv_bytes),
-        &spv_options,
-    )
-    .map_err(|e| {
-        log::error!("SPIR-V parse error: {}", e);
-        anyhow::anyhow!("SPIR-V parse error: {}", e)
-    })?;
+    let module = naga::front::spv::parse_u8_slice(bytemuck::cast_slice(spirv_bytes), &spv_options)
+        .map_err(|e| {
+            log::error!("SPIR-V parse error: {}", e);
+            anyhow::anyhow!("SPIR-V parse error: {}", e)
+        })?;
 
     // --- Step 3: Validate & write WGSL ---------------------------------------
     let mut validator = Validator::new(ValidationFlags::all(), Capabilities::all());
-    let info = validator
-        .validate(&module)
-        .map_err(|e| {
-            log::error!("Shader validation error: {}", e);
-            anyhow::anyhow!("Shader validation error: {}", e)
-        })?;
+    let info = validator.validate(&module).map_err(|e| {
+        log::error!("Shader validation error: {}", e);
+        anyhow::anyhow!("Shader validation error: {}", e)
+    })?;
 
     let mut wgsl_source = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty())
         .map_err(|e| anyhow::anyhow!("WGSL write error: {}", e))?;

@@ -4,11 +4,11 @@
 //! into the Panel trait. The shader graph state lives in KromaApp and
 //! is accessed through AppContext references.
 
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
-use iced::{Border, Element, Fill, Length, Padding, Theme};
-use crate::Message;
 use crate::editor;
 use crate::panels::{AppContext, Panel};
+use crate::Message;
+use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
+use iced::{Border, Element, Fill, Length, Padding, Theme};
 
 // ---------------------------------------------------------------------------
 // State
@@ -34,10 +34,10 @@ impl Default for NodeEditorPanel {
 
 impl Panel for NodeEditorPanel {
     fn view<'a>(&'a self, ctx: AppContext<'a>) -> Element<'a, Message> {
-        let palette = build_node_palette(
-            ctx.editor_palette_filter,
-            Message::EditorAddNode,
-        );
+        let t = ctx.tokens;
+        let palette = build_node_palette(ctx.editor_palette_filter, t, |kind| {
+            Message::EditorGraph(crate::editor::canvas::GraphMessage::SetPendingNode(kind))
+        });
 
         // Determine which graph + canvas to show based on nav path
         let (graph, canvas) = if let Some(&last_id) = ctx.editor_nav_path.last() {
@@ -50,11 +50,10 @@ impl Panel for NodeEditorPanel {
             (ctx.shader_graph, ctx.graph_canvas)
         };
 
-        let graph_canvas = editor::canvas::graph_canvas(graph, canvas)
-            .map(Message::EditorGraph);
+        let graph_canvas = editor::canvas::graph_canvas(graph, canvas, t).map(Message::EditorGraph);
 
         // Build sub-graph tree sidebar if there are sub-graph nodes
-        let subgraph_tree = build_subgraph_tree(ctx.shader_graph, ctx.editor_nav_path);
+        let subgraph_tree = build_subgraph_tree(ctx.shader_graph, ctx.editor_nav_path, t);
 
         // Build breadcrumb bar if navigated into sub-graphs
         let mut main_row = row![].width(Fill).height(Fill);
@@ -73,41 +72,39 @@ impl Panel for NodeEditorPanel {
         } else {
             let mut crumbs: Vec<Element<'a, Message>> = Vec::new();
             // Root breadcrumb
+            let crumb_bg = t.bg_secondary;
+            let crumb_text = t.text_accent;
             crumbs.push(
                 button(text("Root").size(11))
                     .padding(iced::Padding::from([2, 6]))
-                    .on_press(Message::EditorGraph(editor::canvas::GraphMessage::ExitSubGraph))
-                    .style(|theme: &Theme, _| {
-                        let p = theme.extended_palette();
-                        button::Style {
-                            background: Some(p.background.weak.color.into()),
-                            text_color: p.primary.base.color,
-                            border: iced::Border::default().rounded(3),
-                            ..Default::default()
-                        }
+                    .on_press(Message::EditorGraph(
+                        editor::canvas::GraphMessage::ExitSubGraph,
+                    ))
+                    .style(move |_theme: &Theme, _| button::Style {
+                        background: Some(crumb_bg.into()),
+                        text_color: crumb_text,
+                        border: iced::Border::default().rounded(3),
+                        ..Default::default()
                     })
                     .into(),
             );
             for &node_id in ctx.editor_nav_path {
-                crumbs.push(text(" \u{25B8} ").size(11).into());
-                let label = ctx.shader_graph
+                crumbs.push(text(" > ").size(11).into());
+                let label = ctx
+                    .shader_graph
                     .node(node_id)
                     .map(|n| n.kind.label())
                     .unwrap_or("SubGraph");
-                crumbs.push(
-                    text(format!("{} ({})", label, node_id.0)).size(11).into(),
-                );
+                crumbs.push(text(format!("{} ({})", label, node_id.0)).size(11).into());
             }
 
+            let bar_bg = t.bg_tertiary;
             let breadcrumb_bar = container(row(crumbs).spacing(2).align_y(iced::Alignment::Center))
                 .padding(iced::Padding::from([4, 8]))
                 .width(Fill)
-                .style(|theme: &Theme| {
-                    let p = theme.extended_palette();
-                    container::Style {
-                        background: Some(p.background.strong.color.into()),
-                        ..Default::default()
-                    }
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(bar_bg.into()),
+                    ..Default::default()
                 });
 
             column![breadcrumb_bar, main_row]
@@ -127,10 +124,17 @@ impl Panel for NodeEditorPanel {
 fn build_subgraph_tree<'a>(
     graph: &'a editor::ShaderGraph,
     nav_path: &[kroma_graph::types::NodeId],
+    t: &crate::theme::ThemeTokens,
 ) -> Option<Element<'a, Message>> {
     use editor::NodeKind;
-    let subgraph_nodes: Vec<_> = graph.nodes()
-        .filter(|n| matches!(n.kind, NodeKind::ForLoop | NodeKind::Conditional | NodeKind::CustomFunc))
+    let subgraph_nodes: Vec<_> = graph
+        .nodes()
+        .filter(|n| {
+            matches!(
+                n.kind,
+                NodeKind::ForLoop | NodeKind::Conditional | NodeKind::CustomFunc
+            )
+        })
         .collect();
 
     if subgraph_nodes.is_empty() {
@@ -144,63 +148,82 @@ fn build_subgraph_tree<'a>(
 
     // Root entry
     let root_style = if is_at_root { "strong" } else { "normal" };
+    let active_bg = t.tab_active;
+    let active_text = t.text_primary;
+    let normal_text = t.text_primary;
     items.push(
-        button(text(if is_at_root { "\u{25BC} Root" } else { "\u{25B6} Root" }).size(11))
-            .width(Fill)
-            .padding(iced::Padding::from([3, 6]))
-            .on_press(Message::EditorGraph(editor::canvas::GraphMessage::ExitSubGraph))
-            .style(move |theme: &Theme, _| {
-                let p = theme.extended_palette();
-                if root_style == "strong" {
-                    button::Style {
-                        background: Some(p.primary.weak.color.into()),
-                        text_color: p.primary.weak.text,
-                        border: Border::default().rounded(3),
-                        ..Default::default()
-                    }
-                } else {
-                    button::Style {
-                        background: None,
-                        text_color: p.background.base.text,
-                        border: Border::default().rounded(3),
-                        ..Default::default()
-                    }
-                }
+        button(
+            text(if is_at_root {
+                "[-] Root"
+            } else {
+                "[+] Root"
             })
-            .into(),
+            .size(11),
+        )
+        .width(Fill)
+        .padding(iced::Padding::from([3, 6]))
+        .on_press(Message::EditorGraph(
+            editor::canvas::GraphMessage::ExitSubGraph,
+        ))
+        .style(move |_theme: &Theme, _| {
+            if root_style == "strong" {
+                button::Style {
+                    background: Some(active_bg.into()),
+                    text_color: active_text,
+                    border: Border::default().rounded(3),
+                    ..Default::default()
+                }
+            } else {
+                button::Style {
+                    background: None,
+                    text_color: normal_text,
+                    border: Border::default().rounded(3),
+                    ..Default::default()
+                }
+            }
+        })
+        .into(),
     );
 
     // Sub-graph node entries
     for node in subgraph_nodes {
         let is_active = nav_path.last() == Some(&node.id);
-        let icon = match node.kind {
-            NodeKind::ForLoop => "\u{21BB}", // ↻
-            NodeKind::Conditional => "\u{2753}", // ❓
-            NodeKind::CustomFunc => "\u{0192}", // ƒ
-            _ => "\u{25C6}",
+        let icon_widget: Element<'a, Message> = match node.kind {
+            NodeKind::ForLoop => text(crate::icons::LOOP).font(crate::icons::ICON_FONT).size(10).into(),
+            NodeKind::Conditional => text(crate::icons::CONDITIONAL).font(crate::icons::ICON_FONT).size(10).into(),
+            NodeKind::CustomFunc => text("f").size(10).into(),
+            _ => text("*").size(10).into(),
         };
-        let label_str = format!("  {} {} ({})", icon, node.kind.label(), node.id.0);
+        let label_str = format!(" {} ({})", node.kind.label(), node.id.0);
         let active_flag = if is_active { "active" } else { "normal" };
+        let sg_active_bg = t.tab_active;
+        let sg_active_text = t.text_primary;
+        let sg_normal_text = t.text_primary;
         items.push(
-            button(text(label_str).size(10))
+            button(
+                iced::widget::Row::new()
+                    .push(icon_widget)
+                    .push(text(label_str).size(10))
+                    .spacing(2)
+                    .align_y(iced::Alignment::Center),
+            )
                 .width(Fill)
                 .padding(iced::Padding::from([2, 6]))
                 .on_press(Message::EditorGraph(
                     editor::canvas::GraphMessage::EnterSubGraph(node.id),
                 ))
-                .style(move |theme: &Theme, _| {
-                    let p = theme.extended_palette();
+                .style(move |_theme: &Theme, _| {
                     if active_flag == "active" {
                         button::Style {
-                            background: Some(p.primary.weak.color.into()),
-                            text_color: p.primary.weak.text,
+                            background: Some(sg_active_bg.into()),
+                            text_color: sg_active_text,
                             border: Border::default().rounded(3),
                             ..Default::default()
                         }
                     } else {
                         button::Style {
                             background: None,
-                            text_color: p.background.base.text,
+                            text_color: sg_normal_text,
                             border: Border::default().rounded(3),
                             ..Default::default()
                         }
@@ -210,20 +233,17 @@ fn build_subgraph_tree<'a>(
         );
     }
 
+    let tree_bg = t.bg_tertiary;
+    let tree_border = t.border_default;
     Some(
         container(scrollable(column(items).spacing(2)).height(Fill))
             .width(Length::Fixed(130.0))
             .height(Fill)
             .padding(4)
-            .style(|theme: &Theme| {
-                let p = theme.extended_palette();
-                container::Style {
-                    background: Some(p.background.strong.color.into()),
-                    border: Border::default()
-                        .width(1)
-                        .color(iced::Color { a: 0.1, ..p.background.base.text }),
-                    ..Default::default()
-                }
+            .style(move |_theme: &Theme| container::Style {
+                background: Some(tree_bg.into()),
+                border: Border::default().width(1).color(tree_border),
+                ..Default::default()
             })
             .into(),
     )
@@ -235,7 +255,11 @@ fn build_subgraph_tree<'a>(
 
 /// Build the node palette sidebar with searchable filtering.
 /// `filter` is the current search text. `on_add` maps a `NodeKind` to a `Message`.
-pub fn build_node_palette<'a, F>(filter: &'a str, on_add: F) -> Element<'a, Message>
+pub fn build_node_palette<'a, F>(
+    filter: &'a str,
+    t: &crate::theme::ThemeTokens,
+    on_add: F,
+) -> Element<'a, Message>
 where
     F: Fn(editor::NodeKind) -> Message + 'a,
 {
@@ -266,8 +290,11 @@ where
             continue;
         }
 
-        let mut cat_col = column![text(category).size(11)].spacing(2);
+        let mut cat_col = column![text(category).size(11)].spacing(t.spacing_xs);
 
+        let pal_hover_bg = t.tab_active;
+        let pal_hover_text = t.text_primary;
+        let pal_normal_text = t.text_primary;
         for kind in filtered {
             let label = kind.label();
             let msg = on_add(kind);
@@ -275,39 +302,34 @@ where
                 .width(Fill)
                 .padding(Padding::from([3, 6]))
                 .on_press(msg)
-                .style(|theme: &Theme, status| {
-                    let p = theme.extended_palette();
-                    match status {
-                        button::Status::Hovered => button::Style {
-                            background: Some(p.primary.weak.color.into()),
-                            text_color: p.primary.weak.text,
-                            border: Border::default().rounded(4),
-                            ..Default::default()
-                        },
-                        _ => button::Style {
-                            background: None,
-                            text_color: p.background.base.text,
-                            border: Border::default().rounded(4),
-                            ..Default::default()
-                        },
-                    }
+                .style(move |_theme: &Theme, status| match status {
+                    button::Status::Hovered => button::Style {
+                        background: Some(pal_hover_bg.into()),
+                        text_color: pal_hover_text,
+                        border: Border::default().rounded(4),
+                        ..Default::default()
+                    },
+                    _ => button::Style {
+                        background: None,
+                        text_color: pal_normal_text,
+                        border: Border::default().rounded(4),
+                        ..Default::default()
+                    },
                 });
             cat_col = cat_col.push(btn);
         }
         palette_col = palette_col.push(cat_col);
-        palette_col = palette_col.push(Space::with_height(2));
+        palette_col = palette_col.push(Space::with_height(t.spacing_xs));
     }
 
+    let palette_bg = t.bg_tertiary;
     container(scrollable(palette_col).height(Fill))
         .width(Length::FillPortion(1))
         .height(Fill)
         .padding(4)
-        .style(|theme: &Theme| {
-            let p = theme.extended_palette();
-            container::Style {
-                background: Some(p.background.strong.color.into()),
-                ..Default::default()
-            }
+        .style(move |_theme: &Theme| container::Style {
+            background: Some(palette_bg.into()),
+            ..Default::default()
         })
         .into()
 }

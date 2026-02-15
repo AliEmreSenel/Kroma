@@ -23,11 +23,11 @@ use smithay_client_toolkit::{
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
-    shell::WaylandSurface,
     shell::wlr_layer::{
-        Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler,
-        LayerSurface, LayerSurfaceConfigure,
+        Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+        LayerSurfaceConfigure,
     },
+    shell::WaylandSurface,
 };
 use wayland_client::{
     globals::registry_queue_init,
@@ -64,8 +64,10 @@ unsafe fn find_ptr_offset(conn: &Connection) -> Option<usize> {
     let proto_id = display_id.protocol_id();
     let size = std::mem::size_of_val(&display_id);
 
-    info!("ObjectId diagnostics: size={}, protocol_id={}, interface_addr=0x{:x}",
-        size, proto_id, interface_val);
+    info!(
+        "ObjectId diagnostics: size={}, protocol_id={}, interface_addr=0x{:x}",
+        size, proto_id, interface_val
+    );
 
     if size < 16 {
         warn!("ObjectId size {} — too small for expected layout", size);
@@ -77,7 +79,9 @@ unsafe fn find_ptr_offset(conn: &Connection) -> Option<usize> {
     // Dump the full struct memory for analysis
     let mut hex = String::new();
     for i in 0..size {
-        if i > 0 && i % 8 == 0 { hex.push(' '); }
+        if i > 0 && i % 8 == 0 {
+            hex.push(' ');
+        }
         let byte = std::ptr::read(base.add(i));
         hex.push_str(&format!("{:02x}", byte));
     }
@@ -105,10 +109,16 @@ unsafe fn find_ptr_offset(conn: &Connection) -> Option<usize> {
         // Validate: a real pointer should be page-aligned or at least 8-byte aligned
         // (malloc returns 16-byte aligned on modern glibc)
         if !val.is_multiple_of(8) {
-            warn!("  offset {:2}: 0x{:x} — NOT 8-byte aligned, skipping", off, val);
+            warn!(
+                "  offset {:2}: 0x{:x} — NOT 8-byte aligned, skipping",
+                off, val
+            );
             continue;
         }
-        info!("ObjectId ptr field at offset {} (display ptr = 0x{:x})", off, val);
+        info!(
+            "ObjectId ptr field at offset {} (display ptr = 0x{:x})",
+            off, val
+        );
         return Some(off);
     }
 
@@ -118,7 +128,10 @@ unsafe fn find_ptr_offset(conn: &Connection) -> Option<usize> {
         if val == 0 || val == interface_val || val < 0x10000 {
             continue;
         }
-        warn!("Fallback: using offset {} (0x{:x}) — might not be a real pointer", off, val);
+        warn!(
+            "Fallback: using offset {} (0x{:x}) — might not be a real pointer",
+            off, val
+        );
         return Some(off);
     }
 
@@ -201,16 +214,21 @@ impl WaylandSurfaceProvider {
     /// Check if a monitor's surface has been configured by the compositor.
     #[allow(dead_code)]
     pub fn is_configured(&self, monitor_id: u32) -> bool {
-        self.surfaces.get(&monitor_id).map(|s| s.configured).unwrap_or(false)
+        self.surfaces
+            .get(&monitor_id)
+            .map(|s| s.configured)
+            .unwrap_or(false)
     }
 
     /// Create layer shell surfaces on all discovered monitors.
     pub fn create_all_surfaces(&mut self) -> Result<()> {
-        let conn = self.connection.as_ref()
+        let conn = self
+            .connection
+            .as_ref()
             .context("Not connected to Wayland")?;
 
-        let (globals, mut event_queue) = registry_queue_init(conn)
-            .context("Failed to initialize Wayland registry")?;
+        let (globals, mut event_queue) =
+            registry_queue_init(conn).context("Failed to initialize Wayland registry")?;
         let qh: QueueHandle<WaylandShellState> = event_queue.handle();
 
         let compositor_state = CompositorState::bind(&globals, &qh)
@@ -230,7 +248,8 @@ impl WaylandSurfaceProvider {
         };
 
         // Roundtrip to discover outputs
-        event_queue.roundtrip(&mut state)
+        event_queue
+            .roundtrip(&mut state)
             .context("Wayland roundtrip failed during output discovery")?;
 
         // Enumerate monitors from output state
@@ -250,7 +269,10 @@ impl WaylandSurfaceProvider {
 
                 let monitor = MonitorConfig {
                     id: MonitorId(idx as u32),
-                    name: info.name.clone().unwrap_or_else(|| format!("output-{}", idx)),
+                    name: info
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("output-{}", idx)),
                     width,
                     height,
                     x,
@@ -258,8 +280,10 @@ impl WaylandSurfaceProvider {
                     scale: info.scale_factor as f64,
                 };
 
-                info!("Discovered output: {} ({}x{} @ {},{} scale {})",
-                    monitor.name, width, height, x, y, monitor.scale);
+                info!(
+                    "Discovered output: {} ({}x{} @ {},{} scale {})",
+                    monitor.name, width, height, x, y, monitor.scale
+                );
                 discovered_monitors.push((monitor, output.clone()));
             }
         }
@@ -277,8 +301,9 @@ impl WaylandSurfaceProvider {
                     scale: 1.0,
                 },
                 outputs.first().cloned().unwrap_or_else(|| {
-                    state.output_state.outputs().next()
-                        .unwrap_or_else(|| panic!("No Wayland outputs found — is the compositor running?"))
+                    state.output_state.outputs().next().unwrap_or_else(|| {
+                        panic!("No Wayland outputs found — is the compositor running?")
+                    })
                 }),
             ));
         }
@@ -319,28 +344,46 @@ impl WaylandSurfaceProvider {
         }
 
         // Roundtrip to receive configure events
-        event_queue.roundtrip(&mut state)
+        event_queue
+            .roundtrip(&mut state)
             .context("Wayland roundtrip failed during surface configuration")?;
-        event_queue.roundtrip(&mut state)
+        event_queue
+            .roundtrip(&mut state)
             .context("Second Wayland roundtrip failed")?;
 
         // Update surface configured state
-        let configured = state.configured_surfaces.lock().unwrap_or_else(|e| e.into_inner());
+        let configured = state
+            .configured_surfaces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         for (id, surface) in self.surfaces.iter_mut() {
             if let Some(&(w, h)) = configured.get(id) {
                 surface.configured = true;
-                if w > 0 { surface.width = w; }
-                if h > 0 { surface.height = h; }
-                info!("Surface for monitor {} configured: {}x{}", id, surface.width, surface.height);
+                if w > 0 {
+                    surface.width = w;
+                }
+                if h > 0 {
+                    surface.height = h;
+                }
+                info!(
+                    "Surface for monitor {} configured: {}x{}",
+                    id, surface.width, surface.height
+                );
             } else {
                 surface.configured = true;
-                info!("Surface for monitor {} using default size: {}x{}", id, surface.width, surface.height);
+                info!(
+                    "Surface for monitor {} using default size: {}x{}",
+                    id, surface.width, surface.height
+                );
             }
         }
 
         self.monitors = discovered_monitors.into_iter().map(|(m, _)| m).collect();
 
-        info!("All {} layer shell surface(s) created and configured", self.surfaces.len());
+        info!(
+            "All {} layer shell surface(s) created and configured",
+            self.surfaces.len()
+        );
         Ok(())
     }
 }
@@ -364,21 +407,24 @@ impl SurfaceProvider for WaylandSurfaceProvider {
         if self.display_ptr.is_none() {
             warn!("Could not extract raw wl_display pointer — GPU surface rendering unavailable");
         } else {
-            info!("Wayland connection established (display ptr: {:?})", self.display_ptr);
+            info!(
+                "Wayland connection established (display ptr: {:?})",
+                self.display_ptr
+            );
         }
 
         self.connection = Some(conn);
         Ok(())
     }
 
-    fn create_surface(
-        &self,
-        monitor: MonitorId,
-    ) -> Result<raw_window_handle::RawWindowHandle> {
-        let surface = self.surfaces.get(&monitor.0)
+    fn create_surface(&self, monitor: MonitorId) -> Result<raw_window_handle::RawWindowHandle> {
+        let surface = self
+            .surfaces
+            .get(&monitor.0)
             .context(format!("No surface created for monitor {:?}", monitor))?;
 
-        let offset = self.ptr_offset
+        let offset = self
+            .ptr_offset
             .context("ObjectId layout not detected — call connect() first")?;
 
         let obj_id = surface.wl_surface.id();
@@ -431,7 +477,8 @@ impl CompositorHandler for WaylandShellState {
         _qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
         _new_transform: wl_output::Transform,
-    ) {}
+    ) {
+    }
 
     fn frame(
         &mut self,
@@ -439,7 +486,8 @@ impl CompositorHandler for WaylandShellState {
         _qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
         _time: u32,
-    ) {}
+    ) {
+    }
 
     fn surface_enter(
         &mut self,
@@ -447,7 +495,8 @@ impl CompositorHandler for WaylandShellState {
         _qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
         _output: &wl_output::WlOutput,
-    ) {}
+    ) {
+    }
 
     fn surface_leave(
         &mut self,
@@ -455,7 +504,8 @@ impl CompositorHandler for WaylandShellState {
         _qh: &QueueHandle<Self>,
         _surface: &wl_surface::WlSurface,
         _output: &wl_output::WlOutput,
-    ) {}
+    ) {
+    }
 }
 
 impl OutputHandler for WaylandShellState {
@@ -479,7 +529,8 @@ impl OutputHandler for WaylandShellState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _output: wl_output::WlOutput,
-    ) {}
+    ) {
+    }
 
     fn output_destroyed(
         &mut self,
@@ -492,12 +543,7 @@ impl OutputHandler for WaylandShellState {
 }
 
 impl LayerShellHandler for WaylandShellState {
-    fn closed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
-    ) {
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
         info!("Layer surface closed by compositor");
     }
 
@@ -513,7 +559,10 @@ impl LayerShellHandler for WaylandShellState {
         info!("Layer surface configured: {}x{}", w, h);
 
         // Store the configure event
-        let mut configured = self.configured_surfaces.lock().unwrap_or_else(|e| e.into_inner());
+        let mut configured = self
+            .configured_surfaces
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let id = configured.len() as u32;
         configured.insert(id, (w, h));
 

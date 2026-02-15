@@ -107,16 +107,17 @@ pub(crate) fn dirs_output_dir() -> PathBuf {
     }
 }
 
-/// Map a file extension to a unicode emoji icon.
+/// Map a file extension to a Material Icons codepoint string.
+#[allow(dead_code)]
 pub(crate) fn shade_file_icon(name: &str) -> &'static str {
     let ext = name.rsplit('.').next().unwrap_or("");
     match ext.to_lowercase().as_str() {
-        "jpg" | "jpeg" | "png" | "bmp" | "gif" | "webp" => "\u{1F5BC}",
-        "mp4" | "webm" | "avi" | "mkv" => "\u{1F3AC}",
-        "mp3" | "wav" | "ogg" | "flac" => "\u{1F3B5}",
-        "ttf" | "otf" | "woff" | "woff2" => "\u{1F524}",
-        "glsl" | "frag" | "vert" => "\u{1F4DD}",
-        _ => "\u{1F4C4}",
+        "jpg" | "jpeg" | "png" | "bmp" | "gif" | "webp" => crate::icons::IMAGE,
+        "mp4" | "webm" | "avi" | "mkv" => crate::icons::VIDEO,
+        "mp3" | "wav" | "ogg" | "flac" => crate::icons::AUDIO,
+        "ttf" | "otf" | "woff" | "woff2" => crate::icons::FONT,
+        "glsl" | "frag" | "vert" => crate::icons::CODE,
+        _ => crate::icons::FILE,
     }
 }
 

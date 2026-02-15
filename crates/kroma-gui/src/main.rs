@@ -6,16 +6,18 @@
 //!
 //! CLI fallback: pass any subcommand (import, download, load, pause, …).
 
+mod audio;
 mod commands;
 mod dock;
 mod dock_views;
 mod editor;
 mod editor_handler;
 mod graph_handler;
+#[allow(dead_code)]
+pub(crate) mod icons;
 mod importer;
 mod ipc;
 mod ipc_client;
-mod legacy_views;
 mod message;
 mod panels;
 mod shade_handler;
@@ -23,13 +25,14 @@ mod shade_views;
 mod sysinfo;
 mod theme;
 mod utils;
+mod video;
 mod widgets;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
-use iced::widget::{container, row, text_editor};
-use iced::{Element, Fill, Subscription, Task, Theme};
+use iced::widget::text_editor;
+use iced::{Element, Subscription, Task, Theme};
 use log::info;
 
 fn main() -> Result<()> {
@@ -128,28 +131,11 @@ fn cli_main(args: &[String]) -> Result<()> {
             println!(
                 "  kroma-gui download <url-or-id> [output-dir]         Download from Shadertoy"
             );
-            println!(
-                "  kroma-gui load <path.shade>                         Load shade package"
-            );
-            println!(
-                "  kroma-gui pause / resume / shutdown / status        Control daemon"
-            );
+            println!("  kroma-gui load <path.shade>                         Load shade package");
+            println!("  kroma-gui pause / resume / shutdown / status        Control daemon");
         }
     }
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Tabs
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tab {
-    Dashboard,
-    Import,
-    Editor,
-    ShadeEdit,
-    Settings,
 }
 
 // ---------------------------------------------------------------------------
@@ -165,13 +151,32 @@ struct DividerDrag {
     axis: dock::tree::SplitAxis,
 }
 
+/// Application screen state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppScreen {
+    /// Fullscreen intro/welcome screen.
+    Intro,
+    /// Main editor workspace.
+    Editor,
+    /// Dashboard — daemon status, controls, monitoring.
+    Dashboard,
+    /// Simple no-code wallpaper designer.
+    Designer,
+}
+
 struct KromaApp {
-    active_tab: Tab,
+    /// Current application screen.
+    screen: AppScreen,
+    /// Whether the settings overlay is visible.
+    show_settings: bool,
+    /// Whether the import popup is visible.
+    show_import: bool,
     loaded_shade: Option<String>,
     status_text: String,
     daemon_connected: bool,
     paused: bool,
     fps: f32,
+    #[allow(dead_code)]
     target_fps: u32,
     // --- Dock system ---
     dock: dock::DockState,
@@ -187,12 +192,13 @@ struct KromaApp {
     panel_import: panels::import::ImportPanel,
     panel_error_log: panels::error_log::ErrorLogPanel,
     panel_settings: panels::settings::SettingsPanel,
-    /// Whether to use the new dock layout (true) or legacy sidebar (false).
-    use_dock_layout: bool,
+    panel_designer: panels::designer::DesignerPanel,
     /// Command history for undo/redo.
     command_history: commands::CommandHistory,
     /// Active UI theme.
     active_theme: theme::KromaThemeId,
+    /// Cached theme tokens for the active theme.
+    theme_tokens: theme::ThemeTokens,
     /// Divider drag state: which split is being dragged.
     dragging_divider: Option<DividerDrag>,
     /// Tab being dragged for dock rearrangement.
@@ -204,6 +210,8 @@ struct KromaApp {
     last_cursor_pos: iced::Point,
     /// Window size for ratio computation during divider drag.
     window_size: (f32, f32),
+    /// Whether a file is currently being hovered over the window (drag-drop).
+    drop_hover_active: bool,
     // Import fields
     import_path: String,
     import_name: String,
@@ -242,11 +250,17 @@ struct KromaApp {
     shade_graph_last_edit: std::time::Instant,
     // Sub-graph navigation
     /// Sub-graphs for the editor graph: NodeId → (sub-graph, canvas state).
-    editor_subgraphs: std::collections::HashMap<kroma_graph::types::NodeId, (editor::ShaderGraph, editor::canvas::GraphCanvas)>,
+    editor_subgraphs: std::collections::HashMap<
+        kroma_graph::types::NodeId,
+        (editor::ShaderGraph, editor::canvas::GraphCanvas),
+    >,
     /// Navigation path from root into sub-graphs (stack of NodeIds).
     editor_nav_path: Vec<kroma_graph::types::NodeId>,
     /// Sub-graphs for the shade graph.
-    shade_subgraphs: std::collections::HashMap<kroma_graph::types::NodeId, (editor::ShaderGraph, editor::canvas::GraphCanvas)>,
+    shade_subgraphs: std::collections::HashMap<
+        kroma_graph::types::NodeId,
+        (editor::ShaderGraph, editor::canvas::GraphCanvas),
+    >,
     /// Navigation path for shade graph.
     shade_nav_path: Vec<kroma_graph::types::NodeId>,
     // Shade package editing
@@ -257,8 +271,8 @@ struct KromaApp {
     shade_new_uniform_type: String,
     shade_new_texture_name: String,
     shade_new_texture_type: String,
-    /// The loaded shade package for editing (full package including assets).
-    shade_package: Option<kroma_shared::shade::ShadePackage>,
+    /// The loaded shade package for editing (mmap-backed, lazy asset decompression).
+    shade_package: Option<kroma_shared::shade::LiveShadePackage>,
     /// Currently selected file in the project file tree.
     shade_selected_file: Option<String>,
     /// The shader source GLSL content for the shade package.
@@ -289,13 +303,25 @@ struct KromaApp {
     preview_frame: Option<PreviewFrameData>,
     /// Whether preview streaming is active.
     preview_streaming: bool,
+    /// Available audio sources detected from PulseAudio/PipeWire.
+    available_audio_sources: Vec<String>,
+    /// Video preview player state for the asset preview panel.
+    video_player: Option<video::VideoPlayerState>,
+    /// Active toast notifications.
+    toasts: Vec<Toast>,
+    /// Monotonic counter for toast IDs.
+    toast_counter: usize,
 }
 
 /// Serializable clipboard data for copy-paste of nodes.
 #[derive(Debug, Clone)]
 struct ClipboardData {
     /// (NodeKind, relative_position, defaults) for each node.
-    nodes: Vec<(editor::NodeKind, [f32; 2], Vec<kroma_graph::types::DefaultValue>)>,
+    nodes: Vec<(
+        editor::NodeKind,
+        [f32; 2],
+        Vec<kroma_graph::types::DefaultValue>,
+    )>,
     /// (from_node_index, from_port, to_node_index, to_port) — indices into `nodes`.
     connections: Vec<(usize, usize, usize, usize)>,
 }
@@ -311,18 +337,37 @@ struct PreviewFrameData {
     height: u32,
 }
 
+/// Toast notification severity level.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ToastLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+/// A temporary toast notification that auto-dismisses.
+#[derive(Debug, Clone)]
+struct Toast {
+    id: usize,
+    message: String,
+    level: ToastLevel,
+    created: std::time::Instant,
+}
+
 #[derive(Debug, Clone)]
 enum Message {
-    TabSelected(Tab),
     // Shade management
     LoadShadeClicked,
     ShadeFileSelected(Option<PathBuf>),
     UnloadShadeClicked,
     ClearLog,
+    FontLoaded(Result<(), iced::font::Error>),
     // Daemon control
     PauseClicked,
     ResumeClicked,
     ShutdownClicked,
+    #[allow(dead_code)]
     RefreshStatus,
     // Import
     ImportPathChanged(String),
@@ -340,6 +385,7 @@ enum Message {
     ApiKeyChanged(String),
     // Editor
     EditorGraph(editor::canvas::GraphMessage),
+    #[allow(dead_code)]
     EditorAddNode(editor::NodeKind),
     EditorCompile,
     EditorExport,
@@ -376,6 +422,11 @@ enum Message {
     ShadeRemoveTexture(String),
     ShadeNewTextureName(String),
     ShadeNewTextureType(String),
+    // Buffer pass management
+    ShadeAddBuffer,
+    ShadeRemoveBuffer(String),
+    ShadeBufferShaderChanged(String, String),
+    ShadeBufferFeedbackToggled(String),
     ShadeSelectFile(String),
     ShadeAddAsset,
     ShadeAddAssetResult(Option<PathBuf>),
@@ -385,15 +436,20 @@ enum Message {
     /// Node graph message for the shade editor graph.
     ShadeGraphMsg(editor::canvas::GraphMessage),
     /// Add a node in the shade editor graph.
+    #[allow(dead_code)]
     ShadeAddNode(editor::NodeKind),
     /// Compile the shade node graph to GLSL.
     ShadeCompileGraph,
     /// Parse GLSL text into the shade node graph.
     ShadeParseToNodes,
     /// Send the shade shader to the daemon for live preview.
+    #[allow(dead_code)]
     ShadeSendToDaemon,
     ShadeAddGlslFile,
     ShadeAddGlslFileResult(Option<PathBuf>),
+    /// Bind an asset to a texture channel for shader use.
+    #[allow(dead_code)]
+    ShadeBindAssetToTexture(String, u32),
     // --- Async IPC ---
     /// Received an event from the async IPC subscription.
     IpcEvent(ipc::IpcEvent, Option<ipc::IpcHandle>),
@@ -409,6 +465,14 @@ enum Message {
     Redo,
     /// Theme changed by user.
     ThemeChanged(theme::KromaThemeId),
+    /// A file was dropped onto the window (drag-to-import).
+    FileDropped(PathBuf),
+    /// A file is being hovered over the window.
+    FileHovered(PathBuf),
+    /// File hover left the window.
+    FilesHoveredLeft,
+    /// Dismiss a toast notification by ID.
+    DismissToast(usize),
     /// Divider drag started on a split node.
     DividerDragStart(Vec<dock::PathDir>, dock::tree::SplitAxis),
     /// Mouse moved during divider drag (absolute cursor position).
@@ -425,6 +489,64 @@ enum Message {
     TabDropOnTab(Vec<dock::PathDir>, usize),
     /// Tab drag cancelled (Escape or cancel button).
     TabDragCancel,
+    // --- Intro screen ---
+    /// User chose "New Project" from intro screen.
+    IntroNewProject,
+    /// User chose "Open Project" from intro screen.
+    IntroOpenProject,
+    /// User chose "Import Shadertoy" from intro screen.
+    IntroImportShadertoy,
+    /// Toggle settings overlay/panel visibility.
+    ToggleSettings,
+    /// Toggle import popup visibility.
+    ToggleImportPopup,
+    /// Return to intro screen.
+    #[allow(dead_code)]
+    BackToIntro,
+    /// Switch to Editor screen.
+    SwitchToEditor,
+    /// Switch to Dashboard screen.
+    SwitchToDashboard,
+    /// Switch to Designer screen.
+    SwitchToDesigner,
+    /// Toggle a designer component on/off.
+    DesignerToggleComponent(panels::designer::DesignerComponent),
+    /// Remove a specific designer component by index.
+    DesignerRemoveComponent(usize),
+    /// Generate a .shade project from the current designer state.
+    DesignerGenerate,
+    /// Select a component in the designer by index.
+    DesignerSelectComponent(usize),
+    /// Move a designer component to a new position.
+    #[allow(dead_code)]
+    DesignerMoveComponent(usize, f32, f32),
+    /// Resize a designer component.
+    #[allow(dead_code)]
+    DesignerResizeComponent(usize, f32, f32),
+    /// Set opacity of a designer component.
+    DesignerSetOpacity(usize, f32),
+    /// Set custom GLSL shader override for a component.
+    DesignerSetCustomShader(usize, String),
+    /// Set asset path for an image/video component.
+    DesignerSetAssetPath(usize, String),
+    /// Set component X position (text input).
+    DesignerSetComponentX(usize, String),
+    /// Set component Y position (text input).
+    DesignerSetComponentY(usize, String),
+    /// Set component width (text input).
+    DesignerSetComponentW(usize, String),
+    /// Set component height (text input).
+    DesignerSetComponentH(usize, String),
+    /// Start video playback for an asset by name.
+    VideoPlay(String),
+    /// Toggle video play/pause.
+    VideoTogglePlay,
+    /// Seek video to a normalized position (0.0–1.0).
+    VideoSeek(f32),
+    /// Advance video by one frame tick.
+    VideoTick,
+    /// Stop video playback and clean up.
+    VideoStop,
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +557,9 @@ impl KromaApp {
     fn new() -> (Self, Task<Message>) {
         let api_key = std::env::var("SHADERTOY_API_KEY").unwrap_or_default();
         let app = Self {
-            active_tab: Tab::Dashboard,
+            screen: AppScreen::Intro,
+            show_settings: false,
+            show_import: false,
             loaded_shade: None,
             status_text: "Connecting...".into(),
             daemon_connected: false,
@@ -456,14 +580,16 @@ impl KromaApp {
             panel_import: panels::import::ImportPanel::new(),
             panel_error_log: panels::error_log::ErrorLogPanel::new(),
             panel_settings: panels::settings::SettingsPanel::new(),
-            use_dock_layout: true,
+            panel_designer: panels::designer::DesignerPanel::new(),
             command_history: commands::CommandHistory::default(),
             active_theme: theme::KromaThemeId::TokyoNight,
+            theme_tokens: theme::KromaThemeId::TokyoNight.tokens(),
             dragging_divider: None,
             dragging_tab: None,
             tab_press_origin: None,
             last_cursor_pos: iced::Point::ORIGIN,
             window_size: (1280.0, 800.0),
+            drop_hover_active: false,
             import_path: String::new(),
             import_name: "Imported Shader".into(),
             import_author: "Unknown".into(),
@@ -506,6 +632,7 @@ impl KromaApp {
                 textures: Default::default(),
                 slideshow: Default::default(),
                 fonts: Default::default(),
+                buffers: Default::default(),
             },
             shade_config_toml: text_editor::Content::new(),
             shade_loaded_path: None,
@@ -516,7 +643,7 @@ impl KromaApp {
             shade_package: None,
             shade_selected_file: None,
             shade_shader_content: text_editor::Content::new(),
-            shade_edit_mode: "settings".into(),
+            shade_edit_mode: "code".into(),
             shade_graph: editor::ShaderGraph::new(),
             shade_graph_canvas: editor::canvas::GraphCanvas::default(),
             compile_errors: Vec::new(),
@@ -528,11 +655,13 @@ impl KromaApp {
             ipc_handle: None,
             preview_frame: None,
             preview_streaming: false,
+            available_audio_sources: audio::list_audio_sources(),
+            video_player: None,
+            toasts: Vec::new(),
+            toast_counter: 0,
         };
-        (
-            app,
-            Task::none(),
-        )
+        let font_task = icons::load_icon_font().map(Message::FontLoaded);
+        (app, font_task)
     }
 
     fn theme(&self) -> Theme {
@@ -546,12 +675,12 @@ impl KromaApp {
 
         // Status polling fallback (used when async IPC is connected to
         // periodically query status — fires the StatusQuery command)
-        let status_tick = iced::time::every(std::time::Duration::from_secs(3))
-            .map(|_| Message::Tick);
+        let status_tick =
+            iced::time::every(std::time::Duration::from_secs(3)).map(|_| Message::Tick);
 
         // Async IPC subscription — persistent connection with auto-reconnect
-        let ipc_sub = ipc::ipc_subscription()
-            .map(|(event, handle)| Message::IpcEvent(event, handle));
+        let ipc_sub =
+            ipc::ipc_subscription().map(|(event, handle)| Message::IpcEvent(event, handle));
 
         // Keyboard shortcuts for undo/redo
         let keyboard = iced::keyboard::on_key_press(|key, modifiers| {
@@ -561,9 +690,7 @@ impl KromaApp {
                     Key::Character(c) if c.as_ref() == "z" && !modifiers.shift() => {
                         Some(Message::Undo)
                     }
-                    Key::Character(c) if c.as_ref() == "y" => {
-                        Some(Message::Redo)
-                    }
+                    Key::Character(c) if c.as_ref() == "y" => Some(Message::Redo),
                     Key::Character(c) if c.as_ref() == "z" && modifiers.shift() => {
                         Some(Message::Redo)
                     }
@@ -579,11 +706,19 @@ impl KromaApp {
 
         let mut subs = vec![fast_tick, status_tick, keyboard, ipc_sub];
 
+        // Video playback tick (~24 fps) — only active when playing
+        if self.video_player.as_ref().map_or(false, |p| p.playing) {
+            subs.push(
+                iced::time::every(std::time::Duration::from_millis(42))
+                    .map(|_| Message::VideoTick),
+            );
+        }
+
         // Listen for mouse events (divider drag) + window resize.
         // DividerMouseMoved / DividerDragEnd are ignored by update() when
         // not dragging, so the overhead of always subscribing is negligible.
-        subs.push(iced::event::listen_with(|event, _status, _id| {
-            match event {
+        subs.push(iced::event::listen_with(
+            |event, _status, _id| match event {
                 iced::Event::Window(iced::window::Event::Resized(size)) => {
                     Some(Message::WindowResized(size))
                 }
@@ -593,16 +728,208 @@ impl KromaApp {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
                 )) => Some(Message::DividerDragEnd),
+                // File drag-and-drop
+                iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                    Some(Message::FileDropped(path))
+                }
+                iced::Event::Window(iced::window::Event::FileHovered(path)) => {
+                    Some(Message::FileHovered(path))
+                }
+                iced::Event::Window(iced::window::Event::FilesHoveredLeft) => {
+                    Some(Message::FilesHoveredLeft)
+                }
                 _ => None,
-            }
-        }));
+            },
+        ));
 
         Subscription::batch(subs)
     }
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::TabSelected(tab) => self.active_tab = tab,
+            // --- Intro screen actions ---
+            Message::IntroNewProject => {
+                self.screen = AppScreen::Editor;
+                // Trigger shade new (creates empty project)
+                return self.update(Message::ShadeNew);
+            }
+            Message::IntroOpenProject => {
+                self.screen = AppScreen::Editor;
+                return self.update(Message::ShadeOpen);
+            }
+            Message::IntroImportShadertoy => {
+                self.screen = AppScreen::Editor;
+                self.show_import = true;
+            }
+            Message::ToggleSettings => {
+                self.show_settings = !self.show_settings;
+            }
+            Message::ToggleImportPopup => {
+                self.show_import = !self.show_import;
+            }
+            Message::BackToIntro => {
+                self.screen = AppScreen::Intro;
+            }
+            Message::SwitchToEditor => {
+                self.screen = AppScreen::Editor;
+            }
+            Message::SwitchToDashboard => {
+                self.screen = AppScreen::Dashboard;
+            }
+            Message::SwitchToDesigner => {
+                self.screen = AppScreen::Designer;
+            }
+            Message::DesignerToggleComponent(comp) => {
+                if let Some(idx) = self.panel_designer.components.iter().position(|c| c.component == comp) {
+                    self.panel_designer.components.remove(idx);
+                    // Clear selection if removed
+                    if self.panel_designer.selected == Some(idx) {
+                        self.panel_designer.selected = None;
+                    } else if let Some(sel) = self.panel_designer.selected {
+                        if sel > idx {
+                            self.panel_designer.selected = Some(sel - 1);
+                        }
+                    }
+                } else {
+                    self.panel_designer.components.push(panels::designer::PlacedComponent::new(comp));
+                }
+            }
+            Message::DesignerRemoveComponent(idx) => {
+                if idx < self.panel_designer.components.len() {
+                    self.panel_designer.components.remove(idx);
+                    // Clear selection if removed
+                    if self.panel_designer.selected == Some(idx) {
+                        self.panel_designer.selected = None;
+                    } else if let Some(sel) = self.panel_designer.selected {
+                        if sel > idx {
+                            self.panel_designer.selected = Some(sel - 1);
+                        }
+                    }
+                }
+            }
+            Message::DesignerGenerate => {
+                let glsl = self.panel_designer.generate_glsl();
+                let config = self.panel_designer.generate_config();
+                self.shade_config = config;
+                self.shade_shader_content = iced::widget::text_editor::Content::with_text(&glsl);
+                self.shade_selected_file = Some("shader.frag".into());
+                self.shade_edit_mode = "code".into();
+                self.sync_shade_toml();
+                self.log_msg("Designer: Generated shade project from design".into());
+                self.screen = AppScreen::Editor;
+            }
+            Message::DesignerSelectComponent(idx) => {
+                if idx < self.panel_designer.components.len() {
+                    self.panel_designer.selected = Some(idx);
+                }
+            }
+            Message::DesignerMoveComponent(idx, x, y) => {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
+                    comp.x = x.clamp(0.0, 1.0);
+                    comp.y = y.clamp(0.0, 1.0);
+                }
+            }
+            Message::DesignerResizeComponent(idx, w, h) => {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
+                    comp.width = w.clamp(0.01, 1.0);
+                    comp.height = h.clamp(0.01, 1.0);
+                }
+            }
+            Message::DesignerSetOpacity(idx, val) => {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
+                    comp.opacity = val.clamp(0.0, 1.0);
+                }
+            }
+            Message::DesignerSetCustomShader(idx, val) => {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
+                    comp.custom_shader = if val.is_empty() { None } else { Some(val) };
+                }
+            }
+            Message::DesignerSetAssetPath(idx, val) => {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
+                    comp.asset_path = if val.is_empty() { None } else { Some(val) };
+                }
+            }
+            Message::DesignerSetComponentX(idx, val) => {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
+                    if let Ok(v) = val.parse::<f32>() {
+                        comp.x = v.clamp(0.0, 1.0);
+                    }
+                }
+            }
+            Message::DesignerSetComponentY(idx, val) => {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
+                    if let Ok(v) = val.parse::<f32>() {
+                        comp.y = v.clamp(0.0, 1.0);
+                    }
+                }
+            }
+            Message::DesignerSetComponentW(idx, val) => {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
+                    if let Ok(v) = val.parse::<f32>() {
+                        comp.width = v.clamp(0.01, 1.0);
+                    }
+                }
+            }
+            Message::DesignerSetComponentH(idx, val) => {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
+                    if let Ok(v) = val.parse::<f32>() {
+                        comp.height = v.clamp(0.01, 1.0);
+                    }
+                }
+            }
+
+            // ---------------------------------------------------------------
+            // Video playback (persistent decoder)
+            // ---------------------------------------------------------------
+            Message::VideoPlay(name) => {
+                if let Some(ref pkg) = self.shade_package {
+                    if let Some(data) = pkg.read_asset(&name) {
+                        let safe_name = name.replace('/', "_");
+                        let base = if std::path::Path::new("/dev/shm").is_dir() {
+                            std::path::PathBuf::from("/dev/shm")
+                        } else {
+                            std::env::temp_dir()
+                        };
+                        let temp_path = base.join(format!("kroma_video_{}", safe_name));
+                        if std::fs::write(&temp_path, &data).is_ok() {
+                            match video::VideoPlayerState::open(temp_path, name.clone()) {
+                                Ok(mut player) => {
+                                    // Decode first frame
+                                    player.advance_frame();
+                                    self.video_player = Some(player);
+                                }
+                                Err(e) => {
+                                    self.toast(ToastLevel::Error, format!("Video open failed: {}", e));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Message::VideoTogglePlay => {
+                if let Some(ref mut player) = self.video_player {
+                    player.playing = !player.playing;
+                }
+            }
+            Message::VideoSeek(pos) => {
+                if let Some(ref mut player) = self.video_player {
+                    player.seek_to(pos);
+                }
+            }
+            Message::VideoTick => {
+                if let Some(ref mut player) = self.video_player {
+                    if player.playing {
+                        player.advance_frame();
+                    }
+                }
+            }
+            Message::VideoStop => {
+                if let Some(ref player) = self.video_player {
+                    player.cleanup();
+                }
+                self.video_player = None;
+            }
 
             Message::LoadShadeClicked => {
                 return Task::perform(
@@ -620,13 +947,11 @@ impl KromaApp {
             Message::ShadeFileSelected(Some(path)) => {
                 let s = path.to_string_lossy().to_string();
                 if let Some(ref handle) = self.ipc_handle {
-                    handle.send(kroma_shared::ipc::DaemonCommand::LoadShade {
-                        path: s.clone(),
-                    });
+                    handle.send(kroma_shared::ipc::DaemonCommand::LoadShade { path: s.clone() });
                     self.loaded_shade = Some(s.clone());
                     self.log_msg(format!("Loading: {}", s));
                 } else {
-                    self.log_msg("Not connected to daemon".into());
+                    self.toast(ToastLevel::Warning, "Not connected to daemon".into());
                 }
             }
             Message::ShadeFileSelected(None) => {}
@@ -636,28 +961,35 @@ impl KromaApp {
                 if let Some(ref handle) = self.ipc_handle {
                     handle.send(kroma_shared::ipc::DaemonCommand::Pause);
                 }
-                self.log_msg("Shade unloaded".into());
+                self.toast(ToastLevel::Info, "Shade unloaded".into());
             }
             Message::ClearLog => {
                 self.log_messages.clear();
+            }
+            Message::FontLoaded(result) => {
+                match result {
+                    Ok(()) => log::info!("Material Icons font loaded"),
+                    Err(e) => log::warn!("Failed to load icon font: {:?}", e),
+                }
+                return Task::none();
             }
 
             Message::PauseClicked => {
                 if let Some(ref handle) = self.ipc_handle {
                     handle.send(kroma_shared::ipc::DaemonCommand::Pause);
                     self.paused = true;
-                    self.log_msg("Pause sent".into());
+                    self.toast(ToastLevel::Success, "Pause sent".into());
                 } else {
-                    self.log_msg("Not connected to daemon".into());
+                    self.toast(ToastLevel::Warning, "Not connected to daemon".into());
                 }
             }
             Message::ResumeClicked => {
                 if let Some(ref handle) = self.ipc_handle {
                     handle.send(kroma_shared::ipc::DaemonCommand::Resume);
                     self.paused = false;
-                    self.log_msg("Resume sent".into());
+                    self.toast(ToastLevel::Success, "Resume sent".into());
                 } else {
-                    self.log_msg("Not connected to daemon".into());
+                    self.toast(ToastLevel::Warning, "Not connected to daemon".into());
                 }
             }
             Message::ShutdownClicked => {
@@ -665,13 +997,16 @@ impl KromaApp {
                     handle.send(kroma_shared::ipc::DaemonCommand::Shutdown);
                     self.daemon_connected = false;
                     self.status_text = "Daemon shut down".into();
-                    self.log_msg("Daemon shutdown sent".into());
+                    self.toast(ToastLevel::Warning, "Daemon shutdown sent".into());
                 } else {
-                    self.log_msg("Not connected to daemon".into());
+                    self.toast(ToastLevel::Warning, "Not connected to daemon".into());
                 }
-            },
+            }
 
             Message::RefreshStatus | Message::Tick => {
+                // Expire old toasts (older than 4 seconds)
+                self.toasts.retain(|t| t.created.elapsed().as_secs() < 4);
+
                 // Send status query via async IPC handle
                 if let Some(ref handle) = self.ipc_handle {
                     handle.send(kroma_shared::ipc::DaemonCommand::StatusQuery);
@@ -715,9 +1050,7 @@ impl KromaApp {
                 }
 
                 // Auto-compile: shade node graph dirty.
-                if self.shade_graph_dirty
-                    && self.shade_graph_last_edit.elapsed() >= debounce
-                {
+                if self.shade_graph_dirty && self.shade_graph_last_edit.elapsed() >= debounce {
                     self.shade_graph_dirty = false;
                     match self.shade_graph.compile_glsl() {
                         Ok(glsl) => {
@@ -735,13 +1068,32 @@ impl KromaApp {
             }
 
             Message::Undo => {
-                match self.command_history.undo(
-                    &mut self.shader_graph,
-                    &mut self.shade_graph,
-                ) {
+                let enl = self.editor_nav_path.last().copied();
+                let snl = self.shade_nav_path.last().copied();
+                let eg = match enl {
+                    Some(id) => match self.editor_subgraphs.get_mut(&id) {
+                        Some((g, _)) => g,
+                        None => &mut self.shader_graph,
+                    },
+                    None => &mut self.shader_graph,
+                };
+                let sg = match snl {
+                    Some(id) => match self.shade_subgraphs.get_mut(&id) {
+                        Some((g, _)) => g,
+                        None => &mut self.shade_graph,
+                    },
+                    None => &mut self.shade_graph,
+                };
+                match self
+                    .command_history
+                    .undo(eg, sg)
+                {
                     Ok(true) => {
-                        let desc = self.command_history.redo_description()
-                            .unwrap_or("?").to_string();
+                        let desc = self
+                            .command_history
+                            .redo_description()
+                            .unwrap_or("?")
+                            .to_string();
                         self.log_msg(format!("Undo: {}", desc));
                         // Re-compile both graphs since undo may affect either.
                         let now = std::time::Instant::now();
@@ -750,18 +1102,37 @@ impl KromaApp {
                         self.shade_graph_dirty = true;
                         self.shade_graph_last_edit = now;
                     }
-                    Ok(false) => self.log_msg("Nothing to undo".into()),
-                    Err(e) => self.log_msg(format!("Undo failed: {}", e)),
+                    Ok(false) => self.toast(ToastLevel::Info, "Nothing to undo".into()),
+                    Err(e) => self.toast(ToastLevel::Error, format!("Undo failed: {}", e)),
                 }
             }
             Message::Redo => {
-                match self.command_history.redo(
-                    &mut self.shader_graph,
-                    &mut self.shade_graph,
-                ) {
+                let enl = self.editor_nav_path.last().copied();
+                let snl = self.shade_nav_path.last().copied();
+                let eg = match enl {
+                    Some(id) => match self.editor_subgraphs.get_mut(&id) {
+                        Some((g, _)) => g,
+                        None => &mut self.shader_graph,
+                    },
+                    None => &mut self.shader_graph,
+                };
+                let sg = match snl {
+                    Some(id) => match self.shade_subgraphs.get_mut(&id) {
+                        Some((g, _)) => g,
+                        None => &mut self.shade_graph,
+                    },
+                    None => &mut self.shade_graph,
+                };
+                match self
+                    .command_history
+                    .redo(eg, sg)
+                {
                     Ok(true) => {
-                        let desc = self.command_history.undo_description()
-                            .unwrap_or("?").to_string();
+                        let desc = self
+                            .command_history
+                            .undo_description()
+                            .unwrap_or("?")
+                            .to_string();
                         self.log_msg(format!("Redo: {}", desc));
                         let now = std::time::Instant::now();
                         self.editor_graph_dirty = true;
@@ -776,7 +1147,57 @@ impl KromaApp {
 
             Message::ThemeChanged(theme_id) => {
                 self.active_theme = theme_id;
+                self.theme_tokens = theme_id.tokens();
                 self.log_msg(format!("Theme changed to {}", theme_id.name()));
+            }
+
+            // -- File drag-and-drop import --
+            Message::FileDropped(path) => {
+                self.drop_hover_active = false;
+                // Guard: extract filename, reject degenerate paths
+                let filename = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                if filename.is_empty() {
+                    self.log_msg("Dropped path has no filename — ignoring".into());
+                } else {
+                    // Check file size before reading (100 MB limit)
+                    const MAX_DROP_SIZE: u64 = 100 * 1024 * 1024;
+                    let size_ok = match std::fs::metadata(&path) {
+                        Ok(meta) => meta.len() <= MAX_DROP_SIZE,
+                        Err(_) => false,
+                    };
+                    if !size_ok {
+                        self.log_msg(format!(
+                            "Dropped file too large (>100 MB): {}",
+                            path.display()
+                        ));
+                    } else if let Ok(data) = std::fs::read(&path) {
+                        let asset_path = format!("assets/{}", filename);
+                        if let Some(ref mut pkg) = self.shade_package {
+                            pkg.add_asset(asset_path.clone(), data);
+                            self.log_msg(format!("Imported dropped file: {}", asset_path));
+                        } else {
+                            self.log_msg(
+                                "No shade package loaded — open or create one first".into(),
+                            );
+                        }
+                    } else {
+                        self.log_msg(format!("Failed to read dropped file: {}", path.display()));
+                    }
+                }
+            }
+            Message::FileHovered(_path) => {
+                self.drop_hover_active = true;
+            }
+            Message::FilesHoveredLeft => {
+                self.drop_hover_active = false;
+            }
+
+            Message::DismissToast(id) => {
+                self.toasts.retain(|t| t.id != id);
             }
 
             Message::DividerDragStart(path, axis) => {
@@ -848,7 +1269,9 @@ impl KromaApp {
                 if let Some(panel_id) = self.dragging_tab.take() {
                     // Remove from old location, insert at target position
                     self.dock.root.remove_panel(panel_id);
-                    self.dock.root.insert_panel_at_index(panel_id, &target_path, target_index);
+                    self.dock
+                        .root
+                        .insert_panel_at_index(panel_id, &target_path, target_index);
                     self.dock.root.cleanup();
                 }
                 self.tab_press_origin = None;
@@ -888,19 +1311,33 @@ impl KromaApp {
                     ipc::IpcEvent::Event(daemon_event) => {
                         use kroma_shared::ipc::DaemonEvent;
                         match daemon_event {
-                            DaemonEvent::Status { fps, paused, loaded_shade } => {
+                            DaemonEvent::Status {
+                                fps,
+                                paused,
+                                loaded_shade,
+                            } => {
                                 self.daemon_connected = true;
                                 self.fps = fps;
                                 self.paused = paused;
                                 self.loaded_shade = loaded_shade;
                                 self.status_text = format!("{:.1} FPS", fps);
                             }
-                            DaemonEvent::CompileResult { success, errors, warnings } => {
-                                self.handle_compile_result(
-                                    DaemonEvent::CompileResult { success, errors, warnings },
-                                );
+                            DaemonEvent::CompileResult {
+                                success,
+                                errors,
+                                warnings,
+                            } => {
+                                self.handle_compile_result(DaemonEvent::CompileResult {
+                                    success,
+                                    errors,
+                                    warnings,
+                                });
                             }
-                            DaemonEvent::PreviewFrame { jpeg_base64, width, height } => {
+                            DaemonEvent::PreviewFrame {
+                                jpeg_base64,
+                                width,
+                                height,
+                            } => {
                                 // Decode base64 JPEG → RGBA pixels
                                 if let Ok(jpeg_data) = base64::Engine::decode(
                                     &base64::engine::general_purpose::STANDARD,
@@ -927,7 +1364,11 @@ impl KromaApp {
                                 self.log_msg(format!("Daemon error: {}", message));
                             }
                             DaemonEvent::Ready => {}
-                            DaemonEvent::SystemInfo { cpu_usage, ram_usage, .. } => {
+                            DaemonEvent::SystemInfo {
+                                cpu_usage,
+                                ram_usage,
+                                ..
+                            } => {
                                 self.status_text = format!(
                                     "{:.1} FPS | CPU {:.0}% | RAM {:.0}%",
                                     self.fps, cpu_usage, ram_usage
@@ -957,7 +1398,7 @@ impl KromaApp {
                         self.preview_streaming = true;
                         self.log_msg("Preview stream started".into());
                     } else {
-                        self.log_msg("Not connected to daemon".into());
+                        self.toast(ToastLevel::Warning, "Not connected to daemon".into());
                     }
                 }
             }
@@ -1063,6 +1504,10 @@ impl KromaApp {
             | Message::ShadeRemoveTexture(_)
             | Message::ShadeNewTextureName(_)
             | Message::ShadeNewTextureType(_)
+            | Message::ShadeAddBuffer
+            | Message::ShadeRemoveBuffer(_)
+            | Message::ShadeBufferShaderChanged(_, _)
+            | Message::ShadeBufferFeedbackToggled(_)
             | Message::ShadeSelectFile(_)
             | Message::ShadeEditMode(_)
             | Message::ShadeShaderChanged(_)
@@ -1075,7 +1520,8 @@ impl KromaApp {
             | Message::ShadeAddAssetResult(_)
             | Message::ShadeRemoveAsset(_)
             | Message::ShadeAddGlslFile
-            | Message::ShadeAddGlslFileResult(_)) => {
+            | Message::ShadeAddGlslFileResult(_)
+            | Message::ShadeBindAssetToTexture(_, _)) => {
                 return self.handle_shade_msg(msg);
             }
         }
@@ -1090,32 +1536,180 @@ impl KromaApp {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        if self.use_dock_layout {
-            return self.view_docked();
+        match self.screen {
+            AppScreen::Intro => self.view_intro(),
+            AppScreen::Editor => self.view_docked(),
+            AppScreen::Dashboard => self.view_dashboard_screen(),
+            AppScreen::Designer => self.view_designer_screen(),
         }
-        // Legacy sidebar layout
-        let sidebar = self.view_sidebar();
-        let content: Element<'_, Message> = match self.active_tab {
-            Tab::Dashboard => self.view_dashboard(),
-            Tab::Import => self.view_import(),
-            Tab::Editor => self.view_editor(),
-            Tab::ShadeEdit => self.view_shade_edit(),
-            Tab::Settings => self.view_settings(),
-        };
-        row![
-            sidebar,
-            container(content).width(Fill).height(Fill).padding(24),
-        ]
-        .width(Fill)
-        .height(Fill)
-        .into()
     }
 
-    fn log_msg(&mut self, msg: String) {
+    /// Fullscreen intro/welcome screen.
+    fn view_intro(&self) -> Element<'_, Message> {
+        use iced::widget::{button, column, container, horizontal_rule, row, text, Space};
+        use iced::{alignment, Border, Color, Fill, Padding};
+
+        let tokens = &self.theme_tokens;
+
+        let logo = column![
+            text("KROMA").size(52).color(tokens.text_accent),
+            text("Wallpaper Engine").size(16).color(tokens.text_secondary),
+        ]
+        .spacing(4)
+        .align_x(alignment::Horizontal::Center);
+
+        let version = text(format!("v{}", env!("CARGO_PKG_VERSION")))
+            .size(12)
+            .color(tokens.text_secondary);
+
+        let bg = tokens.bg_secondary;
+        let hover = tokens.button_hover;
+        let txt = tokens.text_primary;
+        let accent = tokens.text_accent;
+        let radius = tokens.border_radius;
+
+        let intro_btn_style = move |_theme: &Theme, status: button::Status| -> button::Style {
+            let bg_color = match status {
+                button::Status::Hovered | button::Status::Pressed => hover,
+                _ => bg,
+            };
+            button::Style {
+                background: Some(iced::Background::Color(bg_color)),
+                text_color: txt,
+                border: Border {
+                    radius: radius.into(),
+                    width: 1.0,
+                    color: Color::TRANSPARENT,
+                },
+                ..Default::default()
+            }
+        };
+
+        let btn_new = button(
+            column![
+                text("New Shade Project").size(18).color(txt),
+                text("Create a new wallpaper shader from scratch").size(12).color(accent),
+            ]
+            .spacing(4)
+            .padding(Padding::from([12, 24]))
+            .width(320),
+        )
+        .on_press(Message::IntroNewProject)
+        .style(intro_btn_style);
+
+        let btn_open = button(
+            column![
+                text("Open Existing Project").size(18).color(txt),
+                text("Open a .shade package or config.toml").size(12).color(accent),
+            ]
+            .spacing(4)
+            .padding(Padding::from([12, 24]))
+            .width(320),
+        )
+        .on_press(Message::IntroOpenProject)
+        .style(intro_btn_style);
+
+        let btn_import = button(
+            column![
+                text("Import from Shadertoy").size(18).color(txt),
+                text("Download and convert a Shadertoy shader").size(12).color(accent),
+            ]
+            .spacing(4)
+            .padding(Padding::from([12, 24]))
+            .width(320),
+        )
+        .on_press(Message::IntroImportShadertoy)
+        .style(intro_btn_style);
+
+        let btn_designer = button(
+            column![
+                text("Simple Designer").size(18).color(txt),
+                text("Build a wallpaper from premade components").size(12).color(accent),
+            ]
+            .spacing(4)
+            .padding(Padding::from([12, 24]))
+            .width(320),
+        )
+        .on_press(Message::SwitchToDesigner)
+        .style(intro_btn_style);
+
+        let actions = column![btn_new, btn_open, btn_import, btn_designer,]
+        .spacing(12)
+        .align_x(alignment::Horizontal::Center);
+
+        // Daemon status indicator
+        let status_color = if self.daemon_connected {
+            tokens.success
+        } else {
+            tokens.text_secondary
+        };
+        let status_label = if self.daemon_connected {
+            "Daemon Connected"
+        } else {
+            "Daemon Offline"
+        };
+        let status = row![
+            container(Space::new(8, 8))
+                .style(move |_: &Theme| container::Style {
+                    background: Some(iced::Background::Color(status_color)),
+                    border: Border {
+                        radius: 4.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+            text(status_label).size(12).color(tokens.text_secondary),
+        ]
+        .spacing(6)
+        .align_y(alignment::Vertical::Center);
+
+        let center_content = column![
+            logo,
+            Space::new(0, 16),
+            horizontal_rule(1),
+            Space::new(0, 24),
+            actions,
+            Space::new(0, 32),
+            status,
+            version,
+        ]
+        .spacing(4)
+        .align_x(alignment::Horizontal::Center)
+        .max_width(400);
+
+        let bg = tokens.bg_primary;
+        container(center_content)
+            .center(Fill)
+            .width(Fill)
+            .height(Fill)
+            .style(move |_: &Theme| container::Style {
+                background: Some(iced::Background::Color(bg)),
+                ..Default::default()
+            })
+            .into()
+    }
+
+    fn toast(&mut self, level: ToastLevel, msg: String) {
+        self.toast_counter += 1;
+        self.toasts.push(Toast {
+            id: self.toast_counter,
+            message: msg.clone(),
+            level,
+            created: std::time::Instant::now(),
+        });
+        // Also log it
         let ts = utils::chrono_now();
         self.log_messages.push_back(format!("[{}] {}", ts, msg));
         if self.log_messages.len() > 100 {
             self.log_messages.pop_front();
         }
+        // Keep max 5 toasts visible
+        while self.toasts.len() > 5 {
+            self.toasts.remove(0);
+        }
+    }
+
+    fn log_msg(&mut self, msg: String) {
+        self.toast(ToastLevel::Info, msg);
     }
 }

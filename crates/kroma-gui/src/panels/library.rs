@@ -3,9 +3,10 @@
 use iced::widget::{button, column, row, scrollable, text, Space};
 use iced::{Border, Element, Fill, Padding, Theme};
 
-use crate::Message;
+use crate::icons;
 use crate::panels::dashboard::{btn_primary, btn_secondary, card};
 use crate::panels::{AppContext, Panel};
+use crate::Message;
 
 pub struct LibraryPanel {
     /// Discovered .shade files from the shader directory.
@@ -29,30 +30,29 @@ impl LibraryPanel {
 
 impl Panel for LibraryPanel {
     fn view<'a>(&'a self, ctx: AppContext<'a>) -> Element<'a, Message> {
+        let t = ctx.tokens;
         // ── Active wallpaper indicator ─────────────────────────────────
         let active = if let Some(loaded) = ctx.loaded_shade {
             card(
                 "Active",
                 column![
                     text(loaded).size(11),
-                    btn_secondary("Unload", Message::UnloadShadeClicked),
+                    btn_secondary("Unload", Message::UnloadShadeClicked, t),
                 ]
                 .spacing(4),
+                t,
             )
         } else {
-            card(
-                "Active",
-                column![text("No shade loaded").size(11)],
-            )
+            card("Active", column![text("No shade loaded").size(11)], t)
         };
 
         // ── Action buttons (stacked for narrow sidebar) ────────────────
         let actions = column![
-            btn_primary("Load .shade…", Message::LoadShadeClicked),
-            btn_secondary("Open Package…", Message::ShadeOpen),
-            btn_secondary("New Package", Message::ShadeNew),
+            btn_primary("Load .shade…", Message::LoadShadeClicked, t),
+            btn_secondary("Open Package…", Message::ShadeOpen, t),
+            btn_secondary("New Package", Message::ShadeNew, t),
         ]
-        .spacing(4)
+        .spacing(t.spacing_sm)
         .width(Fill);
 
         // ── Package list ───────────────────────────────────────────────
@@ -64,27 +64,40 @@ impl Panel for LibraryPanel {
                     .into(),
             );
         } else {
+            let edit_hover_bg = t.tab_active;
+            let edit_default_bg = t.bg_tertiary;
+            let edit_text_col = t.text_accent;
+            let load_hover_bg = iced::Color {
+                a: 0.3,
+                ..t.success
+            };
+            let load_default_bg = t.bg_tertiary;
+            let load_text_col = t.success;
             for entry in &self.shade_files {
                 let edit_path = std::path::PathBuf::from(entry.path.clone());
                 let load_path = std::path::PathBuf::from(entry.path.clone());
                 entries.push(
                     column![
-                        text(format!("\u{1F4E6} {}", entry.name)).size(12),
+                        row![
+                            text(icons::PACKAGE).font(icons::ICON_FONT).size(12),
+                            text(&entry.name).size(12),
+                        ]
+                        .spacing(4)
+                        .align_y(iced::Alignment::Center),
                         row![
                             text(&entry.size_str).size(10),
                             Space::with_width(Fill),
                             button(text("Edit").size(10))
                                 .on_press(Message::ShadeOpenResult(Some(edit_path)))
                                 .padding(Padding::from([2, 8]))
-                                .style(|theme: &Theme, status| {
-                                    let p = theme.extended_palette();
+                                .style(move |_theme: &Theme, status| {
                                     let bg = match status {
-                                        button::Status::Hovered => p.primary.weak.color,
-                                        _ => p.background.strong.color,
+                                        button::Status::Hovered => edit_hover_bg,
+                                        _ => edit_default_bg,
                                     };
                                     button::Style {
                                         background: Some(bg.into()),
-                                        text_color: p.primary.strong.color,
+                                        text_color: edit_text_col,
                                         border: Border::default().rounded(4),
                                         ..Default::default()
                                     }
@@ -92,15 +105,14 @@ impl Panel for LibraryPanel {
                             button(text("Load").size(10))
                                 .on_press(Message::ShadeFileSelected(Some(load_path)))
                                 .padding(Padding::from([2, 8]))
-                                .style(|theme: &Theme, status| {
-                                    let p = theme.extended_palette();
+                                .style(move |_theme: &Theme, status| {
                                     let bg = match status {
-                                        button::Status::Hovered => p.success.weak.color,
-                                        _ => p.background.strong.color,
+                                        button::Status::Hovered => load_hover_bg,
+                                        _ => load_default_bg,
                                     };
                                     button::Style {
                                         background: Some(bg.into()),
-                                        text_color: p.success.strong.color,
+                                        text_color: load_text_col,
                                         border: Border::default().rounded(4),
                                         ..Default::default()
                                     }
@@ -120,12 +132,12 @@ impl Panel for LibraryPanel {
         let packages_content = column![pkg_count_text]
             .push(column(entries).spacing(4))
             .spacing(4);
-        let packages = card("Packages", packages_content);
+        let packages = card("Packages", packages_content, t);
 
         scrollable(
             column![active, actions, packages]
-                .spacing(8)
-                .padding(8)
+                .spacing(t.spacing_md)
+                .padding(t.spacing_md)
                 .width(Fill),
         )
         .width(Fill)
@@ -148,9 +160,7 @@ fn scan_shade_directory() -> Vec<ShadeEntry> {
                     .and_then(|s| s.to_str())
                     .unwrap_or("unknown")
                     .to_string();
-                let size = std::fs::metadata(&path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 let size_str = if size > 1_048_576 {
                     format!("{:.1} MB", size as f64 / 1_048_576.0)
                 } else if size > 1024 {

@@ -30,15 +30,18 @@ impl KromaApp {
                     textures: Default::default(),
                     slideshow: Default::default(),
                     fonts: Default::default(),
+                    buffers: Default::default(),
                 };
                 let default_frag = "// Kroma shader\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = fragCoord / u_resolution;\n    fragColor = vec4(uv, 0.5 + 0.5 * sin(u_time), 1.0);\n}\n";
                 self.shade_config = config.clone();
-                self.shade_package = Some(kroma_shared::shade::ShadePackage {
-                    config,
-                    shader_source: Some(default_frag.into()),
-                    preview: None,
-                    assets: Vec::new(),
-                });
+                self.shade_package = Some(kroma_shared::shade::LiveShadePackage::from_package(
+                    kroma_shared::shade::ShadePackage {
+                        config,
+                        shader_source: Some(default_frag.into()),
+                        preview: None,
+                        assets: Vec::new(),
+                    },
+                ));
                 self.shade_shader_content = text_editor::Content::with_text(default_frag);
                 self.shade_loaded_path = None;
                 self.shade_selected_file = Some("config.toml".into());
@@ -61,7 +64,7 @@ impl KromaApp {
             }
             Message::ShadeOpenResult(Some(path)) => {
                 if path.extension().map(|e| e == "shade").unwrap_or(false) {
-                    match kroma_shared::shade::ShadePackage::load(&path) {
+                    match kroma_shared::shade::LiveShadePackage::load(&path) {
                         Ok(pkg) => {
                             self.shade_config = pkg.config.clone();
                             self.shade_shader_content = text_editor::Content::with_text(
@@ -69,8 +72,8 @@ impl KromaApp {
                             );
                             self.shade_package = Some(pkg);
                             self.shade_loaded_path = Some(path.clone());
-                            self.shade_selected_file = Some("config.toml".into());
-                            self.shade_edit_mode = "settings".into();
+                            self.shade_selected_file = Some("shader.frag".into());
+                            self.shade_edit_mode = "code".into();
                             self.sync_shade_toml();
                             self.log_msg(format!("Opened: {}", path.display()));
                         }
@@ -81,17 +84,20 @@ impl KromaApp {
                         match toml::from_str::<kroma_shared::types::ShadeConfig>(&toml_str) {
                             Ok(config) => {
                                 self.shade_config = config.clone();
-                                self.shade_package = Some(kroma_shared::shade::ShadePackage {
-                                    config,
-                                    shader_source: None,
-                                    preview: None,
-                                    assets: Vec::new(),
-                                });
+                                self.shade_package =
+                                    Some(kroma_shared::shade::LiveShadePackage::from_package(
+                                        kroma_shared::shade::ShadePackage {
+                                            config,
+                                            shader_source: None,
+                                            preview: None,
+                                            assets: Vec::new(),
+                                        },
+                                    ));
                                 self.shade_loaded_path = Some(path.clone());
-                                self.shade_selected_file = Some("config.toml".into());
-                                self.shade_edit_mode = "settings".into();
                                 self.sync_shade_toml();
                                 self.log_msg(format!("Opened: {}", path.display()));
+                                self.shade_selected_file = Some("config.toml".into());
+                                self.shade_edit_mode = "settings".into();
                             }
                             Err(e) => self.log_msg(format!("Invalid config: {}", e)),
                         }
@@ -101,12 +107,17 @@ impl KromaApp {
             Message::ShadeOpenResult(None) => {}
             Message::ShadeSave => {
                 let shader_src = self.shade_shader_content.text();
-                let pkg = kroma_shared::shade::ShadePackage {
-                    config: self.shade_config.clone(),
-                    shader_source: Some(shader_src),
-                    preview: self.shade_package.as_ref().and_then(|p| p.preview.clone()),
-                    assets: self.shade_package.as_ref().map(|p| p.assets.clone()).unwrap_or_default(),
-                };
+                // Update the live package in-place, then save
+                if let Some(ref mut pkg) = self.shade_package {
+                    pkg.config = self.shade_config.clone();
+                    pkg.shader_source = Some(shader_src);
+                } else {
+                    // No package loaded — create one
+                    let mut pkg =
+                        kroma_shared::shade::LiveShadePackage::new_empty(self.shade_config.clone());
+                    pkg.shader_source = Some(shader_src);
+                    self.shade_package = Some(pkg);
+                }
                 let shade_path = if let Some(ref existing) = self.shade_loaded_path {
                     existing.clone()
                 } else {
@@ -115,13 +126,14 @@ impl KromaApp {
                     let name = self.shade_config.meta.name.replace(' ', "_").to_lowercase();
                     dir.join(format!("{}.shade", name))
                 };
-                match pkg.save(&shade_path) {
-                    Ok(()) => {
-                        self.shade_package = Some(pkg);
-                        self.shade_loaded_path = Some(shade_path.clone());
-                        self.log_msg(format!("Saved: {}", shade_path.display()));
+                if let Some(ref pkg) = self.shade_package {
+                    match pkg.save(&shade_path) {
+                        Ok(()) => {
+                            self.shade_loaded_path = Some(shade_path.clone());
+                            self.log_msg(format!("Saved: {}", shade_path.display()));
+                        }
+                        Err(e) => self.log_msg(format!("Save failed: {}", e)),
                     }
-                    Err(e) => self.log_msg(format!("Save failed: {}", e)),
                 }
             }
             Message::ShadeMetaName(s) => self.shade_config.meta.name = s,
@@ -182,6 +194,39 @@ impl KromaApp {
             }
             Message::ShadeNewTextureName(s) => self.shade_new_texture_name = s,
             Message::ShadeNewTextureType(s) => self.shade_new_texture_type = s,
+            Message::ShadeAddBuffer => {
+                let letters = ["A", "B", "C", "D"];
+                for letter in letters {
+                    if !self.shade_config.buffers.contains_key(letter) {
+                        self.shade_config.buffers.insert(
+                            letter.to_string(),
+                            kroma_shared::types::BufferDef {
+                                shader: format!("buffer_{}.frag", letter.to_lowercase()),
+                                inputs: Vec::new(),
+                                feedback: false,
+                            },
+                        );
+                        break;
+                    }
+                }
+                self.sync_shade_toml();
+            }
+            Message::ShadeRemoveBuffer(name) => {
+                self.shade_config.buffers.remove(&name);
+                self.sync_shade_toml();
+            }
+            Message::ShadeBufferShaderChanged(name, shader) => {
+                if let Some(buf) = self.shade_config.buffers.get_mut(&name) {
+                    buf.shader = shader;
+                }
+                self.sync_shade_toml();
+            }
+            Message::ShadeBufferFeedbackToggled(name) => {
+                if let Some(buf) = self.shade_config.buffers.get_mut(&name) {
+                    buf.feedback = !buf.feedback;
+                }
+                self.sync_shade_toml();
+            }
             Message::ShadeSelectFile(file) => {
                 self.shade_selected_file = Some(file);
             }
@@ -197,7 +242,10 @@ impl KromaApp {
                 if self.shade_edit_mode == "code" && mode == "nodes" {
                     let glsl = self.shade_shader_content.text();
                     if !glsl.trim().is_empty() {
-                        eprintln!("[kroma-gui] Parsing GLSL to nodes (code→nodes switch), {} chars", glsl.len());
+                        eprintln!(
+                            "[kroma-gui] Parsing GLSL to nodes (code→nodes switch), {} chars",
+                            glsl.len()
+                        );
                         self.shade_graph = editor::parse_glsl_to_graph(&glsl);
                         let n = self.shade_graph.nodes().count();
                         let c = self.shade_graph.connections().len();
@@ -219,24 +267,25 @@ impl KromaApp {
             Message::ShadeAddNode(kind) => {
                 self.shade_graph_canvas.pending_node = Some(kind);
             }
-            Message::ShadeCompileGraph => {
-                match self.shade_graph.compile_glsl() {
-                    Ok(glsl) => {
-                        self.shade_shader_content = text_editor::Content::with_text(&glsl);
-                        if let Some(ref mut pkg) = self.shade_package {
-                            pkg.shader_source = Some(glsl);
-                        }
-                        self.log_msg("Node graph compiled to GLSL".into());
+            Message::ShadeCompileGraph => match self.shade_graph.compile_glsl() {
+                Ok(glsl) => {
+                    self.shade_shader_content = text_editor::Content::with_text(&glsl);
+                    if let Some(ref mut pkg) = self.shade_package {
+                        pkg.shader_source = Some(glsl);
                     }
-                    Err(e) => self.log_msg(format!("Graph compile error: {}", e)),
+                    self.log_msg("Node graph compiled to GLSL".into());
                 }
-            }
+                Err(e) => self.log_msg(format!("Graph compile error: {}", e)),
+            },
             Message::ShadeParseToNodes => {
                 let glsl = self.shade_shader_content.text();
                 if glsl.trim().is_empty() {
                     self.log_msg("No GLSL source to parse into nodes".into());
                 } else {
-                    eprintln!("[kroma-gui] ShadeParseToNodes: parsing {} chars", glsl.len());
+                    eprintln!(
+                        "[kroma-gui] ShadeParseToNodes: parsing {} chars",
+                        glsl.len()
+                    );
                     self.shade_graph = editor::parse_glsl_to_graph(&glsl);
                     self.shade_graph_canvas = editor::canvas::GraphCanvas::default();
                     let n = self.shade_graph.nodes().count();
@@ -266,11 +315,14 @@ impl KromaApp {
             }
             Message::ShadeAddAssetResult(Some(path)) => {
                 if let Ok(data) = std::fs::read(&path) {
-                    let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let filename = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     let asset_path = format!("assets/{}", filename);
                     if let Some(ref mut pkg) = self.shade_package {
-                        pkg.assets.retain(|(n, _)| n != &asset_path);
-                        pkg.assets.push((asset_path.clone(), data));
+                        pkg.add_asset(asset_path.clone(), data);
                         self.log_msg(format!("Added asset: {}", asset_path));
                     } else {
                         self.log_msg("No shade package loaded — open or create one first".into());
@@ -280,7 +332,7 @@ impl KromaApp {
             Message::ShadeAddAssetResult(None) => {}
             Message::ShadeRemoveAsset(name) => {
                 if let Some(ref mut pkg) = self.shade_package {
-                    pkg.assets.retain(|(n, _)| n != &name);
+                    pkg.remove_asset(&name);
                     self.log_msg(format!("Removed asset: {}", name));
                 }
             }
@@ -299,11 +351,14 @@ impl KromaApp {
             }
             Message::ShadeAddGlslFileResult(Some(path)) => {
                 if let Ok(data) = std::fs::read(&path) {
-                    let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let filename = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     let asset_path = format!("assets/{}", filename);
                     if let Some(ref mut pkg) = self.shade_package {
-                        pkg.assets.retain(|(n, _)| n != &asset_path);
-                        pkg.assets.push((asset_path.clone(), data));
+                        pkg.add_asset(asset_path.clone(), data);
                         self.log_msg(format!("Added GLSL asset: {}", asset_path));
                     } else {
                         self.log_msg("No shade package loaded — open or create one first".into());
@@ -311,6 +366,38 @@ impl KromaApp {
                 }
             }
             Message::ShadeAddGlslFileResult(None) => {}
+            Message::ShadeBindAssetToTexture(asset_name, channel) => {
+                let channel_name = format!("iChannel{}", channel);
+                // Determine texture type from extension
+                let ext = asset_name
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or("")
+                    .to_lowercase();
+                let tex_type = match ext.as_str() {
+                    "mp4" | "webm" | "avi" | "mkv" => "video",
+                    "glsl" | "frag" => "glsl",
+                    "ttf" | "otf" | "woff" | "woff2" => "font",
+                    _ => "image",
+                };
+                let is_video = tex_type == "video";
+                self.shade_config.textures.insert(
+                    channel_name.clone(),
+                    kroma_shared::types::TextureDef {
+                        ty: tex_type.into(),
+                        source: Some(asset_name.clone()),
+                        looping: is_video,
+                        filter: Default::default(),
+                        wrap: Default::default(),
+                        binding: Some(channel),
+                    },
+                );
+                self.sync_shade_toml();
+                self.log_msg(format!(
+                    "Bound '{}' to {} (binding {})",
+                    asset_name, channel_name, channel
+                ));
+            }
             _ => {} // Not a shade message — ignore
         }
         Task::none()

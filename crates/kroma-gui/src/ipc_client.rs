@@ -13,11 +13,12 @@ fn send_command(cmd: &DaemonCommand) -> Result<()> {
     use std::io::{BufRead, BufReader};
 
     let path = socket_path();
-    let stream = UnixStream::connect(&path)
-        .with_context(|| format!(
+    let stream = UnixStream::connect(&path).with_context(|| {
+        format!(
             "Could not connect to daemon at {}. Is kroma-daemon running?",
             path.display()
-        ))?;
+        )
+    })?;
 
     let mut writer = stream.try_clone()?;
     let json = serde_json::to_string(cmd)?;
@@ -41,11 +42,12 @@ fn send_command_with_response(cmd: &DaemonCommand) -> Result<DaemonEvent> {
     use std::io::{BufRead, BufReader};
 
     let path = socket_path();
-    let stream = UnixStream::connect(&path)
-        .with_context(|| format!(
+    let stream = UnixStream::connect(&path).with_context(|| {
+        format!(
             "Could not connect to daemon at {}. Is kroma-daemon running?",
             path.display()
-        ))?;
+        )
+    })?;
 
     let mut writer = stream.try_clone()?;
     let json = serde_json::to_string(cmd)?;
@@ -57,7 +59,8 @@ fn send_command_with_response(cmd: &DaemonCommand) -> Result<DaemonEvent> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(15)))?;
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
-    reader.read_line(&mut response)
+    reader
+        .read_line(&mut response)
         .context("Failed to read compile result from daemon")?;
 
     let event: DaemonEvent = serde_json::from_str(response.trim())
@@ -92,11 +95,12 @@ pub fn query_status() -> Result<String> {
     use std::io::{BufRead, BufReader};
 
     let path = socket_path();
-    let stream = UnixStream::connect(&path)
-        .with_context(|| format!(
+    let stream = UnixStream::connect(&path).with_context(|| {
+        format!(
             "Could not connect to daemon at {}. Is kroma-daemon running?",
             path.display()
-        ))?;
+        )
+    })?;
 
     // Send a proper StatusQuery command
     let cmd = DaemonCommand::StatusQuery;

@@ -12,11 +12,7 @@ use kroma_shared::translator;
 /// Import a Shadertoy GLSL file and write a `.shade` package next to it.
 ///
 /// Returns the path to the produced `.shade` file.
-pub fn import_shadertoy_file(
-    glsl_path: &Path,
-    name: &str,
-    author: &str,
-) -> Result<PathBuf> {
+pub fn import_shadertoy_file(glsl_path: &Path, name: &str, author: &str) -> Result<PathBuf> {
     let source = std::fs::read_to_string(glsl_path)
         .with_context(|| format!("Failed to read shader file: {}", glsl_path.display()))?;
 
@@ -114,9 +110,7 @@ pub async fn download_shadertoy(
 
     // Determine API key: explicit > env var > None
     let env_key = std::env::var("SHADERTOY_API_KEY").ok();
-    let key = api_key
-        .map(|s| s.to_string())
-        .or(env_key);
+    let key = api_key.map(|s| s.to_string()).or(env_key);
 
     let client = reqwest::Client::builder()
         .user_agent("Kroma/0.1")
@@ -129,26 +123,38 @@ pub async fn download_shadertoy(
             Ok(result) => result,
             Err(api_err) => {
                 log::warn!("API fetch failed ({}), trying web scrape...", api_err);
-                fetch_via_scrape(&client, &shader_id).await
-                    .with_context(|| format!(
-                        "Both API and scrape failed for shader {}. API error: {}",
-                        shader_id, api_err
-                    ))?
+                fetch_via_scrape(&client, &shader_id)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "Both API and scrape failed for shader {}. API error: {}",
+                            shader_id, api_err
+                        )
+                    })?
             }
         }
     } else {
         log::info!("No Shadertoy API key set. Trying web scrape...");
-        fetch_via_scrape(&client, &shader_id).await
-            .with_context(|| format!(
+        fetch_via_scrape(&client, &shader_id)
+            .await
+            .with_context(|| {
+                format!(
                 "Web scrape failed for shader {}. Set SHADERTOY_API_KEY env var for API access.",
                 shader_id
-            ))?
+            )
+            })?
     };
 
     // Sanitize name for filename
     let safe_name: String = shader_name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let safe_name = if safe_name.is_empty() {
         shader_id.clone()
@@ -299,7 +305,8 @@ fn extract_shader_from_html(html: &str, shader_id: &str) -> Result<String> {
         let pass_block = caps.get(1).unwrap().as_str();
 
         // Extract the code field
-        let code_re = regex::Regex::new(r#""code"\s*:\s*"((?:[^"\\]|\\.)*)""#).expect("valid regex");
+        let code_re =
+            regex::Regex::new(r#""code"\s*:\s*"((?:[^"\\]|\\.)*)""#).expect("valid regex");
         if let Some(code_caps) = code_re.captures(pass_block) {
             let raw_code = code_caps.get(1).unwrap().as_str();
             // Unescape JSON string escapes
@@ -317,8 +324,9 @@ fn extract_shader_from_html(html: &str, shader_id: &str) -> Result<String> {
     // Fallback: try finding the shader code in a different pattern
     // Some pages use: value="{shader code}" or similar
     let alt_re = regex::Regex::new(
-        r#"(?s)\{[^}]*?"code"\s*:\s*"((?:[^"\\]|\\.)*)"[^}]*?"type"\s*:\s*"image""#
-    ).expect("valid regex");
+        r#"(?s)\{[^}]*?"code"\s*:\s*"((?:[^"\\]|\\.)*)"[^}]*?"type"\s*:\s*"image""#,
+    )
+    .expect("valid regex");
 
     if let Some(caps) = alt_re.captures(html) {
         let raw_code = caps.get(1).unwrap().as_str();

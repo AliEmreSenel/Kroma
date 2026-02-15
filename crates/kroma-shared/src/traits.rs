@@ -26,10 +26,7 @@ pub trait SurfaceProvider {
     ///
     /// Returns an opaque handle that can be used with `wgpu` to create a
     /// rendering surface.
-    fn create_surface(
-        &self,
-        monitor: MonitorId,
-    ) -> Result<raw_window_handle::RawWindowHandle>;
+    fn create_surface(&self, monitor: MonitorId) -> Result<raw_window_handle::RawWindowHandle>;
 
     /// Return the current monitor layout.
     fn list_monitors(&self) -> Result<Vec<MonitorConfig>>;

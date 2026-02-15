@@ -195,8 +195,64 @@ pub enum NodeKind {
     ValueNoise,
     Voronoi,
 
+    // --- Mixed-type constructors ---
+    Combine4FromVec3Float,       // vec4(vec3, float)
+    Combine4FromVec2Vec2,        // vec4(vec2, vec2)
+    Combine4FromVec2FloatFloat,  // vec4(vec2, float, float)
+    Combine3FromVec2Float,       // vec3(vec2, float)
+
+    // --- Vec2 math ---
+    AddVec2,
+    SubtractVec2,
+    MultiplyVec2,
+    MultiplyVec2Scalar,
+    DivideVec2,
+    DivideVec2Scalar,
+
+    // --- Vec3 math ---
+    AddVec3,
+    SubtractVec3,
+    MultiplyVec3,
+    MultiplyVec3Scalar,
+    DivideVec3,
+    DivideVec3Scalar,
+
+    // --- Vec4 math ---
+    AddVec4,
+    SubtractVec4,
+    MultiplyVec4,
+    MultiplyVec4Scalar,
+    DivideVec4,
+    DivideVec4Scalar,
+
     // --- Custom GLSL ---
     GlslExpr,
+
+    // --- Comparison ---
+    LessThan,
+    GreaterThan,
+    LessEqual,
+    GreaterEqual,
+    Equal,
+    NotEqual,
+
+    // --- Logical ---
+    LogicalAnd,
+    LogicalOr,
+    LogicalNot,
+
+    // --- Bitwise ---
+    BitAnd,
+    BitOr,
+    BitXor,
+    BitNot,
+    LeftShift,
+    RightShift,
+
+    // --- Matrix constructors ---
+    Mat2,
+    Mat3,
+    Mat4,
 
     // --- Control flow ---
     ForLoop,
@@ -280,10 +336,58 @@ impl NodeKind {
             Self::ValueNoise => "Value Noise",
             Self::Voronoi => "Voronoi",
             Self::GlslExpr => "GLSL Expression",
+            Self::LessThan => "Less Than",
+            Self::GreaterThan => "Greater Than",
+            Self::LessEqual => "Less/Equal",
+            Self::GreaterEqual => "Greater/Equal",
+            Self::Equal => "Equal",
+            Self::NotEqual => "Not Equal",
+            Self::LogicalAnd => "AND",
+            Self::LogicalOr => "OR",
+            Self::LogicalNot => "NOT",
+            Self::BitAnd => "Bit AND",
+            Self::BitOr => "Bit OR",
+            Self::BitXor => "Bit XOR",
+            Self::BitNot => "Bit NOT",
+            Self::LeftShift => "Left Shift",
+            Self::RightShift => "Right Shift",
+            Self::Mat2 => "Mat2",
+            Self::Mat3 => "Mat3",
+            Self::Mat4 => "Mat4",
             Self::ForLoop => "For Loop",
             Self::Conditional => "Conditional",
             Self::TextureSample => "Texture Sample",
             Self::CustomFunc => "Custom Function",
+
+            // Mixed-type constructors
+            Self::Combine4FromVec3Float => "Combine Vec4 (Vec3+F)",
+            Self::Combine4FromVec2Vec2 => "Combine Vec4 (Vec2+Vec2)",
+            Self::Combine4FromVec2FloatFloat => "Combine Vec4 (Vec2+F+F)",
+            Self::Combine3FromVec2Float => "Combine Vec3 (Vec2+F)",
+
+            // Vec2 math
+            Self::AddVec2 => "Add Vec2",
+            Self::SubtractVec2 => "Subtract Vec2",
+            Self::MultiplyVec2 => "Multiply Vec2",
+            Self::MultiplyVec2Scalar => "Multiply Vec2×Scalar",
+            Self::DivideVec2 => "Divide Vec2",
+            Self::DivideVec2Scalar => "Divide Vec2÷Scalar",
+
+            // Vec3 math
+            Self::AddVec3 => "Add Vec3",
+            Self::SubtractVec3 => "Subtract Vec3",
+            Self::MultiplyVec3 => "Multiply Vec3",
+            Self::MultiplyVec3Scalar => "Multiply Vec3×Scalar",
+            Self::DivideVec3 => "Divide Vec3",
+            Self::DivideVec3Scalar => "Divide Vec3÷Scalar",
+
+            // Vec4 math
+            Self::AddVec4 => "Add Vec4",
+            Self::SubtractVec4 => "Subtract Vec4",
+            Self::MultiplyVec4 => "Multiply Vec4",
+            Self::MultiplyVec4Scalar => "Multiply Vec4×Scalar",
+            Self::DivideVec4 => "Divide Vec4",
+            Self::DivideVec4Scalar => "Divide Vec4÷Scalar",
         }
     }
 
@@ -292,22 +396,108 @@ impl NodeKind {
         match self {
             Self::Output => "Output",
             Self::FloatConst | Self::Vec2Const | Self::Vec3Const | Self::ColorConst => "Constants",
-            Self::Time | Self::DeltaTime | Self::Frame | Self::Resolution | Self::Mouse | Self::UV => "Input",
+            Self::Time
+            | Self::DeltaTime
+            | Self::Frame
+            | Self::Resolution
+            | Self::Mouse
+            | Self::UV => "Input",
             Self::CpuUsage | Self::RamUsage | Self::Battery | Self::AudioLevel => "System",
-            Self::Add | Self::Subtract | Self::Multiply | Self::Divide | Self::Power | Self::Sqrt
-            | Self::Abs | Self::Negate | Self::Sin | Self::Cos | Self::Tan
-            | Self::Asin | Self::Acos | Self::Atan | Self::Atan2
-            | Self::Exp | Self::Exp2 | Self::Log | Self::Log2
-            | Self::Sign | Self::Ceil | Self::Round
-            | Self::Fract | Self::Floor
-            | Self::Mod | Self::Clamp | Self::Mix | Self::Step | Self::SmoothStep | Self::Min
-            | Self::Max | Self::Saturate | Self::OneMinus | Self::InverseSqrt => "Math",
-            Self::Combine2 | Self::Combine3 | Self::Combine4 | Self::SplitVec2
-            | Self::SplitVec3 | Self::SplitVec4 | Self::Length | Self::Normalize | Self::Dot
-            | Self::Cross | Self::Distance | Self::Reflect | Self::Refract => "Vector",
+            Self::Add
+            | Self::Subtract
+            | Self::Multiply
+            | Self::Divide
+            | Self::Power
+            | Self::Sqrt
+            | Self::Abs
+            | Self::Negate
+            | Self::Sin
+            | Self::Cos
+            | Self::Tan
+            | Self::Asin
+            | Self::Acos
+            | Self::Atan
+            | Self::Atan2
+            | Self::Exp
+            | Self::Exp2
+            | Self::Log
+            | Self::Log2
+            | Self::Sign
+            | Self::Ceil
+            | Self::Round
+            | Self::Fract
+            | Self::Floor
+            | Self::Mod
+            | Self::Clamp
+            | Self::Mix
+            | Self::Step
+            | Self::SmoothStep
+            | Self::Min
+            | Self::Max
+            | Self::Saturate
+            | Self::OneMinus
+            | Self::InverseSqrt
+            // Vec2 math
+            | Self::AddVec2
+            | Self::SubtractVec2
+            | Self::MultiplyVec2
+            | Self::MultiplyVec2Scalar
+            | Self::DivideVec2
+            | Self::DivideVec2Scalar
+            // Vec3 math
+            | Self::AddVec3
+            | Self::SubtractVec3
+            | Self::MultiplyVec3
+            | Self::MultiplyVec3Scalar
+            | Self::DivideVec3
+            | Self::DivideVec3Scalar
+            // Vec4 math
+            | Self::AddVec4
+            | Self::SubtractVec4
+            | Self::MultiplyVec4
+            | Self::MultiplyVec4Scalar
+            | Self::DivideVec4
+            | Self::DivideVec4Scalar => "Math",
+            Self::Combine2
+            | Self::Combine3
+            | Self::Combine4
+            | Self::SplitVec2
+            | Self::SplitVec3
+            | Self::SplitVec4
+            | Self::Length
+            | Self::Normalize
+            | Self::Dot
+            | Self::Cross
+            | Self::Distance
+            | Self::Reflect
+            | Self::Refract
+            | Self::Combine4FromVec3Float
+            | Self::Combine4FromVec2Vec2
+            | Self::Combine4FromVec2FloatFloat
+            | Self::Combine3FromVec2Float => "Vector",
             Self::RgbToHsv | Self::HsvToRgb => "Color",
             Self::ValueNoise | Self::Voronoi => "Procedural",
-            Self::GlslExpr | Self::ForLoop | Self::Conditional | Self::TextureSample | Self::CustomFunc => "Custom",
+            Self::LessThan
+            | Self::GreaterThan
+            | Self::LessEqual
+            | Self::GreaterEqual
+            | Self::Equal
+            | Self::NotEqual
+            | Self::LogicalAnd
+            | Self::LogicalOr
+            | Self::LogicalNot
+            | Self::BitAnd
+            | Self::BitOr
+            | Self::BitXor
+            | Self::BitNot
+            | Self::LeftShift
+            | Self::RightShift => "Logic",
+            Self::Mat2 | Self::Mat3 | Self::Mat4 => "Matrix",
+            Self::GlslExpr
+            | Self::ForLoop
+            | Self::Conditional
+            | Self::TextureSample
+            | Self::CustomFunc => "Custom",
         }
     }
 
@@ -324,7 +514,13 @@ impl NodeKind {
     }
 
     /// Generate the GLSL expression for this node.
-    pub fn codegen(&self, inputs: &[String], var_name: &str, defaults: &[DefaultValue], meta: &Option<String>) -> String {
+    pub fn codegen(
+        &self,
+        inputs: &[String],
+        var_name: &str,
+        defaults: &[DefaultValue],
+        meta: &Option<String>,
+    ) -> String {
         crate::nodes::codegen(self, inputs, var_name, defaults, meta)
     }
 }
@@ -350,12 +546,23 @@ pub struct Node {
     /// - `CustomFunc`: the function name (e.g. `"myHelper"`)
     /// - Other node kinds: `None`
     pub meta: Option<String>,
+    /// Optional variable name from GLSL source. Used during codegen to
+    /// preserve original names in the glsl→nodes→glsl roundtrip.
+    pub label: Option<String>,
 }
 
 impl Node {
     pub fn new(id: NodeId, kind: NodeKind, position: [f32; 2]) -> Self {
         let defaults = kind.default_values();
-        Self { id, kind, position, defaults, selected: false, meta: None }
+        Self {
+            id,
+            kind,
+            position,
+            defaults,
+            selected: false,
+            meta: None,
+            label: None,
+        }
     }
 
     pub fn inputs(&self) -> &[PortDef] {
@@ -386,46 +593,158 @@ pub struct Connection {
 /// Ordered list of all node kinds, grouped by category.
 pub fn palette() -> Vec<(&'static str, Vec<NodeKind>)> {
     vec![
-        ("Input", vec![
-            NodeKind::UV, NodeKind::Time, NodeKind::DeltaTime,
-            NodeKind::Frame, NodeKind::Resolution, NodeKind::Mouse,
-        ]),
-        ("System", vec![
-            NodeKind::CpuUsage, NodeKind::RamUsage, NodeKind::Battery,
-            NodeKind::AudioLevel,
-        ]),
-        ("Constants", vec![
-            NodeKind::FloatConst, NodeKind::Vec2Const, NodeKind::Vec3Const,
-            NodeKind::ColorConst,
-        ]),
-        ("Math", vec![
-            NodeKind::Add, NodeKind::Subtract, NodeKind::Multiply, NodeKind::Divide,
-            NodeKind::Mod, NodeKind::Power, NodeKind::Sqrt, NodeKind::InverseSqrt,
-            NodeKind::Abs, NodeKind::Negate, NodeKind::Sign,
-            NodeKind::Sin, NodeKind::Cos, NodeKind::Tan,
-            NodeKind::Asin, NodeKind::Acos, NodeKind::Atan, NodeKind::Atan2,
-            NodeKind::Exp, NodeKind::Exp2, NodeKind::Log, NodeKind::Log2,
-            NodeKind::Fract, NodeKind::Floor, NodeKind::Ceil, NodeKind::Round,
-            NodeKind::Clamp, NodeKind::Mix, NodeKind::Step,
-            NodeKind::SmoothStep, NodeKind::Min, NodeKind::Max,
-            NodeKind::Saturate, NodeKind::OneMinus,
-        ]),
-        ("Vector", vec![
-            NodeKind::Combine2, NodeKind::Combine3, NodeKind::Combine4,
-            NodeKind::SplitVec2, NodeKind::SplitVec3, NodeKind::SplitVec4,
-            NodeKind::Length, NodeKind::Distance, NodeKind::Normalize,
-            NodeKind::Dot, NodeKind::Cross, NodeKind::Reflect, NodeKind::Refract,
-        ]),
-        ("Color", vec![
-            NodeKind::RgbToHsv, NodeKind::HsvToRgb,
-        ]),
-        ("Procedural", vec![
-            NodeKind::ValueNoise, NodeKind::Voronoi,
-        ]),
-        ("Custom", vec![
-            NodeKind::GlslExpr, NodeKind::ForLoop, NodeKind::Conditional,
-            NodeKind::TextureSample, NodeKind::CustomFunc,
-        ]),
+        (
+            "Input",
+            vec![
+                NodeKind::UV,
+                NodeKind::Time,
+                NodeKind::DeltaTime,
+                NodeKind::Frame,
+                NodeKind::Resolution,
+                NodeKind::Mouse,
+            ],
+        ),
+        (
+            "System",
+            vec![
+                NodeKind::CpuUsage,
+                NodeKind::RamUsage,
+                NodeKind::Battery,
+                NodeKind::AudioLevel,
+            ],
+        ),
+        (
+            "Constants",
+            vec![
+                NodeKind::FloatConst,
+                NodeKind::Vec2Const,
+                NodeKind::Vec3Const,
+                NodeKind::ColorConst,
+            ],
+        ),
+        (
+            "Math",
+            vec![
+                NodeKind::Add,
+                NodeKind::Subtract,
+                NodeKind::Multiply,
+                NodeKind::Divide,
+                NodeKind::Mod,
+                NodeKind::Power,
+                NodeKind::Sqrt,
+                NodeKind::InverseSqrt,
+                NodeKind::Abs,
+                NodeKind::Negate,
+                NodeKind::Sign,
+                NodeKind::Sin,
+                NodeKind::Cos,
+                NodeKind::Tan,
+                NodeKind::Asin,
+                NodeKind::Acos,
+                NodeKind::Atan,
+                NodeKind::Atan2,
+                NodeKind::Exp,
+                NodeKind::Exp2,
+                NodeKind::Log,
+                NodeKind::Log2,
+                NodeKind::Fract,
+                NodeKind::Floor,
+                NodeKind::Ceil,
+                NodeKind::Round,
+                NodeKind::Clamp,
+                NodeKind::Mix,
+                NodeKind::Step,
+                NodeKind::SmoothStep,
+                NodeKind::Min,
+                NodeKind::Max,
+                NodeKind::Saturate,
+                NodeKind::OneMinus,
+                // Vec2 math
+                NodeKind::AddVec2,
+                NodeKind::SubtractVec2,
+                NodeKind::MultiplyVec2,
+                NodeKind::MultiplyVec2Scalar,
+                NodeKind::DivideVec2,
+                NodeKind::DivideVec2Scalar,
+                // Vec3 math
+                NodeKind::AddVec3,
+                NodeKind::SubtractVec3,
+                NodeKind::MultiplyVec3,
+                NodeKind::MultiplyVec3Scalar,
+                NodeKind::DivideVec3,
+                NodeKind::DivideVec3Scalar,
+                // Vec4 math
+                NodeKind::AddVec4,
+                NodeKind::SubtractVec4,
+                NodeKind::MultiplyVec4,
+                NodeKind::MultiplyVec4Scalar,
+                NodeKind::DivideVec4,
+                NodeKind::DivideVec4Scalar,
+            ],
+        ),
+        (
+            "Vector",
+            vec![
+                NodeKind::Combine2,
+                NodeKind::Combine3,
+                NodeKind::Combine4,
+                NodeKind::SplitVec2,
+                NodeKind::SplitVec3,
+                NodeKind::SplitVec4,
+                NodeKind::Length,
+                NodeKind::Distance,
+                NodeKind::Normalize,
+                NodeKind::Dot,
+                NodeKind::Cross,
+                NodeKind::Reflect,
+                NodeKind::Refract,
+                // Mixed-type constructors
+                NodeKind::Combine4FromVec3Float,
+                NodeKind::Combine4FromVec2Vec2,
+                NodeKind::Combine4FromVec2FloatFloat,
+                NodeKind::Combine3FromVec2Float,
+            ],
+        ),
+        ("Color", vec![NodeKind::RgbToHsv, NodeKind::HsvToRgb]),
+        ("Procedural", vec![NodeKind::ValueNoise, NodeKind::Voronoi]),
+        (
+            "Logic",
+            vec![
+                NodeKind::LessThan,
+                NodeKind::GreaterThan,
+                NodeKind::LessEqual,
+                NodeKind::GreaterEqual,
+                NodeKind::Equal,
+                NodeKind::NotEqual,
+                NodeKind::LogicalAnd,
+                NodeKind::LogicalOr,
+                NodeKind::LogicalNot,
+                NodeKind::BitAnd,
+                NodeKind::BitOr,
+                NodeKind::BitXor,
+                NodeKind::BitNot,
+                NodeKind::LeftShift,
+                NodeKind::RightShift,
+            ],
+        ),
+        (
+            "Matrix",
+            vec![
+                NodeKind::Mat2,
+                NodeKind::Mat3,
+                NodeKind::Mat4,
+            ],
+        ),
+        (
+            "Custom",
+            vec![
+                NodeKind::GlslExpr,
+                NodeKind::ForLoop,
+                NodeKind::Conditional,
+                NodeKind::TextureSample,
+                NodeKind::CustomFunc,
+            ],
+        ),
     ]
 }
 

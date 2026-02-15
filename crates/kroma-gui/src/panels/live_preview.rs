@@ -6,9 +6,10 @@
 use iced::widget::{column, container, row, text, Image};
 use iced::{Element, Fill};
 
-use crate::Message;
+use crate::icons;
 use crate::panels::dashboard::{btn_primary, btn_secondary, card, info_row};
 use crate::panels::{AppContext, Panel};
+use crate::Message;
 
 pub struct LivePreviewPanel;
 
@@ -20,16 +21,23 @@ impl LivePreviewPanel {
 
 impl Panel for LivePreviewPanel {
     fn view<'a>(&'a self, ctx: AppContext<'a>) -> Element<'a, Message> {
-        let status_text = if ctx.daemon_connected {
-            "\u{2705} Connected"
+        let t = ctx.tokens;
+        let (status_icon, status_label) = if ctx.daemon_connected {
+            (icons::CHECK, "Connected")
         } else {
-            "\u{274C} Offline"
+            (icons::CLOSE, "Offline")
         };
+        let status_color = if ctx.daemon_connected { t.success } else { t.error };
 
         let status_card = card(
             "Daemon",
             column![
-                text(status_text).size(11),
+                row![
+                    text(status_icon).font(icons::ICON_FONT).size(11).color(status_color),
+                    text(status_label).size(11).color(status_color),
+                ]
+                .spacing(4)
+                .align_y(iced::Alignment::Center),
                 info_row("FPS", &format!("{:.1}", ctx.fps)),
                 info_row("Status", ctx.status_text),
                 if let Some(loaded) = ctx.loaded_shade {
@@ -39,22 +47,33 @@ impl Panel for LivePreviewPanel {
                 },
             ]
             .spacing(2),
+            t,
         );
 
-        let live_label = if ctx.editor_live_preview { "Live ON" } else { "Live OFF" };
-        let stream_label = if ctx.preview_streaming { "Stop Stream" } else { "Start Stream" };
+        let live_label = if ctx.editor_live_preview {
+            "Live ON"
+        } else {
+            "Live OFF"
+        };
+        let stream_label = if ctx.preview_streaming {
+            "Stop Stream"
+        } else {
+            "Start Stream"
+        };
         let controls = card(
             "Controls",
             column![
-                btn_primary("Send to Daemon", Message::EditorLivePreview),
-                btn_secondary(live_label, Message::EditorToggleLive),
-                btn_primary("Compile", Message::EditorCompile),
-                btn_secondary(stream_label, Message::TogglePreviewStream),
+                btn_primary("Send to Daemon", Message::EditorLivePreview, t),
+                btn_secondary(live_label, Message::EditorToggleLive, t),
+                btn_primary("Compile", Message::EditorCompile, t),
+                btn_secondary(stream_label, Message::TogglePreviewStream, t),
             ]
             .spacing(4),
+            t,
         );
 
         // Build the preview area — show frame if available, else placeholder
+        let preview_border = t.border_default;
         let preview_area: Element<'a, Message> = if let Some(frame_data) = ctx.preview_frame {
             let handle = iced::widget::image::Handle::from_rgba(
                 frame_data.width,
@@ -69,7 +88,12 @@ impl Panel for LivePreviewPanel {
                         .content_fit(iced::ContentFit::Contain),
                     row![
                         text(format!("{}x{}", frame_data.width, frame_data.height)).size(9),
-                        text(if ctx.preview_streaming { " \u{25CF} Streaming" } else { " \u{25CB} Paused" }).size(9),
+                        text(if ctx.preview_streaming {
+                            " (*) Streaming"
+                        } else {
+                            " ( ) Paused"
+                        })
+                        .size(9),
                     ]
                     .spacing(8),
                 ]
@@ -78,19 +102,17 @@ impl Panel for LivePreviewPanel {
             .width(Fill)
             .height(Fill)
             .padding(4)
-            .style(|theme: &iced::Theme| {
-                let p = theme.extended_palette();
-                container::Style {
-                    background: Some(iced::Color::BLACK.into()),
-                    border: iced::Border::default()
-                        .rounded(6)
-                        .width(1)
-                        .color(iced::Color { a: 0.12, ..p.background.base.text }),
-                    ..Default::default()
-                }
+            .style(move |_theme: &iced::Theme| container::Style {
+                background: Some(iced::Color::BLACK.into()),
+                border: iced::Border::default()
+                    .rounded(6)
+                    .width(1)
+                    .color(preview_border),
+                ..Default::default()
             })
             .into()
         } else {
+            let no_preview_bg = t.bg_tertiary;
             container(
                 column![
                     text("No Preview").size(14),
@@ -98,7 +120,8 @@ impl Panel for LivePreviewPanel {
                         "Click 'Start Stream' to begin"
                     } else {
                         "Daemon not connected"
-                    }).size(10),
+                    })
+                    .size(10),
                 ]
                 .spacing(4),
             )
@@ -107,16 +130,13 @@ impl Panel for LivePreviewPanel {
             .padding(12)
             .center_x(Fill)
             .center_y(Fill)
-            .style(|theme: &iced::Theme| {
-                let p = theme.extended_palette();
-                container::Style {
-                    background: Some(p.background.strong.color.into()),
-                    border: iced::Border::default()
-                        .rounded(6)
-                        .width(1)
-                        .color(iced::Color { a: 0.12, ..p.background.base.text }),
-                    ..Default::default()
-                }
+            .style(move |_theme: &iced::Theme| container::Style {
+                background: Some(no_preview_bg.into()),
+                border: iced::Border::default()
+                    .rounded(6)
+                    .width(1)
+                    .color(preview_border),
+                ..Default::default()
             })
             .into()
         };

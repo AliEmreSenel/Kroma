@@ -17,30 +17,113 @@ impl KromaApp {
     ) {
         use editor::canvas::GraphMessage;
 
-        // Helper macro to access the correct graph/canvas/flags for the target.
+        // Helper macro to access the correct graph/canvas/flags for the target,
+        // resolving into sub-graphs when navigated via nav_path.
         macro_rules! graph {
             () => {
                 match target {
-                    commands::GraphTarget::Editor => &self.shader_graph,
-                    commands::GraphTarget::Shade => &self.shade_graph,
+                    commands::GraphTarget::Editor => {
+                        if let Some(id) = self.editor_nav_path.last().copied() {
+                            if let Some((g, _)) = self.editor_subgraphs.get(&id) {
+                                g
+                            } else {
+                                &self.shader_graph
+                            }
+                        } else {
+                            &self.shader_graph
+                        }
+                    }
+                    commands::GraphTarget::Shade => {
+                        if let Some(id) = self.shade_nav_path.last().copied() {
+                            if let Some((g, _)) = self.shade_subgraphs.get(&id) {
+                                g
+                            } else {
+                                &self.shade_graph
+                            }
+                        } else {
+                            &self.shade_graph
+                        }
+                    }
                 }
             };
         }
         macro_rules! graph_mut {
             () => {
                 match target {
-                    commands::GraphTarget::Editor => &mut self.shader_graph,
-                    commands::GraphTarget::Shade => &mut self.shade_graph,
+                    commands::GraphTarget::Editor => {
+                        if let Some(id) = self.editor_nav_path.last().copied() {
+                            if let Some((g, _)) = self.editor_subgraphs.get_mut(&id) {
+                                g
+                            } else {
+                                &mut self.shader_graph
+                            }
+                        } else {
+                            &mut self.shader_graph
+                        }
+                    }
+                    commands::GraphTarget::Shade => {
+                        if let Some(id) = self.shade_nav_path.last().copied() {
+                            if let Some((g, _)) = self.shade_subgraphs.get_mut(&id) {
+                                g
+                            } else {
+                                &mut self.shade_graph
+                            }
+                        } else {
+                            &mut self.shade_graph
+                        }
+                    }
                 }
             };
         }
         macro_rules! canvas_mut {
             () => {
                 match target {
-                    commands::GraphTarget::Editor => &mut self.graph_canvas,
-                    commands::GraphTarget::Shade => &mut self.shade_graph_canvas,
+                    commands::GraphTarget::Editor => {
+                        if let Some(id) = self.editor_nav_path.last().copied() {
+                            if let Some((_, c)) = self.editor_subgraphs.get_mut(&id) {
+                                c
+                            } else {
+                                &mut self.graph_canvas
+                            }
+                        } else {
+                            &mut self.graph_canvas
+                        }
+                    }
+                    commands::GraphTarget::Shade => {
+                        if let Some(id) = self.shade_nav_path.last().copied() {
+                            if let Some((_, c)) = self.shade_subgraphs.get_mut(&id) {
+                                c
+                            } else {
+                                &mut self.shade_graph_canvas
+                            }
+                        } else {
+                            &mut self.shade_graph_canvas
+                        }
+                    }
                 }
             };
+        }
+        // Helper macro to execute a command on the active (possibly sub-) graph.
+        macro_rules! exec_cmd {
+            ($cmd:expr) => {{
+                let enl = self.editor_nav_path.last().copied();
+                let snl = self.shade_nav_path.last().copied();
+                let eg = match enl {
+                    Some(id) => match self.editor_subgraphs.get_mut(&id) {
+                        Some((g, _)) => g,
+                        None => &mut self.shader_graph,
+                    },
+                    None => &mut self.shader_graph,
+                };
+                let sg = match snl {
+                    Some(id) => match self.shade_subgraphs.get_mut(&id) {
+                        Some((g, _)) => g,
+                        None => &mut self.shade_graph,
+                    },
+                    None => &mut self.shade_graph,
+                };
+                let _ = self.command_history.execute($cmd, eg, sg);
+            }};
         }
         macro_rules! mark_dirty {
             () => {
@@ -77,30 +160,21 @@ impl KromaApp {
                     id,
                     old_pos,
                     new_pos,
-                    other_moves.iter().map(|&(nid, old, new)| (nid, old, new)).collect(),
+                    other_moves
+                        .iter()
+                        .map(|&(nid, old, new)| (nid, old, new))
+                        .collect(),
                 );
-                let _ = self.command_history.execute(
-                    Box::new(cmd),
-                    &mut self.shader_graph,
-                    &mut self.shade_graph,
-                );
+                exec_cmd!(Box::new(cmd));
             }
             GraphMessage::ConnectionCreated(from, to) => {
                 let cmd = commands::ConnectCmd::new(target, from, to);
-                let _ = self.command_history.execute(
-                    Box::new(cmd),
-                    &mut self.shader_graph,
-                    &mut self.shade_graph,
-                );
+                exec_cmd!(Box::new(cmd));
                 mark_dirty!();
             }
             GraphMessage::ConnectionDeleted(id) => {
                 let cmd = commands::DisconnectCmd::new(target, id);
-                let _ = self.command_history.execute(
-                    Box::new(cmd),
-                    &mut self.shader_graph,
-                    &mut self.shade_graph,
-                );
+                exec_cmd!(Box::new(cmd));
                 mark_dirty!();
             }
             GraphMessage::NodeSelected(id, shift) => {
@@ -109,8 +183,7 @@ impl KromaApp {
                         n.selected = !n.selected;
                     }
                 } else {
-                    let already_selected =
-                        graph!().node(id).map(|n| n.selected).unwrap_or(false);
+                    let already_selected = graph!().node(id).map(|n| n.selected).unwrap_or(false);
                     if !already_selected {
                         let ids: Vec<_> = graph!().nodes().map(|n| n.id).collect();
                         for nid in ids {
@@ -136,11 +209,7 @@ impl KromaApp {
                     .collect();
                 if !to_delete.is_empty() {
                     let cmd = commands::RemoveNodesCmd::new(target, to_delete);
-                    let _ = self.command_history.execute(
-                        Box::new(cmd),
-                        &mut self.shader_graph,
-                        &mut self.shade_graph,
-                    );
+                    exec_cmd!(Box::new(cmd));
                     mark_dirty!();
                 }
             }
@@ -163,14 +232,9 @@ impl KromaApp {
                     .node(node_id)
                     .and_then(|n| n.defaults.get(port_idx).cloned())
                     .unwrap_or(new_val.clone());
-                let cmd = commands::ChangeDefaultCmd::new(
-                    target, node_id, port_idx, old_val, new_val,
-                );
-                let _ = self.command_history.execute(
-                    Box::new(cmd),
-                    &mut self.shader_graph,
-                    &mut self.shade_graph,
-                );
+                let cmd =
+                    commands::ChangeDefaultCmd::new(target, node_id, port_idx, old_val, new_val);
+                exec_cmd!(Box::new(cmd));
                 mark_dirty!();
             }
             GraphMessage::CopySelected => {
@@ -180,11 +244,15 @@ impl KromaApp {
                     .collect();
                 if !selected.is_empty() {
                     let id_to_idx: std::collections::HashMap<kroma_graph::types::NodeId, usize> =
-                        selected.iter().enumerate().map(|(i, n)| (n.id, i)).collect();
-                    let cx = selected.iter().map(|n| n.position[0]).sum::<f32>()
-                        / selected.len() as f32;
-                    let cy = selected.iter().map(|n| n.position[1]).sum::<f32>()
-                        / selected.len() as f32;
+                        selected
+                            .iter()
+                            .enumerate()
+                            .map(|(i, n)| (n.id, i))
+                            .collect();
+                    let cx =
+                        selected.iter().map(|n| n.position[0]).sum::<f32>() / selected.len() as f32;
+                    let cy =
+                        selected.iter().map(|n| n.position[1]).sum::<f32>() / selected.len() as f32;
                     let nodes: Vec<_> = selected
                         .iter()
                         .map(|n| {
@@ -246,24 +314,70 @@ impl KromaApp {
                 }
             }
             GraphMessage::PlacePendingNode(pos) => {
-                if canvas_mut!().pending_node.is_some() {
-                    let kind = canvas_mut!().pending_node.take().unwrap();
+                if let Some(kind) = canvas_mut!().pending_node.take() {
                     let cmd = commands::AddNodeCmd::new(target, kind, pos);
-                    let _ = self.command_history.execute(
-                        Box::new(cmd),
-                        &mut self.shader_graph,
-                        &mut self.shade_graph,
-                    );
+                    exec_cmd!(Box::new(cmd));
                     mark_dirty!();
                 }
+            }
+            GraphMessage::AddNodeAtCenter(kind) => {
+                let canvas = canvas_mut!();
+                let zoom = canvas.zoom;
+                let offset = canvas.offset;
+                // Compute the center of the visible viewport in world coordinates.
+                // Viewport center in screen space is roughly (400, 300); convert to world.
+                let center_x = (-offset.x + 400.0) / zoom;
+                let center_y = (-offset.y + 300.0) / zoom;
+                let pos = [center_x, center_y];
+                let cmd = commands::AddNodeCmd::new(target, kind, pos);
+                exec_cmd!(Box::new(cmd));
+                mark_dirty!();
+            }
+            GraphMessage::SetPendingNode(kind) => {
+                canvas_mut!().pending_node = Some(kind);
+            }
+            GraphMessage::CancelPending => {
+                canvas_mut!().pending_node = None;
             }
             GraphMessage::GroupSelected => {
                 let (graph, frames) = match target {
                     commands::GraphTarget::Editor => {
-                        (&self.shader_graph, &mut self.graph_canvas.comment_frames)
+                        let enl = self.editor_nav_path.last().copied();
+                        match enl {
+                            Some(id) => match self.editor_subgraphs.get_mut(&id) {
+                                Some((g, c)) => (
+                                    g as &editor::ShaderGraph,
+                                    &mut c.comment_frames,
+                                ),
+                                None => (
+                                    &self.shader_graph as &editor::ShaderGraph,
+                                    &mut self.graph_canvas.comment_frames,
+                                ),
+                            },
+                            None => (
+                                &self.shader_graph as &editor::ShaderGraph,
+                                &mut self.graph_canvas.comment_frames,
+                            ),
+                        }
                     }
                     commands::GraphTarget::Shade => {
-                        (&self.shade_graph, &mut self.shade_graph_canvas.comment_frames)
+                        let snl = self.shade_nav_path.last().copied();
+                        match snl {
+                            Some(id) => match self.shade_subgraphs.get_mut(&id) {
+                                Some((g, c)) => (
+                                    g as &editor::ShaderGraph,
+                                    &mut c.comment_frames,
+                                ),
+                                None => (
+                                    &self.shade_graph as &editor::ShaderGraph,
+                                    &mut self.shade_graph_canvas.comment_frames,
+                                ),
+                            },
+                            None => (
+                                &self.shade_graph as &editor::ShaderGraph,
+                                &mut self.shade_graph_canvas.comment_frames,
+                            ),
+                        }
                     }
                 };
                 Self::create_comment_frame(graph, frames);
@@ -278,19 +392,65 @@ impl KromaApp {
                     }
                 };
                 subgraphs.entry(node_id).or_insert_with(|| {
-                    (editor::ShaderGraph::new(), editor::canvas::GraphCanvas::new())
+                    (
+                        editor::ShaderGraph::new(),
+                        editor::canvas::GraphCanvas::new(),
+                    )
                 });
                 nav_path.push(node_id);
             }
-            GraphMessage::ExitSubGraph => {
-                match target {
-                    commands::GraphTarget::Editor => { self.editor_nav_path.pop(); }
-                    commands::GraphTarget::Shade => { self.shade_nav_path.pop(); }
+            GraphMessage::ExitSubGraph => match target {
+                commands::GraphTarget::Editor => {
+                    self.editor_nav_path.pop();
                 }
-            }
+                commands::GraphTarget::Shade => {
+                    self.shade_nav_path.pop();
+                }
+            },
             GraphMessage::ToggleMinimap => {
                 let canvas = canvas_mut!();
                 canvas.show_minimap = !canvas.show_minimap;
+            }
+            GraphMessage::StartEditValue(node_id, port_idx) => {
+                if let Some(node) = graph!().node(node_id) {
+                    if let Some(def) = node.defaults.get(port_idx) {
+                        let text = match def {
+                            editor::DefaultValue::Float(v) => format!("{:.2}", v),
+                            editor::DefaultValue::Vec2(v) => {
+                                format!("{:.2}, {:.2}", v[0], v[1])
+                            }
+                            editor::DefaultValue::Vec3(v) => {
+                                format!("{:.2}, {:.2}, {:.2}", v[0], v[1], v[2])
+                            }
+                            editor::DefaultValue::Vec4(v) => {
+                                format!("{:.2}, {:.2}, {:.2}, {:.2}", v[0], v[1], v[2], v[3])
+                            }
+                        };
+                        canvas_mut!().editing_value = Some((node_id, port_idx, text));
+                    }
+                }
+            }
+            GraphMessage::EditValueChanged(text) => {
+                if let Some((_, _, ref mut current_text)) = canvas_mut!().editing_value {
+                    *current_text = text;
+                }
+            }
+            GraphMessage::CommitEditValue => {
+                if let Some((node_id, port_idx, text)) = canvas_mut!().editing_value.take() {
+                    if let Some(node) = graph!().node(node_id) {
+                        if let Some(old_def) = node.defaults.get(port_idx).cloned() {
+                            let new_def = parse_default_value_text(&text, &old_def);
+                            let cmd = commands::ChangeDefaultCmd::new(
+                                target, node_id, port_idx, old_def, new_def,
+                            );
+                            exec_cmd!(Box::new(cmd));
+                            mark_dirty!();
+                        }
+                    }
+                }
+            }
+            GraphMessage::CancelEditValue => {
+                canvas_mut!().editing_value = None;
             }
         }
     }
@@ -338,7 +498,11 @@ impl KromaApp {
 
         let cpu_pct = sysinfo::read_cpu_usage_fast();
         let (used, total) = sysinfo::read_mem_info();
-        let ram_pct = if total > 0 { (used as f32 / total as f32) * 100.0 } else { 0.0 };
+        let ram_pct = if total > 0 {
+            (used as f32 / total as f32) * 100.0
+        } else {
+            0.0
+        };
         let battery_pct = sysinfo::read_battery_pct();
         let audio_level = 0.0_f32;
         let cursor_x = 0.0_f32;
@@ -362,14 +526,21 @@ impl KromaApp {
             use editor::NodeKind;
             match kind {
                 NodeKind::Time => Some(format!("{:.2}s", ctx.elapsed)),
-                NodeKind::DeltaTime => Some(format!("{:.4}", if ctx.fps > 0.0 { 1.0 / ctx.fps } else { 0.016 })),
+                NodeKind::DeltaTime => Some(format!(
+                    "{:.4}",
+                    if ctx.fps > 0.0 { 1.0 / ctx.fps } else { 0.016 }
+                )),
                 NodeKind::Frame => Some(format!("{}", ctx.frame)),
                 NodeKind::Resolution => Some("1920x1080".into()),
                 NodeKind::Mouse => Some(ctx.cursor.to_string()),
                 NodeKind::UV => Some("0..1".into()),
                 NodeKind::CpuUsage => Some(format!("{:.0}%", ctx.cpu)),
                 NodeKind::RamUsage => Some(format!("{:.0}%", ctx.ram)),
-                NodeKind::Battery => Some(ctx.battery.map(|b| format!("{:.0}%", b)).unwrap_or_else(|| "N/A".into())),
+                NodeKind::Battery => Some(
+                    ctx.battery
+                        .map(|b| format!("{:.0}%", b))
+                        .unwrap_or_else(|| "N/A".into()),
+                ),
                 NodeKind::AudioLevel => Some(ctx.audio.to_string()),
                 NodeKind::FloatConst => Some("0.0".into()),
                 _ => None,
@@ -388,7 +559,9 @@ impl KromaApp {
         };
 
         // Editor graph
-        let vals: Vec<_> = self.shader_graph.nodes()
+        let vals: Vec<_> = self
+            .shader_graph
+            .nodes()
             .filter_map(|n| value_for(&n.kind, &live_ctx).map(|v| (n.id, v)))
             .collect();
         self.graph_canvas.live_values.clear();
@@ -397,7 +570,9 @@ impl KromaApp {
         }
 
         // Shade graph
-        let vals: Vec<_> = self.shade_graph.nodes()
+        let vals: Vec<_> = self
+            .shade_graph
+            .nodes()
             .filter_map(|n| value_for(&n.kind, &live_ctx).map(|v| (n.id, v)))
             .collect();
         self.shade_graph_canvas.live_values.clear();
@@ -433,7 +608,11 @@ impl KromaApp {
     pub(crate) fn handle_compile_result(&mut self, event: kroma_shared::ipc::DaemonEvent) {
         use kroma_shared::ipc::DaemonEvent;
         match event {
-            DaemonEvent::CompileResult { success, errors, warnings } => {
+            DaemonEvent::CompileResult {
+                success,
+                errors,
+                warnings,
+            } => {
                 self.compile_success = Some(success);
 
                 if success {
@@ -444,14 +623,17 @@ impl KromaApp {
                         self.log_msg(format!("Warning: {}", w));
                     }
                 } else {
-                    let msgs: Vec<String> = errors.iter().map(|err| {
-                        let loc = match (err.line, err.column) {
-                            (Some(l), Some(c)) => format!(" (line {}, col {})", l, c),
-                            (Some(l), None) => format!(" (line {})", l),
-                            _ => String::new(),
-                        };
-                        format!("Compile error{}: {}", loc, err.message)
-                    }).collect();
+                    let msgs: Vec<String> = errors
+                        .iter()
+                        .map(|err| {
+                            let loc = match (err.line, err.column) {
+                                (Some(l), Some(c)) => format!(" (line {}, col {})", l, c),
+                                (Some(l), None) => format!(" (line {})", l),
+                                _ => String::new(),
+                            };
+                            format!("Compile error{}: {}", loc, err.message)
+                        })
+                        .collect();
                     self.compile_errors = errors;
                     self.compile_warnings = warnings;
                     for msg in msgs {
@@ -473,5 +655,38 @@ impl KromaApp {
                 self.log_msg(format!("Unexpected daemon response: {:?}", other));
             }
         }
+    }
+}
+
+/// Parse a user-entered string back into a `DefaultValue`, using the old value
+/// as a template to determine whether it should be Float, Vec2, Vec3, or Vec4.
+fn parse_default_value_text(
+    text: &str,
+    template: &editor::DefaultValue,
+) -> editor::DefaultValue {
+    let parts: Vec<f32> = text
+        .split(',')
+        .map(|s| s.trim().parse::<f32>().unwrap_or(0.0))
+        .collect();
+
+    match template {
+        editor::DefaultValue::Float(_) => {
+            editor::DefaultValue::Float(parts.first().copied().unwrap_or(0.0))
+        }
+        editor::DefaultValue::Vec2(_) => editor::DefaultValue::Vec2([
+            parts.first().copied().unwrap_or(0.0),
+            parts.get(1).copied().unwrap_or(0.0),
+        ]),
+        editor::DefaultValue::Vec3(_) => editor::DefaultValue::Vec3([
+            parts.first().copied().unwrap_or(0.0),
+            parts.get(1).copied().unwrap_or(0.0),
+            parts.get(2).copied().unwrap_or(0.0),
+        ]),
+        editor::DefaultValue::Vec4(_) => editor::DefaultValue::Vec4([
+            parts.first().copied().unwrap_or(0.0),
+            parts.get(1).copied().unwrap_or(0.0),
+            parts.get(2).copied().unwrap_or(0.0),
+            parts.get(3).copied().unwrap_or(0.0),
+        ]),
     }
 }

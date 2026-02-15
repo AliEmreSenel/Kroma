@@ -9,6 +9,8 @@ use iced::widget::canvas::{self, Canvas, Event, Frame, Geometry, Path, Stroke, T
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 use std::collections::HashSet;
 
+use crate::theme::ThemeTokens;
+
 use super::{
     ConnectionId, DataType, DefaultValue, Node, NodeId, NodeKind, NodeLayout, PortAddr,
     PortDirection, ShaderGraph,
@@ -47,6 +49,13 @@ pub enum GraphMessage {
     PasteNodes,
     /// User clicked canvas with a pending node from palette — place it at position.
     PlacePendingNode([f32; 2]),
+    /// Add a node at the center of the current viewport (one-click palette add).
+    #[allow(dead_code)]
+    AddNodeAtCenter(NodeKind),
+    /// Set a pending node from palette — will be placed on next canvas click.
+    SetPendingNode(NodeKind),
+    /// Cancel the pending node placement (Escape while pending).
+    CancelPending,
     /// Group selected nodes with a comment frame (Ctrl+G).
     GroupSelected,
     /// User double-clicked a sub-graph node — navigate into it.
@@ -55,6 +64,14 @@ pub enum GraphMessage {
     ExitSubGraph,
     /// Toggle minimap overlay (M key).
     ToggleMinimap,
+    /// User double-clicked an unconnected input port value — start inline editing.
+    StartEditValue(NodeId, usize),
+    /// Text in the inline value editor changed.
+    EditValueChanged(String),
+    /// Confirm the edited value (Enter or click away).
+    CommitEditValue,
+    /// Cancel editing without saving (Escape).
+    CancelEditValue,
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +106,8 @@ pub struct GraphCanvas {
     pub comment_frames: Vec<CommentFrame>,
     /// Whether the minimap overlay is visible.
     pub show_minimap: bool,
+    /// Currently editing a default value inline: (node_id, port_index, current text).
+    pub editing_value: Option<(NodeId, usize, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +146,7 @@ impl GraphCanvas {
             pending_node: None,
             comment_frames: Vec::new(),
             show_minimap: true,
+            editing_value: None,
         }
     }
 }
@@ -147,12 +167,16 @@ const HEADER_HEIGHT: f32 = 28.0;
 const PORT_SPACING: f32 = 24.0;
 const WIRE_THICKNESS: f32 = 2.5;
 
-fn data_type_color(dt: DataType) -> Color {
-    let [r, g, b] = dt.color();
-    Color::from_rgb(r, g, b)
+fn data_type_color(dt: DataType, tokens: &ThemeTokens) -> Color {
+    match dt {
+        DataType::Float => tokens.wire_float,
+        DataType::Vec2 => tokens.wire_vec2,
+        DataType::Vec3 => tokens.wire_vec3,
+        DataType::Vec4 => tokens.wire_vec4,
+    }
 }
 
-fn node_bg_color(kind: &NodeKind) -> Color {
+fn node_bg_color(kind: &NodeKind, tokens: &ThemeTokens) -> Color {
     match kind.category() {
         "Output" => Color::from_rgb(0.35, 0.18, 0.18),
         "Input" | "System" => Color::from_rgb(0.15, 0.22, 0.32),
@@ -161,11 +185,11 @@ fn node_bg_color(kind: &NodeKind) -> Color {
         "Vector" => Color::from_rgb(0.2, 0.18, 0.28),
         "Color" => Color::from_rgb(0.28, 0.18, 0.22),
         "Procedural" => Color::from_rgb(0.18, 0.22, 0.25),
-        _ => Color::from_rgb(0.18, 0.18, 0.18),
+        _ => tokens.node_bg,
     }
 }
 
-fn node_header_color(kind: &NodeKind) -> Color {
+fn node_header_color(kind: &NodeKind, tokens: &ThemeTokens) -> Color {
     match kind.category() {
         "Output" => Color::from_rgb(0.6, 0.2, 0.2),
         "Input" | "System" => Color::from_rgb(0.18, 0.35, 0.55),
@@ -174,7 +198,7 @@ fn node_header_color(kind: &NodeKind) -> Color {
         "Vector" => Color::from_rgb(0.35, 0.22, 0.5),
         "Color" => Color::from_rgb(0.5, 0.2, 0.35),
         "Procedural" => Color::from_rgb(0.2, 0.35, 0.4),
-        _ => Color::from_rgb(0.25, 0.25, 0.25),
+        _ => tokens.node_header,
     }
 }
 
@@ -186,6 +210,7 @@ fn draw_node(
     zoom: f32,
     live_value: Option<&str>,
     connected_inputs: &HashSet<(NodeId, usize)>,
+    tokens: &ThemeTokens,
 ) {
     let x = node.position[0] * zoom + offset.x;
     let y = node.position[1] * zoom + offset.y;
@@ -193,7 +218,11 @@ fn draw_node(
     let h = node.height() * zoom;
 
     // Extra height for live-value row
-    let value_row_h = if live_value.is_some() { 20.0 * zoom } else { 0.0 };
+    let value_row_h = if live_value.is_some() {
+        20.0 * zoom
+    } else {
+        0.0
+    };
     let total_h = h + value_row_h;
 
     let header_h = HEADER_HEIGHT * zoom;
@@ -216,17 +245,20 @@ fn draw_node(
         Size::new(w, total_h),
         (NODE_ROUNDING * zoom).into(),
     );
-    frame.fill(&body, node_bg_color(&node.kind));
+    frame.fill(&body, node_bg_color(&node.kind, tokens));
 
     // Selection highlight
     if node.selected {
         frame.stroke(
             &body,
             Stroke::default()
-                .with_color(Color::from_rgb(0.4, 0.7, 1.0))
+                .with_color(tokens.node_selected)
                 .with_width(2.0),
         );
-    } else if matches!(node.kind, NodeKind::ForLoop | NodeKind::Conditional | NodeKind::CustomFunc) {
+    } else if matches!(
+        node.kind,
+        NodeKind::ForLoop | NodeKind::Conditional | NodeKind::CustomFunc
+    ) {
         // Subtle border for sub-graph nodes
         frame.stroke(
             &body,
@@ -237,11 +269,8 @@ fn draw_node(
     }
 
     // Header
-    let header = Path::rectangle(
-        Point::new(x, y),
-        Size::new(w, header_h),
-    );
-    frame.fill(&header, node_header_color(&node.kind));
+    let header = Path::rectangle(Point::new(x, y), Size::new(w, header_h));
+    frame.fill(&header, node_header_color(&node.kind, tokens));
 
     // Header text
     let label = Text {
@@ -254,9 +283,12 @@ fn draw_node(
     frame.fill_text(label);
 
     // Sub-graph indicator icon (for ForLoop/Conditional/CustomFunc)
-    if matches!(node.kind, NodeKind::ForLoop | NodeKind::Conditional | NodeKind::CustomFunc) {
+    if matches!(
+        node.kind,
+        NodeKind::ForLoop | NodeKind::Conditional | NodeKind::CustomFunc
+    ) {
         let icon = Text {
-            content: "\u{25B6}\u{25B6}".to_string(), // ▶▶ double-click hint
+            content: ">>".to_string(), // double-click hint
             position: Point::new(x + w - 20.0 * zoom, y + 6.0 * zoom),
             color: Color::from_rgba(1.0, 1.0, 1.0, 0.5),
             size: iced::Pixels(10.0 * zoom),
@@ -270,7 +302,7 @@ fn draw_node(
     for (i, port_def) in node.inputs().iter().enumerate() {
         let py = y + header_h + i as f32 * port_spacing + 12.0 * zoom;
         let port = Path::circle(Point::new(x, py), port_radius);
-        frame.fill(&port, data_type_color(port_def.data_type));
+        frame.fill(&port, data_type_color(port_def.data_type, tokens));
 
         let is_connected = connected_inputs.contains(&(node.id, i));
 
@@ -290,7 +322,9 @@ fn draw_node(
                     DefaultValue::Float(v) => format!("{:.2}", v),
                     DefaultValue::Vec2(v) => format!("{:.1}, {:.1}", v[0], v[1]),
                     DefaultValue::Vec3(v) => format!("{:.1}, {:.1}, {:.1}", v[0], v[1], v[2]),
-                    DefaultValue::Vec4(v) => format!("{:.1},{:.1},{:.1},{:.1}", v[0], v[1], v[2], v[3]),
+                    DefaultValue::Vec4(v) => {
+                        format!("{:.1},{:.1},{:.1},{:.1}", v[0], v[1], v[2], v[3])
+                    }
                 };
                 // Background pill for the value
                 let val_x = x + 60.0 * zoom;
@@ -319,7 +353,7 @@ fn draw_node(
     for (i, port_def) in node.outputs().iter().enumerate() {
         let py = y + header_h + i as f32 * port_spacing + 12.0 * zoom;
         let port = Path::circle(Point::new(x + w, py), port_radius);
-        frame.fill(&port, data_type_color(port_def.data_type));
+        frame.fill(&port, data_type_color(port_def.data_type, tokens));
 
         let port_label = Text {
             content: port_def.name.clone(),
@@ -372,6 +406,7 @@ fn draw_wire(frame: &mut Frame, from: Point, to: Point, color: Color, zoom: f32)
 pub struct GraphProgram<'a> {
     pub graph: &'a ShaderGraph,
     pub canvas_state: &'a GraphCanvas,
+    pub tokens: &'a ThemeTokens,
 }
 
 impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
@@ -405,7 +440,10 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 {
                     if dir == PortDirection::Input {
                         // Check if this port is unconnected
-                        let is_connected = self.graph.connections().iter()
+                        let is_connected = self
+                            .graph
+                            .connections()
+                            .iter()
                             .any(|c| c.to.node == node_id && c.to.port == port_idx);
                         if !is_connected {
                             if let Some(node) = self.graph.node(node_id) {
@@ -413,14 +451,30 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                                     let step = 0.1 * scroll_y;
                                     let clamp = |x: f32| x.clamp(-1000.0, 1000.0);
                                     let new_def = match def {
-                                        DefaultValue::Float(v) => DefaultValue::Float(clamp(v + step)),
-                                        DefaultValue::Vec2(v) => DefaultValue::Vec2([clamp(v[0] + step), clamp(v[1] + step)]),
-                                        DefaultValue::Vec3(v) => DefaultValue::Vec3([clamp(v[0] + step), clamp(v[1] + step), clamp(v[2] + step)]),
-                                        DefaultValue::Vec4(v) => DefaultValue::Vec4([clamp(v[0] + step), clamp(v[1] + step), clamp(v[2] + step), clamp(v[3] + step)]),
+                                        DefaultValue::Float(v) => {
+                                            DefaultValue::Float(clamp(v + step))
+                                        }
+                                        DefaultValue::Vec2(v) => DefaultValue::Vec2([
+                                            clamp(v[0] + step),
+                                            clamp(v[1] + step),
+                                        ]),
+                                        DefaultValue::Vec3(v) => DefaultValue::Vec3([
+                                            clamp(v[0] + step),
+                                            clamp(v[1] + step),
+                                            clamp(v[2] + step),
+                                        ]),
+                                        DefaultValue::Vec4(v) => DefaultValue::Vec4([
+                                            clamp(v[0] + step),
+                                            clamp(v[1] + step),
+                                            clamp(v[2] + step),
+                                            clamp(v[3] + step),
+                                        ]),
                                     };
                                     return (
                                         canvas::event::Status::Captured,
-                                        Some(GraphMessage::DefaultChanged(node_id, port_idx, new_def)),
+                                        Some(GraphMessage::DefaultChanged(
+                                            node_id, port_idx, new_def,
+                                        )),
                                     );
                                 }
                             }
@@ -444,6 +498,25 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
             }
 
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                // --- Double-click detection for value pill editing ---
+                let is_double_click = state.last_value_click.as_ref().map_or(false, |(t, p)| {
+                    t.elapsed().as_millis() < 300
+                        && (cursor_pos.x - p.x).abs() < 5.0
+                        && (cursor_pos.y - p.y).abs() < 5.0
+                });
+                state.last_value_click = Some((std::time::Instant::now(), cursor_pos));
+
+                if is_double_click {
+                    if let Some((node_id, port_idx)) =
+                        self.hit_test_value_pill(cursor_pos, offset, zoom)
+                    {
+                        return (
+                            canvas::event::Status::Captured,
+                            Some(GraphMessage::StartEditValue(node_id, port_idx)),
+                        );
+                    }
+                }
+
                 // Check if clicking on a port first
                 if let Some((node_id, dir, port_idx, port_pos)) =
                     self.hit_test_port(cursor_pos, offset, zoom)
@@ -598,20 +671,18 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                     }
                     Interaction::BoxSelecting { start, current } => {
                         // Select all nodes within the box
-                        let world_start = [
-                            (start.x - offset.x) / zoom,
-                            (start.y - offset.y) / zoom,
-                        ];
-                        let world_end = [
-                            (current.x - offset.x) / zoom,
-                            (current.y - offset.y) / zoom,
-                        ];
+                        let world_start =
+                            [(start.x - offset.x) / zoom, (start.y - offset.y) / zoom];
+                        let world_end =
+                            [(current.x - offset.x) / zoom, (current.y - offset.y) / zoom];
                         let min_x = world_start[0].min(world_end[0]);
                         let max_x = world_start[0].max(world_end[0]);
                         let min_y = world_start[1].min(world_end[1]);
                         let max_y = world_start[1].max(world_end[1]);
 
-                        let selected: Vec<NodeId> = self.graph.nodes()
+                        let selected: Vec<NodeId> = self
+                            .graph
+                            .nodes()
                             .filter(|n| {
                                 let [nx, ny] = n.position;
                                 let w = n.width();
@@ -621,7 +692,11 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                             .map(|n| n.id)
                             .collect();
 
-                        if selected.is_empty() { None } else { Some(GraphMessage::BoxSelected(selected)) }
+                        if selected.is_empty() {
+                            None
+                        } else {
+                            Some(GraphMessage::BoxSelected(selected))
+                        }
                     }
                     _ => None,
                 };
@@ -701,14 +776,19 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 (canvas::event::Status::Ignored, None)
             }
 
-            // Escape: exit sub-graph (or cancel pending node)
+            // Escape: cancel pending node / cancel editing / exit sub-graph
             Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape),
                 ..
-            }) => (
-                canvas::event::Status::Captured,
-                Some(GraphMessage::ExitSubGraph),
-            ),
+            }) => {
+                if self.canvas_state.pending_node.is_some() {
+                    (canvas::event::Status::Captured, Some(GraphMessage::CancelPending))
+                } else if self.canvas_state.editing_value.is_some() {
+                    (canvas::event::Status::Captured, Some(GraphMessage::CancelEditValue))
+                } else {
+                    (canvas::event::Status::Captured, Some(GraphMessage::ExitSubGraph))
+                }
+            }
 
             _ => (canvas::event::Status::Ignored, None),
         }
@@ -720,7 +800,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
         renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
-        _cursor: mouse::Cursor,
+        cursor: mouse::Cursor,
     ) -> Vec<Geometry> {
         let offset = self.canvas_state.offset;
         let zoom = self.canvas_state.zoom;
@@ -736,13 +816,12 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
             let y = cf.rect[1] * zoom + offset.y;
             let w = cf.rect[2] * zoom;
             let h = cf.rect[3] * zoom;
-            let fill_color = Color::from_rgba(cf.color[0], cf.color[1], cf.color[2], cf.color[3] * 0.15);
-            let border_color = Color::from_rgba(cf.color[0], cf.color[1], cf.color[2], cf.color[3] * 0.5);
-            let rect = Path::rounded_rectangle(
-                Point::new(x, y),
-                Size::new(w, h),
-                (6.0 * zoom).into(),
-            );
+            let fill_color =
+                Color::from_rgba(cf.color[0], cf.color[1], cf.color[2], cf.color[3] * 0.15);
+            let border_color =
+                Color::from_rgba(cf.color[0], cf.color[1], cf.color[2], cf.color[3] * 0.5);
+            let rect =
+                Path::rounded_rectangle(Point::new(x, y), Size::new(w, h), (6.0 * zoom).into());
             frame.fill(&rect, fill_color);
             frame.stroke(
                 &rect,
@@ -763,25 +842,21 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
 
         // Draw connections first (behind nodes)
         for conn in self.graph.connections() {
-            if let (Some(from_node), Some(to_node)) =
-                (self.graph.node(conn.from.node), self.graph.node(conn.to.node))
-            {
+            if let (Some(from_node), Some(to_node)) = (
+                self.graph.node(conn.from.node),
+                self.graph.node(conn.to.node),
+            ) {
                 let from_pos = from_node.port_position(PortDirection::Output, conn.from.port);
                 let to_pos = to_node.port_position(PortDirection::Input, conn.to.port);
 
-                let from_pt = Point::new(
-                    from_pos[0] * zoom + offset.x,
-                    from_pos[1] * zoom + offset.y,
-                );
-                let to_pt = Point::new(
-                    to_pos[0] * zoom + offset.x,
-                    to_pos[1] * zoom + offset.y,
-                );
+                let from_pt =
+                    Point::new(from_pos[0] * zoom + offset.x, from_pos[1] * zoom + offset.y);
+                let to_pt = Point::new(to_pos[0] * zoom + offset.x, to_pos[1] * zoom + offset.y);
 
                 let color = from_node
                     .outputs()
                     .get(conn.from.port)
-                    .map(|p| data_type_color(p.data_type))
+                    .map(|p| data_type_color(p.data_type, self.tokens))
                     .unwrap_or(Color::from_rgb(0.5, 0.5, 0.5));
 
                 draw_wire(&mut frame, from_pt, to_pt, color, zoom);
@@ -794,7 +869,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                     if from_port.data_type == DataType::Float
                         && from_port.data_type != to_port.data_type
                     {
-                        let to_color = data_type_color(to_port.data_type);
+                        let to_color = data_type_color(to_port.data_type, self.tokens);
                         // Diamond indicator near the target port
                         let dx = to_pt.x - 14.0 * zoom;
                         let dy = to_pt.y;
@@ -828,21 +903,9 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
         }
 
         // Draw in-progress wire
-        if let Interaction::DraggingWire {
-            from_pos, end, ..
-        } = &state.interaction
-        {
-            let from_pt = Point::new(
-                from_pos[0] * zoom + offset.x,
-                from_pos[1] * zoom + offset.y,
-            );
-            draw_wire(
-                &mut frame,
-                from_pt,
-                *end,
-                Color::from_rgba(1.0, 1.0, 1.0, 0.5),
-                zoom,
-            );
+        if let Interaction::DraggingWire { from_pos, end, .. } = &state.interaction {
+            let from_pt = Point::new(from_pos[0] * zoom + offset.x, from_pos[1] * zoom + offset.y);
+            draw_wire(&mut frame, from_pt, *end, self.tokens.wire_color, zoom);
         }
 
         // Build set of connected input ports
@@ -853,8 +916,20 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
 
         // Draw nodes
         for node in self.graph.nodes() {
-            let live_val = self.canvas_state.live_values.get(&node.id).map(|s| s.as_str());
-            draw_node(&mut frame, node, offset, zoom, live_val, &connected_inputs);
+            let live_val = self
+                .canvas_state
+                .live_values
+                .get(&node.id)
+                .map(|s| s.as_str());
+            draw_node(
+                &mut frame,
+                node,
+                offset,
+                zoom,
+                live_val,
+                &connected_inputs,
+                self.tokens,
+            );
         }
 
         // Draw box selection rectangle
@@ -864,10 +939,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
             let w = (start.x - current.x).abs();
             let h = (start.y - current.y).abs();
             let rect = Path::rectangle(Point::new(x, y), Size::new(w, h));
-            frame.fill(
-                &rect,
-                Color::from_rgba(0.3, 0.5, 1.0, 0.1),
-            );
+            frame.fill(&rect, Color::from_rgba(0.3, 0.5, 1.0, 0.1));
             frame.stroke(
                 &rect,
                 Stroke::default()
@@ -887,17 +959,41 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
         };
         frame.fill_text(zoom_label);
 
-        // Pending node placement indicator
+        // Pending node placement indicator + ghost at cursor
         if let Some(kind) = &self.canvas_state.pending_node {
-            let hint = format!("Click to place: {}", kind.label());
+            let hint = format!("Click to place: {}  (Esc to cancel)", kind.label());
             let hint_label = Text {
                 content: hint,
-                position: Point::new(bounds.width / 2.0 - 80.0, 10.0),
+                position: Point::new(bounds.width / 2.0 - 100.0, 10.0),
                 color: Color::from_rgba(1.0, 0.9, 0.3, 0.9),
                 size: iced::Pixels(14.0),
                 ..Text::default()
             };
             frame.fill_text(hint_label);
+
+            // Draw a ghost node at cursor position
+            if let Some(cursor_pos) = cursor.position_in(bounds) {
+                let ghost_rect = Path::rounded_rectangle(
+                    Point::new(cursor_pos.x + 10.0, cursor_pos.y + 10.0),
+                    Size::new(120.0, 30.0),
+                    4.0.into(),
+                );
+                frame.fill(&ghost_rect, Color::from_rgba(0.3, 0.5, 0.8, 0.2));
+                frame.stroke(
+                    &ghost_rect,
+                    Stroke::default()
+                        .with_color(Color::from_rgba(0.4, 0.6, 1.0, 0.5))
+                        .with_width(1.0),
+                );
+                let ghost_text = Text {
+                    content: kind.label().to_string(),
+                    position: Point::new(cursor_pos.x + 15.0, cursor_pos.y + 15.0),
+                    color: Color::from_rgba(1.0, 1.0, 1.0, 0.6),
+                    size: iced::Pixels(13.0),
+                    ..Text::default()
+                };
+                frame.fill_text(ghost_text);
+            }
         }
 
         // Minimap overlay (bottom-left)
@@ -976,10 +1072,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 let vp_w = vp_w_raw.min(minimap_x + minimap_w - vp_x).max(0.0);
                 let vp_h = vp_h_raw.min(minimap_y + minimap_h - vp_y).max(0.0);
                 if vp_w > 0.0 && vp_h > 0.0 {
-                    let vp = Path::rectangle(
-                        Point::new(vp_x, vp_y),
-                        Size::new(vp_w, vp_h),
-                    );
+                    let vp = Path::rectangle(Point::new(vp_x, vp_y), Size::new(vp_w, vp_h));
                     frame.stroke(
                         &vp,
                         Stroke::default()
@@ -1012,10 +1105,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 if let Some(pos) = cursor.position_in(bounds) {
                     let offset = self.canvas_state.offset;
                     let zoom = self.canvas_state.zoom;
-                    if self
-                        .hit_test_port(pos, offset, zoom)
-                        .is_some()
-                    {
+                    if self.hit_test_port(pos, offset, zoom).is_some() {
                         mouse::Interaction::Pointer
                     } else if self.hit_test_node(pos, offset, zoom).is_some() {
                         mouse::Interaction::Grab
@@ -1048,20 +1138,18 @@ impl<'a> GraphProgram<'a> {
                 let [px, py] = node.port_position(PortDirection::Input, i);
                 let sp = Point::new(px * zoom + offset.x, py * zoom + offset.y);
                 let d2 = (pos.x - sp.x).powi(2) + (pos.y - sp.y).powi(2);
-                if d2 < hit_r2
-                    && best.as_ref().is_none_or(|b| d2 < b.4) {
-                        best = Some((node.id, PortDirection::Input, i, [px, py], d2));
-                    }
+                if d2 < hit_r2 && best.as_ref().is_none_or(|b| d2 < b.4) {
+                    best = Some((node.id, PortDirection::Input, i, [px, py], d2));
+                }
             }
             // Output ports
             for (i, _) in node.outputs().iter().enumerate() {
                 let [px, py] = node.port_position(PortDirection::Output, i);
                 let sp = Point::new(px * zoom + offset.x, py * zoom + offset.y);
                 let d2 = (pos.x - sp.x).powi(2) + (pos.y - sp.y).powi(2);
-                if d2 < hit_r2
-                    && best.as_ref().is_none_or(|b| d2 < b.4) {
-                        best = Some((node.id, PortDirection::Output, i, [px, py], d2));
-                    }
+                if d2 < hit_r2 && best.as_ref().is_none_or(|b| d2 < b.4) {
+                    best = Some((node.id, PortDirection::Output, i, [px, py], d2));
+                }
             }
         }
         best.map(|(id, dir, idx, pos, _)| (id, dir, idx, pos))
@@ -1077,8 +1165,7 @@ impl<'a> GraphProgram<'a> {
             let y = node.position[1] * zoom + offset.y;
             let w = node.width() * zoom;
             let h = node.height() * zoom;
-            if pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h
-            {
+            if pos.x >= x && pos.x <= x + w && pos.y >= y && pos.y <= y + h {
                 // HashMap iteration order is arbitrary, but we still
                 // take the last match (which at least is deterministic
                 // per-session).  A proper z-order list would be ideal.
@@ -1086,6 +1173,53 @@ impl<'a> GraphProgram<'a> {
             }
         }
         best
+    }
+
+    /// Check if `pos` (screen coords) hits a value pill on an unconnected input port.
+    /// Returns (node_id, port_index) of the hit pill, or None.
+    fn hit_test_value_pill(
+        &self,
+        pos: Point,
+        offset: Vector,
+        zoom: f32,
+    ) -> Option<(NodeId, usize)> {
+        let connected_inputs: HashSet<(NodeId, usize)> = self
+            .graph
+            .connections()
+            .iter()
+            .map(|c| (c.to.node, c.to.port))
+            .collect();
+
+        for node in self.graph.nodes() {
+            let x = node.position[0] * zoom + offset.x;
+            let y = node.position[1] * zoom + offset.y;
+            let w = node.width() * zoom;
+            let header_h = HEADER_HEIGHT * zoom;
+            let port_spacing = PORT_SPACING * zoom;
+
+            for (i, _) in node.inputs().iter().enumerate() {
+                if connected_inputs.contains(&(node.id, i)) {
+                    continue;
+                }
+                if node.defaults.get(i).is_none() {
+                    continue;
+                }
+                let py = y + header_h + i as f32 * port_spacing + 12.0 * zoom;
+                let val_x = x + 60.0 * zoom;
+                let val_w = w - 65.0 * zoom;
+                let val_h = 14.0 * zoom;
+                let val_y = py - 7.0 * zoom;
+
+                if pos.x >= val_x
+                    && pos.x <= val_x + val_w
+                    && pos.y >= val_y
+                    && pos.y <= val_y + val_h
+                {
+                    return Some((node.id, i));
+                }
+            }
+        }
+        None
     }
 
     /// Check if `pos` (screen coords) is close to a wire (connection).
@@ -1111,10 +1245,9 @@ impl<'a> GraphProgram<'a> {
 
             // Sample the Bézier curve and find minimum distance
             let dist = point_to_bezier_distance(pos, from_screen, to_screen);
-            if dist < threshold
-                && best.is_none_or(|(_, d)| dist < d) {
-                    best = Some((conn.id, dist));
-                }
+            if dist < threshold && best.is_none_or(|(_, d)| dist < d) {
+                best = Some((conn.id, dist));
+            }
         }
 
         best.map(|(id, _)| id)
@@ -1126,8 +1259,10 @@ pub struct CanvasInteraction {
     interaction: Interaction,
     /// Whether the Shift key is currently held.
     pub shift_held: bool,
-    /// Last click time + node for double-click detection.
+    /// Last click time + node for double-click detection (sub-graph nodes).
     last_click: Option<(std::time::Instant, NodeId)>,
+    /// Last click time + position for double-click detection (value pills).
+    last_value_click: Option<(std::time::Instant, Point)>,
 }
 
 impl Default for CanvasInteraction {
@@ -1136,6 +1271,7 @@ impl Default for CanvasInteraction {
             interaction: Interaction::None,
             shift_held: false,
             last_click: None,
+            last_value_click: None,
         }
     }
 }
@@ -1208,12 +1344,76 @@ fn draw_grid(frame: &mut Frame, size: Size, offset: Vector, zoom: f32) {
 pub fn graph_canvas<'a>(
     graph: &'a ShaderGraph,
     canvas_state: &'a GraphCanvas,
+    tokens: &'a ThemeTokens,
 ) -> Element<'a, GraphMessage> {
-    Canvas::new(GraphProgram {
+    use iced::widget::{stack, text_input, column, row, Space};
+    use iced::Padding;
+
+    let canvas_elem: Element<'a, GraphMessage> = Canvas::new(GraphProgram {
         graph,
         canvas_state,
+        tokens,
     })
     .width(Length::Fill)
     .height(Length::Fill)
-    .into()
+    .into();
+
+    if let Some((node_id, port_idx, ref edit_text)) = canvas_state.editing_value {
+        if let Some(node) = graph.node(node_id) {
+            let zoom = canvas_state.zoom;
+            let offset = canvas_state.offset;
+
+            let pill_x = node.position[0] * zoom + offset.x + 60.0 * zoom;
+            let pill_y = node.position[1] * zoom + offset.y + HEADER_HEIGHT * zoom
+                        + port_idx as f32 * PORT_SPACING * zoom + 5.0 * zoom;
+            let pill_w = (node.width() - 65.0) * zoom;
+
+            let px = pill_x.max(0.0);
+            let py = pill_y.max(0.0);
+            let pw = pill_w.max(40.0);
+
+            let bg = tokens.bg_tertiary;
+            let txt_color = tokens.text_primary;
+            let accent = tokens.text_accent;
+
+            let input = text_input("value...", edit_text)
+                .on_input(GraphMessage::EditValueChanged)
+                .on_submit(GraphMessage::CommitEditValue)
+                .size(11.0 * zoom.max(0.5))
+                .width(pw)
+                .padding(Padding::from([2, 4]))
+                .style(move |_theme: &Theme, _status| {
+                    text_input::Style {
+                        background: iced::Background::Color(bg),
+                        border: iced::Border {
+                            color: accent,
+                            width: 1.5,
+                            radius: (3.0).into(),
+                        },
+                        icon: txt_color,
+                        placeholder: Color::from_rgba(0.5, 0.5, 0.5, 0.6),
+                        value: txt_color,
+                        selection: Color::from_rgba(0.3, 0.5, 0.8, 0.4),
+                    }
+                });
+
+            let overlay: Element<'a, GraphMessage> = column![
+                Space::new(0, py),
+                row![
+                    Space::new(px, 0),
+                    input,
+                ],
+            ]
+            .into();
+
+            stack![canvas_elem, overlay]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            canvas_elem
+        }
+    } else {
+        canvas_elem
+    }
 }
