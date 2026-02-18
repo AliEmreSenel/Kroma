@@ -4,6 +4,7 @@
 //! battery, audio visualizer, weather) onto a canvas layout. The designer
 //! generates a complete .shade project with GLSL and config.
 
+use iced::widget::space::horizontal;
 use iced::widget::{button, column, container, row, scrollable, slider, text, text_input, Space};
 use iced::{Border, Element, Fill, Padding, Theme};
 
@@ -141,7 +142,8 @@ impl DesignerComponent {
     /// Generate the GLSL code snippet for this component.
     pub fn glsl_snippet(&self) -> &'static str {
         match self {
-            Self::Clock => r#"
+            Self::Clock => {
+                r#"
     // Clock display
     float hours = mod(u_time / 3600.0, 24.0);
     float minutes = mod(u_time / 60.0, 60.0);
@@ -150,15 +152,19 @@ impl DesignerComponent {
     vec2 clock_uv = (uv - vec2(0.5, 0.8)) * 10.0;
     float digit = step(abs(clock_uv.y), 0.4) * step(abs(clock_uv.x), 2.5);
     color = mix(color, vec3(1.0), digit * 0.3);
-"#,
-            Self::Date => r#"
+"#
+            }
+            Self::Date => {
+                r#"
     // Date display (uses time-based approximation)
     float day_of_year = floor(u_time / 86400.0);
     vec2 date_uv = (uv - vec2(0.5, 0.7)) * 12.0;
     float date_area = step(abs(date_uv.y), 0.3) * step(abs(date_uv.x), 2.0);
     color = mix(color, vec3(0.8, 0.8, 1.0), date_area * 0.2);
-"#,
-            Self::CpuMeter => r#"
+"#
+            }
+            Self::CpuMeter => {
+                r#"
     // CPU meter bar
     float cpu = u_cpu;
     vec2 cpu_uv = (uv - vec2(0.1, 0.9)) * vec2(5.0, 20.0);
@@ -166,8 +172,10 @@ impl DesignerComponent {
                     step(0.0, cpu_uv.y) * step(cpu_uv.y, 1.0);
     vec3 cpu_color = mix(vec3(0.0, 1.0, 0.0), vec3(1.0, 0.0, 0.0), cpu);
     color = mix(color, cpu_color, cpu_bar * 0.8);
-"#,
-            Self::RamMeter => r#"
+"#
+            }
+            Self::RamMeter => {
+                r#"
     // RAM meter bar
     float ram = u_ram;
     vec2 ram_uv = (uv - vec2(0.1, 0.85)) * vec2(5.0, 20.0);
@@ -175,8 +183,10 @@ impl DesignerComponent {
                     step(0.0, ram_uv.y) * step(ram_uv.y, 1.0);
     vec3 ram_color = mix(vec3(0.2, 0.6, 1.0), vec3(1.0, 0.3, 0.3), ram);
     color = mix(color, ram_color, ram_bar * 0.8);
-"#,
-            Self::Battery => r#"
+"#
+            }
+            Self::Battery => {
+                r#"
     // Battery indicator
     float batt = u_battery;
     vec2 batt_uv = (uv - vec2(0.9, 0.95)) * vec2(10.0, 30.0);
@@ -187,42 +197,54 @@ impl DesignerComponent {
     vec3 batt_color = mix(vec3(1.0, 0.2, 0.2), vec3(0.2, 1.0, 0.2), batt);
     color = mix(color, vec3(0.5), batt_outline * 0.3);
     color = mix(color, batt_color, batt_fill * 0.7);
-"#,
-            Self::AudioSpectrum => r#"
+"#
+            }
+            Self::AudioSpectrum => {
+                r#"
     // Audio spectrum visualizer
     float band = floor(uv.x * 32.0) / 32.0;
     float spectrum_height = texture(iChannel0, vec2(band, 0.0)).r;
     float bar = step(1.0 - uv.y, spectrum_height * 0.5) * step(0.02, fract(uv.x * 32.0));
     vec3 spec_color = mix(vec3(0.1, 0.5, 1.0), vec3(1.0, 0.2, 0.8), uv.x);
     color = mix(color, spec_color, bar * 0.9);
-"#,
-            Self::AudioWaveform => r#"
+"#
+            }
+            Self::AudioWaveform => {
+                r#"
     // Audio waveform
     float wave_sample = texture(iChannel0, vec2(uv.x, 0.5)).r;
     float wave_line = 1.0 - smoothstep(0.0, 0.01, abs(uv.y - 0.5 - wave_sample * 0.3));
     color = mix(color, vec3(0.3, 0.8, 1.0), wave_line * 0.8);
-"#,
-            Self::GradientBg => r#"
+"#
+            }
+            Self::GradientBg => {
+                r#"
     // Animated gradient background
     float angle = u_time * 0.1;
     vec2 grad_dir = vec2(cos(angle), sin(angle));
     float grad_t = dot(uv, grad_dir) * 0.5 + 0.5;
     color = mix(vec3(0.05, 0.02, 0.15), vec3(0.1, 0.05, 0.3), grad_t);
     color = mix(color, vec3(0.2, 0.1, 0.4), sin(grad_t * 3.14159) * 0.5);
-"#,
-            Self::NoiseBg => r#"
+"#
+            }
+            Self::NoiseBg => {
+                r#"
     // Animated noise background
     vec2 noise_uv = uv * 3.0 + u_time * 0.05;
     float n = fract(sin(dot(noise_uv, vec2(12.9898, 78.233))) * 43758.5453);
     float n2 = fract(sin(dot(noise_uv * 2.0 + 0.5, vec2(12.9898, 78.233))) * 43758.5453);
     float noise = mix(n, n2, 0.5) * 0.15;
     color = vec3(0.05 + noise, 0.02 + noise * 0.8, 0.12 + noise * 1.2);
-"#,
-            Self::SolidBg => r#"
+"#
+            }
+            Self::SolidBg => {
+                r#"
     // Solid color background
     color = vec3(0.08, 0.04, 0.16);
-"#,
-            Self::Particles => r#"
+"#
+            }
+            Self::Particles => {
+                r#"
     // Simple particle system
     float particles = 0.0;
     for (int i = 0; i < 20; i++) {
@@ -235,17 +257,22 @@ impl DesignerComponent {
         particles += smoothstep(0.015, 0.0, d) * (0.5 + 0.5 * sin(fi));
     }
     color += vec3(0.3, 0.5, 1.0) * particles;
-"#,
-            Self::ImageOverlay => r#"
+"#
+            }
+            Self::ImageOverlay => {
+                r#"
     // Image overlay
     vec4 img = texture(iChannel1, uv);
     color = mix(color, img.rgb, img.a);
-"#,
-            Self::VideoOverlay => r#"
+"#
+            }
+            Self::VideoOverlay => {
+                r#"
     // Video overlay
     vec4 vid = texture(iChannel2, uv);
     color = mix(color, vid.rgb, vid.a);
-"#,
+"#
+            }
         }
     }
 
@@ -256,10 +283,7 @@ impl DesignerComponent {
 
     /// Whether this component needs system uniforms.
     pub fn needs_system_uniforms(&self) -> bool {
-        matches!(
-            self,
-            Self::CpuMeter | Self::RamMeter | Self::Battery
-        )
+        matches!(self, Self::CpuMeter | Self::RamMeter | Self::Battery)
     }
 
     /// Whether this component needs image/video texture channels.
@@ -353,17 +377,22 @@ impl DesignerPanel {
 
     /// Generate the full GLSL shader from the current design.
     pub fn generate_glsl(&self) -> String {
-        let needs_audio = self.components.iter().any(|c| c.enabled && c.component.needs_audio());
+        let needs_audio = self
+            .components
+            .iter()
+            .any(|c| c.enabled && c.component.needs_audio());
         let needs_system = self
             .components
             .iter()
             .any(|c| c.enabled && c.component.needs_system_uniforms());
-        let needs_image = self.components.iter().any(|c| {
-            c.enabled && matches!(c.component, DesignerComponent::ImageOverlay)
-        });
-        let needs_video = self.components.iter().any(|c| {
-            c.enabled && matches!(c.component, DesignerComponent::VideoOverlay)
-        });
+        let needs_image = self
+            .components
+            .iter()
+            .any(|c| c.enabled && matches!(c.component, DesignerComponent::ImageOverlay));
+        let needs_video = self
+            .components
+            .iter()
+            .any(|c| c.enabled && matches!(c.component, DesignerComponent::VideoOverlay));
 
         let mut uniforms = String::new();
         uniforms.push_str("uniform float u_time;\n");
@@ -398,7 +427,11 @@ impl DesignerPanel {
                 body.push_str(&format!(
                     "    // Component: {} at ({:.2}, {:.2}) size ({:.2}, {:.2}) opacity {:.2}\n",
                     placed.component.label(),
-                    placed.x, placed.y, placed.width, placed.height, placed.opacity,
+                    placed.x,
+                    placed.y,
+                    placed.width,
+                    placed.height,
+                    placed.opacity,
                 ));
                 if let Some(ref custom) = placed.custom_shader {
                     body.push_str(custom);
@@ -417,7 +450,11 @@ impl DesignerPanel {
                 body.push_str(&format!(
                     "    // Component: {} at ({:.2}, {:.2}) size ({:.2}, {:.2}) opacity {:.2}\n",
                     placed.component.label(),
-                    placed.x, placed.y, placed.width, placed.height, placed.opacity,
+                    placed.x,
+                    placed.y,
+                    placed.width,
+                    placed.height,
+                    placed.opacity,
                 ));
                 if let Some(ref custom) = placed.custom_shader {
                     body.push_str(custom);
@@ -442,7 +479,10 @@ impl DesignerPanel {
 
     /// Generate a ShadeConfig for the current design.
     pub fn generate_config(&self) -> kroma_shared::types::ShadeConfig {
-        let needs_audio = self.components.iter().any(|c| c.enabled && c.component.needs_audio());
+        let needs_audio = self
+            .components
+            .iter()
+            .any(|c| c.enabled && c.component.needs_audio());
 
         kroma_shared::types::ShadeConfig {
             meta: kroma_shared::types::ShadeMeta {
@@ -491,12 +531,7 @@ impl Panel for DesignerPanel {
         for comp in DesignerComponent::all() {
             if comp.category() != current_category {
                 current_category = comp.category();
-                palette_items.push(
-                    text(current_category)
-                        .size(11)
-                        .color(accent)
-                        .into(),
-                );
+                palette_items.push(text(current_category).size(11).color(accent).into());
             }
 
             let already_added = self
@@ -515,33 +550,29 @@ impl Panel for DesignerPanel {
                     .spacing(4)
                     .align_y(iced::alignment::Vertical::Center),
                 )
-                    .on_press(Message::DesignerToggleComponent(comp_val))
-                    .width(Fill)
-                    .padding(Padding::from([4, 8]))
-                    .style(move |_: &Theme, status| {
-                        let b = match status {
-                            button::Status::Hovered => hover,
-                            _ => bg_c,
-                        };
-                        button::Style {
-                            background: Some(iced::Background::Color(b)),
-                            text_color: txt,
-                            border: Border::default().rounded(radius * 0.5),
-                            ..Default::default()
-                        }
-                    })
-                    .into(),
+                .on_press(Message::DesignerToggleComponent(comp_val))
+                .width(Fill)
+                .padding(Padding::from([4, 8]))
+                .style(move |_: &Theme, status| {
+                    let b = match status {
+                        button::Status::Hovered => hover,
+                        _ => bg_c,
+                    };
+                    button::Style {
+                        background: Some(iced::Background::Color(b)),
+                        text_color: txt,
+                        border: Border::default().rounded(radius * 0.5),
+                        ..Default::default()
+                    }
+                })
+                .into(),
             );
         }
 
         // Palette instructions
-        palette_items.push(Space::new(0, 8).into());
-        palette_items.push(
-            text("Click to add/remove.").size(9).color(txt_sec).into(),
-        );
-        palette_items.push(
-            text("Select below to edit.").size(9).color(txt_sec).into(),
-        );
+        palette_items.push(Space::new().width(0).height(8).into());
+        palette_items.push(text("Click to add/remove.").size(9).color(txt_sec).into());
+        palette_items.push(text("Select below to edit.").size(9).color(txt_sec).into());
 
         let palette = scrollable(
             column(palette_items)
@@ -552,18 +583,12 @@ impl Panel for DesignerPanel {
         .height(Fill);
 
         // Center: preview of current design
-        let active_components: Vec<_> = self
-            .components
-            .iter()
-            .filter(|c| c.enabled)
-            .collect();
+        let active_components: Vec<_> = self.components.iter().filter(|c| c.enabled).collect();
 
         let preview_content = if active_components.is_empty() {
             column![
-                text("Simple Wallpaper Designer")
-                    .size(18)
-                    .color(txt),
-                Space::new(0, 8),
+                text("Simple Wallpaper Designer").size(18).color(txt),
+                Space::new().width(0).height(8),
                 text("Click components on the left to add them to your wallpaper.")
                     .size(12)
                     .color(txt_sec),
@@ -574,12 +599,7 @@ impl Panel for DesignerPanel {
             .spacing(4)
         } else {
             let mut comp_list: Vec<Element<'_, Message>> = Vec::new();
-            comp_list.push(
-                text("Active Components:")
-                    .size(13)
-                    .color(txt)
-                    .into(),
-            );
+            comp_list.push(text("Active Components:").size(13).color(txt).into());
 
             for (idx, placed) in self.components.iter().enumerate() {
                 if !placed.enabled {
@@ -600,13 +620,27 @@ impl Panel for DesignerPanel {
                 );
                 let remove_idx = idx;
                 let select_idx = idx;
-                let sel_bg = if is_selected { accent } else { iced::Color::TRANSPARENT };
+                let sel_bg = if is_selected {
+                    accent
+                } else {
+                    iced::Color::TRANSPARENT
+                };
                 comp_list.push(
                     button(
                         row![
-                            text(placed.component.icon()).font(icons::ICON_FONT).size(11).color(txt),
-                            text(format!("{}{}{}", placed.component.label(), audio_suffix, pos_info)).size(10).color(txt),
-                            iced::widget::horizontal_space(),
+                            text(placed.component.icon())
+                                .font(icons::ICON_FONT)
+                                .size(11)
+                                .color(txt),
+                            text(format!(
+                                "{}{}{}",
+                                placed.component.label(),
+                                audio_suffix,
+                                pos_info
+                            ))
+                            .size(10)
+                            .color(txt),
+                            horizontal(),
                             button(text("X").size(10).color(t.error))
                                 .on_press(Message::DesignerRemoveComponent(remove_idx))
                                 .padding(Padding::from([2, 6]))
@@ -641,13 +675,8 @@ impl Panel for DesignerPanel {
 
             // GLSL preview
             let glsl = self.generate_glsl();
-            comp_list.push(Space::new(0, 8).into());
-            comp_list.push(
-                text("Generated GLSL:")
-                    .size(11)
-                    .color(accent)
-                    .into(),
-            );
+            comp_list.push(Space::new().width(0).height(8).into());
+            comp_list.push(text("Generated GLSL:").size(11).color(accent).into());
             comp_list.push(
                 container(
                     scrollable(text(glsl).size(10).color(txt_sec))
@@ -668,25 +697,21 @@ impl Panel for DesignerPanel {
         };
 
         // Generate button
-        let gen_btn = button(
-            text("Generate Shade Project")
-                .size(13)
-                .color(txt),
-        )
-        .on_press(Message::DesignerGenerate)
-        .padding(Padding::from([8, 20]))
-        .style(move |_: &Theme, status| {
-            let b = match status {
-                button::Status::Hovered => hover,
-                _ => t.button_primary,
-            };
-            button::Style {
-                background: Some(iced::Background::Color(b)),
-                text_color: txt,
-                border: Border::default().rounded(radius),
-                ..Default::default()
-            }
-        });
+        let gen_btn = button(text("Generate Shade Project").size(13).color(txt))
+            .on_press(Message::DesignerGenerate)
+            .padding(Padding::from([8, 20]))
+            .style(move |_: &Theme, status| {
+                let b = match status {
+                    button::Status::Hovered => hover,
+                    _ => t.button_primary,
+                };
+                button::Style {
+                    background: Some(iced::Background::Color(b)),
+                    text_color: txt,
+                    border: Border::default().rounded(radius),
+                    ..Default::default()
+                }
+            });
 
         let center = container(
             column![
@@ -718,12 +743,10 @@ impl Panel for DesignerPanel {
                         .color(accent)
                         .into(),
                 );
-                props.push(Space::new(0, 4).into());
+                props.push(Space::new().width(0).height(4).into());
 
                 // Position row
-                props.push(
-                    text("Position").size(10).color(txt_sec).into(),
-                );
+                props.push(text("Position").size(10).color(txt_sec).into());
                 props.push(
                     row![
                         text("X:").size(10).color(txt_sec),
@@ -743,9 +766,7 @@ impl Panel for DesignerPanel {
                 );
 
                 // Size row
-                props.push(
-                    text("Size").size(10).color(txt_sec).into(),
-                );
+                props.push(text("Size").size(10).color(txt_sec).into());
                 props.push(
                     row![
                         text("W:").size(10).color(txt_sec),
@@ -765,10 +786,8 @@ impl Panel for DesignerPanel {
                 );
 
                 // Opacity slider
-                props.push(Space::new(0, 4).into());
-                props.push(
-                    text("Opacity").size(10).color(txt_sec).into(),
-                );
+                props.push(Space::new().width(0).height(4).into());
+                props.push(text("Opacity").size(10).color(txt_sec).into());
                 props.push(
                     row![
                         slider(0.0..=1.0, comp.opacity, move |v| {
@@ -787,27 +806,20 @@ impl Panel for DesignerPanel {
 
                 // Asset path (for Image/Video)
                 if comp.component.needs_asset_texture() {
-                    props.push(Space::new(0, 4).into());
+                    props.push(Space::new().width(0).height(4).into());
+                    props.push(text("Asset Path").size(10).color(txt_sec).into());
                     props.push(
-                        text("Asset Path").size(10).color(txt_sec).into(),
-                    );
-                    props.push(
-                        text_input(
-                            "path/to/asset",
-                            comp.asset_path.as_deref().unwrap_or(""),
-                        )
-                        .size(10)
-                        .width(Fill)
-                        .on_input(move |v| Message::DesignerSetAssetPath(idx, v))
-                        .into(),
+                        text_input("path/to/asset", comp.asset_path.as_deref().unwrap_or(""))
+                            .size(10)
+                            .width(Fill)
+                            .on_input(move |v| Message::DesignerSetAssetPath(idx, v))
+                            .into(),
                     );
                 }
 
                 // Custom shader override
-                props.push(Space::new(0, 6).into());
-                props.push(
-                    text("Custom GLSL Override").size(10).color(txt_sec).into(),
-                );
+                props.push(Space::new().width(0).height(6).into());
+                props.push(text("Custom GLSL Override").size(10).color(txt_sec).into());
                 props.push(
                     text_input(
                         "Leave empty for default",
@@ -820,12 +832,8 @@ impl Panel for DesignerPanel {
                 );
 
                 container(
-                    scrollable(
-                        column(props)
-                            .spacing(3)
-                            .padding(Padding::from([8, 8])),
-                    )
-                    .height(Fill),
+                    scrollable(column(props).spacing(3).padding(Padding::from([8, 8])))
+                        .height(Fill),
                 )
                 .style(move |_: &Theme| container::Style {
                     background: Some(iced::Background::Color(bg_tert)),
@@ -836,19 +844,19 @@ impl Panel for DesignerPanel {
                 .height(Fill)
                 .into()
             } else {
-                container(
-                    text("Select a component").size(11).color(txt_sec),
-                )
-                .width(220)
-                .height(Fill)
-                .into()
+                container(text("Select a component").size(11).color(txt_sec))
+                    .width(220)
+                    .height(Fill)
+                    .into()
             }
         } else {
             container(
                 column![
                     text("Properties").size(12).color(txt_sec),
-                    Space::new(0, 8),
-                    text("Select a component to\nedit its properties.").size(10).color(txt_sec),
+                    Space::new().width(0).height(8),
+                    text("Select a component to\nedit its properties.")
+                        .size(10)
+                        .color(txt_sec),
                 ]
                 .spacing(4)
                 .padding(8),

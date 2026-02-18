@@ -32,7 +32,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use iced::widget::text_editor;
-use iced::{Element, Subscription, Task, Theme};
+use iced::{keyboard, Element, Subscription, Task, Theme};
 use log::info;
 
 fn main() -> Result<()> {
@@ -45,11 +45,12 @@ fn main() -> Result<()> {
     }
 
     info!("Kroma GUI v{}", env!("CARGO_PKG_VERSION"));
-    iced::application("Kroma", KromaApp::update, KromaApp::view)
+    iced::application(KromaApp::new, KromaApp::update, KromaApp::view)
+        .title("Kroma")
         .theme(KromaApp::theme)
         .subscription(KromaApp::subscription)
         .window_size((1280.0, 800.0))
-        .run_with(KromaApp::new)
+        .run()
         .map_err(|e| anyhow::anyhow!("GUI error: {}", e))?;
 
     Ok(())
@@ -683,25 +684,38 @@ impl KromaApp {
             ipc::ipc_subscription().map(|(event, handle)| Message::IpcEvent(event, handle));
 
         // Keyboard shortcuts for undo/redo
-        let keyboard = iced::keyboard::on_key_press(|key, modifiers| {
-            use iced::keyboard::Key;
-            if modifiers.control() {
-                match key {
-                    Key::Character(c) if c.as_ref() == "z" && !modifiers.shift() => {
-                        Some(Message::Undo)
+        let keyboard = keyboard::listen().filter_map(|ev| match ev {
+            keyboard::Event::KeyPressed {
+                key,
+                modified_key: _,
+                physical_key: _,
+                location: _,
+                modifiers,
+                text: _,
+                repeat: _,
+            } => {
+                use iced::keyboard::Key;
+                if modifiers.control() {
+                    match key {
+                        Key::Character(c) if c.as_ref() == "z" && !modifiers.shift() => {
+                            Some(Message::Undo)
+                        }
+                        Key::Character(c) if c.as_ref() == "y" => Some(Message::Redo),
+                        Key::Character(c) if c.as_ref() == "z" && modifiers.shift() => {
+                            Some(Message::Redo)
+                        }
+                        _ => None,
                     }
-                    Key::Character(c) if c.as_ref() == "y" => Some(Message::Redo),
-                    Key::Character(c) if c.as_ref() == "z" && modifiers.shift() => {
-                        Some(Message::Redo)
+                } else {
+                    match key {
+                        Key::Named(iced::keyboard::key::Named::Escape) => {
+                            Some(Message::TabDragCancel)
+                        }
+                        _ => None,
                     }
-                    _ => None,
-                }
-            } else {
-                match key {
-                    Key::Named(iced::keyboard::key::Named::Escape) => Some(Message::TabDragCancel),
-                    _ => None,
                 }
             }
+            _ => None,
         });
 
         let mut subs = vec![fast_tick, status_tick, keyboard, ipc_sub];
@@ -709,8 +723,7 @@ impl KromaApp {
         // Video playback tick (~24 fps) — only active when playing
         if self.video_player.as_ref().map_or(false, |p| p.playing) {
             subs.push(
-                iced::time::every(std::time::Duration::from_millis(42))
-                    .map(|_| Message::VideoTick),
+                iced::time::every(std::time::Duration::from_millis(42)).map(|_| Message::VideoTick),
             );
         }
 
@@ -780,7 +793,12 @@ impl KromaApp {
                 self.screen = AppScreen::Designer;
             }
             Message::DesignerToggleComponent(comp) => {
-                if let Some(idx) = self.panel_designer.components.iter().position(|c| c.component == comp) {
+                if let Some(idx) = self
+                    .panel_designer
+                    .components
+                    .iter()
+                    .position(|c| c.component == comp)
+                {
                     self.panel_designer.components.remove(idx);
                     // Clear selection if removed
                     if self.panel_designer.selected == Some(idx) {
@@ -791,7 +809,9 @@ impl KromaApp {
                         }
                     }
                 } else {
-                    self.panel_designer.components.push(panels::designer::PlacedComponent::new(comp));
+                    self.panel_designer
+                        .components
+                        .push(panels::designer::PlacedComponent::new(comp));
                 }
             }
             Message::DesignerRemoveComponent(idx) => {
@@ -900,7 +920,10 @@ impl KromaApp {
                                     self.video_player = Some(player);
                                 }
                                 Err(e) => {
-                                    self.toast(ToastLevel::Error, format!("Video open failed: {}", e));
+                                    self.toast(
+                                        ToastLevel::Error,
+                                        format!("Video open failed: {}", e),
+                                    );
                                 }
                             }
                         }
@@ -1084,10 +1107,7 @@ impl KromaApp {
                     },
                     None => &mut self.shade_graph,
                 };
-                match self
-                    .command_history
-                    .undo(eg, sg)
-                {
+                match self.command_history.undo(eg, sg) {
                     Ok(true) => {
                         let desc = self
                             .command_history
@@ -1123,10 +1143,7 @@ impl KromaApp {
                     },
                     None => &mut self.shade_graph,
                 };
-                match self
-                    .command_history
-                    .redo(eg, sg)
-                {
+                match self.command_history.redo(eg, sg) {
                     Ok(true) => {
                         let desc = self
                             .command_history
@@ -1546,14 +1563,16 @@ impl KromaApp {
 
     /// Fullscreen intro/welcome screen.
     fn view_intro(&self) -> Element<'_, Message> {
-        use iced::widget::{button, column, container, horizontal_rule, row, text, Space};
+        use iced::widget::{button, column, container, row, rule, text, Space};
         use iced::{alignment, Border, Color, Fill, Padding};
 
         let tokens = &self.theme_tokens;
 
         let logo = column![
             text("KROMA").size(52).color(tokens.text_accent),
-            text("Wallpaper Engine").size(16).color(tokens.text_secondary),
+            text("Wallpaper Engine")
+                .size(16)
+                .color(tokens.text_secondary),
         ]
         .spacing(4)
         .align_x(alignment::Horizontal::Center);
@@ -1588,7 +1607,9 @@ impl KromaApp {
         let btn_new = button(
             column![
                 text("New Shade Project").size(18).color(txt),
-                text("Create a new wallpaper shader from scratch").size(12).color(accent),
+                text("Create a new wallpaper shader from scratch")
+                    .size(12)
+                    .color(accent),
             ]
             .spacing(4)
             .padding(Padding::from([12, 24]))
@@ -1600,7 +1621,9 @@ impl KromaApp {
         let btn_open = button(
             column![
                 text("Open Existing Project").size(18).color(txt),
-                text("Open a .shade package or config.toml").size(12).color(accent),
+                text("Open a .shade package or config.toml")
+                    .size(12)
+                    .color(accent),
             ]
             .spacing(4)
             .padding(Padding::from([12, 24]))
@@ -1612,7 +1635,9 @@ impl KromaApp {
         let btn_import = button(
             column![
                 text("Import from Shadertoy").size(18).color(txt),
-                text("Download and convert a Shadertoy shader").size(12).color(accent),
+                text("Download and convert a Shadertoy shader")
+                    .size(12)
+                    .color(accent),
             ]
             .spacing(4)
             .padding(Padding::from([12, 24]))
@@ -1624,7 +1649,9 @@ impl KromaApp {
         let btn_designer = button(
             column![
                 text("Simple Designer").size(18).color(txt),
-                text("Build a wallpaper from premade components").size(12).color(accent),
+                text("Build a wallpaper from premade components")
+                    .size(12)
+                    .color(accent),
             ]
             .spacing(4)
             .padding(Padding::from([12, 24]))
@@ -1634,8 +1661,8 @@ impl KromaApp {
         .style(intro_btn_style);
 
         let actions = column![btn_new, btn_open, btn_import, btn_designer,]
-        .spacing(12)
-        .align_x(alignment::Horizontal::Center);
+            .spacing(12)
+            .align_x(alignment::Horizontal::Center);
 
         // Daemon status indicator
         let status_color = if self.daemon_connected {
@@ -1649,15 +1676,14 @@ impl KromaApp {
             "Daemon Offline"
         };
         let status = row![
-            container(Space::new(8, 8))
-                .style(move |_: &Theme| container::Style {
-                    background: Some(iced::Background::Color(status_color)),
-                    border: Border {
-                        radius: 4.0.into(),
-                        ..Default::default()
-                    },
+            container(Space::new().width(8).height(8)).style(move |_: &Theme| container::Style {
+                background: Some(iced::Background::Color(status_color)),
+                border: Border {
+                    radius: 4.0.into(),
                     ..Default::default()
-                }),
+                },
+                ..Default::default()
+            }),
             text(status_label).size(12).color(tokens.text_secondary),
         ]
         .spacing(6)
@@ -1665,11 +1691,11 @@ impl KromaApp {
 
         let center_content = column![
             logo,
-            Space::new(0, 16),
-            horizontal_rule(1),
-            Space::new(0, 24),
+            Space::new().width(0).height(16),
+            rule::horizontal(1),
+            Space::new().width(0).height(24),
             actions,
-            Space::new(0, 32),
+            Space::new().width(0).height(32),
             status,
             version,
         ]

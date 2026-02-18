@@ -3,7 +3,8 @@
 //! This panel handles both the standalone editor's text mode and the
 //! shade package editor's code view for shader.frag / config.toml.
 
-use iced::widget::{column, container, horizontal_space, row, scrollable, text};
+use iced::widget::space::horizontal;
+use iced::widget::{column, container, row, scrollable, text};
 use iced::{Border, Element, Fill, Length, Padding, Theme};
 
 use crate::icons;
@@ -54,7 +55,7 @@ impl Panel for CodeEditorPanel {
                 } else {
                     btn_secondary(live_label, Message::EditorToggleLive, t)
                 },
-                horizontal_space(),
+                horizontal(),
                 text(mode_label).size(10),
             ]
             .spacing(4)
@@ -135,8 +136,13 @@ pub fn build_error_panel<'a>(ctx: AppContext<'a>) -> Option<Element<'a, Message>
             };
             error_col = error_col.push(
                 row![
-                    text(icons::ERROR).font(icons::ICON_FONT).size(11).color(t.error),
-                    text(format!(" {}{}", loc, err.message)).size(11).color(t.error),
+                    text(icons::ERROR)
+                        .font(icons::ICON_FONT)
+                        .size(11)
+                        .color(t.error),
+                    text(format!(" {}{}", loc, err.message))
+                        .size(11)
+                        .color(t.error),
                 ]
                 .spacing(4)
                 .align_y(iced::Alignment::Center),
@@ -145,7 +151,10 @@ pub fn build_error_panel<'a>(ctx: AppContext<'a>) -> Option<Element<'a, Message>
         for w in ctx.compile_warnings {
             error_col = error_col.push(
                 row![
-                    text(icons::WARNING).font(icons::ICON_FONT).size(11).color(t.warning),
+                    text(icons::WARNING)
+                        .font(icons::ICON_FONT)
+                        .size(11)
+                        .color(t.warning),
                     text(format!(" {}", w)).size(11).color(t.warning),
                 ]
                 .spacing(4)
@@ -183,7 +192,10 @@ pub fn build_error_panel<'a>(ctx: AppContext<'a>) -> Option<Element<'a, Message>
         for w in ctx.compile_warnings {
             warn_col = warn_col.push(
                 row![
-                    text(icons::WARNING).font(icons::ICON_FONT).size(11).color(t.warning),
+                    text(icons::WARNING)
+                        .font(icons::ICON_FONT)
+                        .size(11)
+                        .color(t.warning),
                     text(format!(" {}", w)).size(11).color(t.warning),
                 ]
                 .spacing(4)

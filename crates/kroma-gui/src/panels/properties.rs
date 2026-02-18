@@ -51,11 +51,13 @@ impl Panel for PropertiesPanel {
                 )
                 .on_input(Message::ShadeTargetFps)
                 .size(t.font_size_sm),
-                checkbox("Pause offscreen", cfg.rendering.pause_offscreen)
+                checkbox(cfg.rendering.pause_offscreen)
+                    .label("Pause offscreen")
                     .on_toggle(Message::ShadePauseOffscreen)
                     .size(t.font_size_md)
                     .text_size(t.font_size_sm),
-                checkbox("Pause on fullscreen", cfg.rendering.pause_fullscreen)
+                checkbox(cfg.rendering.pause_fullscreen)
+                    .label("Pause on fullscreen")
                     .on_toggle(Message::ShadePauseFullscreen)
                     .size(t.font_size_md)
                     .text_size(t.font_size_sm),
@@ -68,7 +70,8 @@ impl Panel for PropertiesPanel {
         let audio = card(
             "Audio",
             column![
-                checkbox("Enable audio", cfg.audio.enabled)
+                checkbox(cfg.audio.enabled)
+                    .label("Enable audio")
                     .on_toggle(Message::ShadeAudioEnabled)
                     .size(t.font_size_md)
                     .text_size(t.font_size_sm),

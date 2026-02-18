@@ -152,45 +152,44 @@ fn build_subgraph_tree<'a>(
     let active_text = t.text_primary;
     let normal_text = t.text_primary;
     items.push(
-        button(
-            text(if is_at_root {
-                "[-] Root"
-            } else {
-                "[+] Root"
+        button(text(if is_at_root { "[-] Root" } else { "[+] Root" }).size(11))
+            .width(Fill)
+            .padding(iced::Padding::from([3, 6]))
+            .on_press(Message::EditorGraph(
+                editor::canvas::GraphMessage::ExitSubGraph,
+            ))
+            .style(move |_theme: &Theme, _| {
+                if root_style == "strong" {
+                    button::Style {
+                        background: Some(active_bg.into()),
+                        text_color: active_text,
+                        border: Border::default().rounded(3),
+                        ..Default::default()
+                    }
+                } else {
+                    button::Style {
+                        background: None,
+                        text_color: normal_text,
+                        border: Border::default().rounded(3),
+                        ..Default::default()
+                    }
+                }
             })
-            .size(11),
-        )
-        .width(Fill)
-        .padding(iced::Padding::from([3, 6]))
-        .on_press(Message::EditorGraph(
-            editor::canvas::GraphMessage::ExitSubGraph,
-        ))
-        .style(move |_theme: &Theme, _| {
-            if root_style == "strong" {
-                button::Style {
-                    background: Some(active_bg.into()),
-                    text_color: active_text,
-                    border: Border::default().rounded(3),
-                    ..Default::default()
-                }
-            } else {
-                button::Style {
-                    background: None,
-                    text_color: normal_text,
-                    border: Border::default().rounded(3),
-                    ..Default::default()
-                }
-            }
-        })
-        .into(),
+            .into(),
     );
 
     // Sub-graph node entries
     for node in subgraph_nodes {
         let is_active = nav_path.last() == Some(&node.id);
         let icon_widget: Element<'a, Message> = match node.kind {
-            NodeKind::ForLoop => text(crate::icons::LOOP).font(crate::icons::ICON_FONT).size(10).into(),
-            NodeKind::Conditional => text(crate::icons::CONDITIONAL).font(crate::icons::ICON_FONT).size(10).into(),
+            NodeKind::ForLoop => text(crate::icons::LOOP)
+                .font(crate::icons::ICON_FONT)
+                .size(10)
+                .into(),
+            NodeKind::Conditional => text(crate::icons::CONDITIONAL)
+                .font(crate::icons::ICON_FONT)
+                .size(10)
+                .into(),
             NodeKind::CustomFunc => text("f").size(10).into(),
             _ => text("*").size(10).into(),
         };
@@ -207,29 +206,29 @@ fn build_subgraph_tree<'a>(
                     .spacing(2)
                     .align_y(iced::Alignment::Center),
             )
-                .width(Fill)
-                .padding(iced::Padding::from([2, 6]))
-                .on_press(Message::EditorGraph(
-                    editor::canvas::GraphMessage::EnterSubGraph(node.id),
-                ))
-                .style(move |_theme: &Theme, _| {
-                    if active_flag == "active" {
-                        button::Style {
-                            background: Some(sg_active_bg.into()),
-                            text_color: sg_active_text,
-                            border: Border::default().rounded(3),
-                            ..Default::default()
-                        }
-                    } else {
-                        button::Style {
-                            background: None,
-                            text_color: sg_normal_text,
-                            border: Border::default().rounded(3),
-                            ..Default::default()
-                        }
+            .width(Fill)
+            .padding(iced::Padding::from([2, 6]))
+            .on_press(Message::EditorGraph(
+                editor::canvas::GraphMessage::EnterSubGraph(node.id),
+            ))
+            .style(move |_theme: &Theme, _| {
+                if active_flag == "active" {
+                    button::Style {
+                        background: Some(sg_active_bg.into()),
+                        text_color: sg_active_text,
+                        border: Border::default().rounded(3),
+                        ..Default::default()
                     }
-                })
-                .into(),
+                } else {
+                    button::Style {
+                        background: None,
+                        text_color: sg_normal_text,
+                        border: Border::default().rounded(3),
+                        ..Default::default()
+                    }
+                }
+            })
+            .into(),
         );
     }
 
@@ -319,7 +318,7 @@ where
             cat_col = cat_col.push(btn);
         }
         palette_col = palette_col.push(cat_col);
-        palette_col = palette_col.push(Space::with_height(t.spacing_xs));
+        palette_col = palette_col.push(Space::new().height(t.spacing_xs));
     }
 
     let palette_bg = t.bg_tertiary;

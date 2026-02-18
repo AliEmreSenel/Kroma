@@ -1,8 +1,7 @@
 //! Shade Package Editor view methods (extracted from main.rs).
 
-use iced::widget::{
-    button, column, container, horizontal_space, row, scrollable, text, text_input, Space,
-};
+use iced::widget::space::horizontal;
+use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input, Space};
 use iced::{Border, Element, Fill, Padding, Theme};
 
 use crate::editor;
@@ -24,7 +23,7 @@ impl KromaApp {
         let header = container(
             row![
                 text("Shade Package Editor").size(18),
-                horizontal_space(),
+                horizontal(),
                 self.btn_secondary("New", Message::ShadeNew),
                 self.btn_secondary("Open", Message::ShadeOpen),
                 self.btn_primary("Save .shade", Message::ShadeSave),
@@ -70,10 +69,10 @@ impl KromaApp {
             .align_y(iced::Alignment::Center)
             .into(),
         );
-        items.push(Space::with_height(4).into());
+        items.push(Space::new().height(4).into());
         items.push(self.shade_tree_btn(icons::FILE, "config.toml", "config.toml"));
         items.push(self.shade_tree_btn(icons::CODE, "shader.frag", "shader.frag"));
-        items.push(Space::with_height(6).into());
+        items.push(Space::new().height(6).into());
         items.push(
             row![
                 text(icons::FOLDER).font(icons::ICON_FONT).size(12),
@@ -147,7 +146,7 @@ impl KromaApp {
                 );
             }
         }
-        items.push(Space::with_height(8).into());
+        items.push(Space::new().height(8).into());
         items.push(
             row![
                 self.btn_secondary("+ Asset", Message::ShadeAddAsset),
@@ -173,7 +172,12 @@ impl KromaApp {
     }
 
     /// File tree button for core shade files.
-    fn shade_tree_btn<'a>(&self, icon_cp: &'a str, label: &'a str, file_id: &'a str) -> Element<'a, Message> {
+    fn shade_tree_btn<'a>(
+        &self,
+        icon_cp: &'a str,
+        label: &'a str,
+        file_id: &'a str,
+    ) -> Element<'a, Message> {
         let is_sel = self.shade_selected_file.as_deref() == Some(file_id);
         let id_owned = file_id.to_string();
         let sel_bg = self.theme_tokens.bg_accent;
@@ -188,35 +192,35 @@ impl KromaApp {
             .spacing(4)
             .align_y(iced::Alignment::Center),
         )
-            .width(Fill)
-            .padding(Padding::from([4, 8]))
-            .on_press(Message::ShadeSelectFile(id_owned))
-            .style(move |_theme: &Theme, status| {
-                if is_sel {
-                    button::Style {
-                        background: Some(sel_bg.into()),
-                        text_color: sel_text,
+        .width(Fill)
+        .padding(Padding::from([4, 8]))
+        .on_press(Message::ShadeSelectFile(id_owned))
+        .style(move |_theme: &Theme, status| {
+            if is_sel {
+                button::Style {
+                    background: Some(sel_bg.into()),
+                    text_color: sel_text,
+                    border: Border::default().rounded(4),
+                    ..Default::default()
+                }
+            } else {
+                match status {
+                    button::Status::Hovered => button::Style {
+                        background: Some(hover_bg.into()),
+                        text_color,
                         border: Border::default().rounded(4),
                         ..Default::default()
-                    }
-                } else {
-                    match status {
-                        button::Status::Hovered => button::Style {
-                            background: Some(hover_bg.into()),
-                            text_color,
-                            border: Border::default().rounded(4),
-                            ..Default::default()
-                        },
-                        _ => button::Style {
-                            background: None,
-                            text_color,
-                            border: Border::default().rounded(4),
-                            ..Default::default()
-                        },
-                    }
+                    },
+                    _ => button::Style {
+                        background: None,
+                        text_color,
+                        border: Border::default().rounded(4),
+                        ..Default::default()
+                    },
                 }
-            })
-            .into()
+            }
+        })
+        .into()
     }
 
     /// Right panel: context-sensitive editor for the selected file.
@@ -266,7 +270,11 @@ impl KromaApp {
                     let palette = crate::panels::node_editor::build_node_palette(
                         "",
                         &self.theme_tokens,
-                        |kind| Message::ShadeGraphMsg(crate::editor::canvas::GraphMessage::SetPendingNode(kind)),
+                        |kind| {
+                            Message::ShadeGraphMsg(
+                                crate::editor::canvas::GraphMessage::SetPendingNode(kind),
+                            )
+                        },
                     );
                     row![palette, canvas].width(Fill).height(Fill).into()
                 } else {
@@ -302,7 +310,7 @@ impl KromaApp {
         let bar_bg = self.theme_tokens.bg_secondary;
         let mut items: Vec<Element<'_, Message>> = Vec::new();
         items.push(text(format!("Editing: {}", selected)).size(13).into());
-        items.push(horizontal_space().into());
+        items.push(horizontal().into());
         match selected {
             "config.toml" => {
                 if self.shade_edit_mode != "code" {
@@ -326,14 +334,10 @@ impl KromaApp {
                         items.push(self.btn_secondary(label, Message::ShadeEditMode(mode.into())));
                     }
                 }
-                items.push(Space::with_width(8).into());
+                items.push(Space::new().width(8).into());
                 if self.shade_edit_mode == "nodes" {
-                    items.push(
-                        self.btn_secondary("Compile -> GLSL", Message::ShadeCompileGraph),
-                    );
-                    items.push(
-                        self.btn_secondary("<- Parse GLSL", Message::ShadeParseToNodes),
-                    );
+                    items.push(self.btn_secondary("Compile -> GLSL", Message::ShadeCompileGraph));
+                    items.push(self.btn_secondary("<- Parse GLSL", Message::ShadeParseToNodes));
                 }
                 items.push(self.btn_primary("Send to Daemon", Message::ShadeSendToDaemon));
             }
@@ -370,9 +374,18 @@ impl KromaApp {
                 // Build "Bind to Channel" UI for bindable asset types
                 let is_bindable = matches!(
                     ext.as_str(),
-                    "jpg" | "jpeg" | "png" | "bmp" | "gif" | "webp"
-                        | "mp4" | "webm" | "avi" | "mkv"
-                        | "glsl" | "frag"
+                    "jpg"
+                        | "jpeg"
+                        | "png"
+                        | "bmp"
+                        | "gif"
+                        | "webp"
+                        | "mp4"
+                        | "webm"
+                        | "avi"
+                        | "mkv"
+                        | "glsl"
+                        | "frag"
                 );
                 let bind_section: Element<'_, Message> = if is_bindable {
                     // Find which channel this asset is already bound to (if any)
@@ -384,19 +397,24 @@ impl KromaApp {
                         .map(|(name, t)| (name.clone(), t.binding.unwrap_or(0)));
 
                     let mut bind_items: Vec<Element<'_, Message>> = Vec::new();
-                    bind_items.push(Space::with_height(12).into());
+                    bind_items.push(Space::new().height(12).into());
 
                     if let Some((ref ch_name, _idx)) = current_binding {
                         bind_items.push(
                             row![
-                                text(icons::CHECK).font(icons::ICON_FONT).size(13).color(self.theme_tokens.success),
-                                text(format!("Currently bound to: {}", ch_name)).size(13).color(self.theme_tokens.success),
+                                text(icons::CHECK)
+                                    .font(icons::ICON_FONT)
+                                    .size(13)
+                                    .color(self.theme_tokens.success),
+                                text(format!("Currently bound to: {}", ch_name))
+                                    .size(13)
+                                    .color(self.theme_tokens.success),
                             ]
                             .spacing(4)
                             .align_y(iced::Alignment::Center)
                             .into(),
                         );
-                        bind_items.push(Space::with_height(4).into());
+                        bind_items.push(Space::new().height(4).into());
                     }
 
                     bind_items.push(text("Bind to texture channel:").size(12).into());
@@ -408,8 +426,8 @@ impl KromaApp {
                             .as_ref()
                             .map(|(_n, idx)| *idx == ch)
                             .unwrap_or(false);
-                        let is_occupied = self.shade_config.textures.get(&ch_name).is_some()
-                            && !is_current;
+                        let is_occupied =
+                            self.shade_config.textures.get(&ch_name).is_some() && !is_current;
                         let label = if is_current {
                             format!("[v] Ch{}", ch)
                         } else if is_occupied {
@@ -418,9 +436,7 @@ impl KromaApp {
                                 .textures
                                 .get(&ch_name)
                                 .and_then(|t| t.source.as_ref())
-                                .map(|s| {
-                                    s.rsplit('/').next().unwrap_or(s).to_string()
-                                })
+                                .map(|s| s.rsplit('/').next().unwrap_or(s).to_string())
                                 .unwrap_or_else(|| "used".into());
                             format!("Ch{} ({})", ch, occ_src)
                         } else {
@@ -466,13 +482,19 @@ impl KromaApp {
                                         button::Status::Hovered => button::Style {
                                             background: Some(hover.into()),
                                             text_color: txt,
-                                            border: Border::default().rounded(6).width(1).color(bdr),
+                                            border: Border::default()
+                                                .rounded(6)
+                                                .width(1)
+                                                .color(bdr),
                                             ..Default::default()
                                         },
                                         _ => button::Style {
                                             background: Some(bg.into()),
                                             text_color: txt,
-                                            border: Border::default().rounded(6).width(1).color(bdr),
+                                            border: Border::default()
+                                                .rounded(6)
+                                                .width(1)
+                                                .color(bdr),
                                             ..Default::default()
                                         },
                                     })
@@ -489,7 +511,7 @@ impl KromaApp {
 
                     column(bind_items).spacing(4).into()
                 } else {
-                    Space::with_height(0).into()
+                    Space::new().height(0).into()
                 };
 
                 let content: Element<'_, Message> = match ext.as_str() {
@@ -508,9 +530,11 @@ impl KromaApp {
                         row![
                             text(icons::IMAGE).font(icons::ICON_FONT).size(16),
                             text(format!("Image Asset: {}", short)).size(16),
-                        ].spacing(4).align_y(iced::Alignment::Center),
+                        ]
+                        .spacing(4)
+                        .align_y(iced::Alignment::Center),
                         text(format!("Size: {}", size_str)).size(13),
-                        Space::with_height(8),
+                        Space::new().height(8),
                         text("Image preview not available in editor").size(11),
                         bind_section,
                     ]
@@ -520,9 +544,11 @@ impl KromaApp {
                         row![
                             text(icons::VIDEO).font(icons::ICON_FONT).size(16),
                             text(format!("Video Asset: {}", short)).size(16),
-                        ].spacing(4).align_y(iced::Alignment::Center),
+                        ]
+                        .spacing(4)
+                        .align_y(iced::Alignment::Center),
                         text(format!("Size: {}", size_str)).size(13),
-                        Space::with_height(8),
+                        Space::new().height(8),
                         text("Video preview not available in editor").size(11),
                         bind_section,
                     ]
@@ -532,9 +558,11 @@ impl KromaApp {
                         row![
                             text(icons::FONT).font(icons::ICON_FONT).size(16),
                             text(format!("Font Asset: {}", short)).size(16),
-                        ].spacing(4).align_y(iced::Alignment::Center),
+                        ]
+                        .spacing(4)
+                        .align_y(iced::Alignment::Center),
                         text(format!("Size: {}", size_str)).size(13),
-                        Space::with_height(8),
+                        Space::new().height(8),
                         text("Font preview not available in editor").size(11),
                         text("Use this font in textures with type = \"font\"").size(11),
                     ]
@@ -544,7 +572,9 @@ impl KromaApp {
                         row![
                             text(icons::AUDIO).font(icons::ICON_FONT).size(16),
                             text(format!("Audio Asset: {}", short)).size(16),
-                        ].spacing(4).align_y(iced::Alignment::Center),
+                        ]
+                        .spacing(4)
+                        .align_y(iced::Alignment::Center),
                         text(format!("Size: {}", size_str)).size(13),
                     ]
                     .spacing(6)
@@ -553,7 +583,9 @@ impl KromaApp {
                         row![
                             text(icons::FILE).font(icons::ICON_FONT).size(16),
                             text(format!("File: {}", short)).size(16),
-                        ].spacing(4).align_y(iced::Alignment::Center),
+                        ]
+                        .spacing(4)
+                        .align_y(iced::Alignment::Center),
                         text(format!("Size: {}", size_str)).size(13),
                     ]
                     .spacing(6)
@@ -613,16 +645,12 @@ impl KromaApp {
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
                 row![
-                    iced::widget::checkbox(
-                        "Pause when offscreen",
-                        self.shade_config.rendering.pause_offscreen
-                    )
-                    .on_toggle(Message::ShadePauseOffscreen),
-                    iced::widget::checkbox(
-                        "Pause on fullscreen app",
-                        self.shade_config.rendering.pause_fullscreen
-                    )
-                    .on_toggle(Message::ShadePauseFullscreen),
+                    checkbox(self.shade_config.rendering.pause_offscreen)
+                        .label("Pause when offscreen")
+                        .on_toggle(Message::ShadePauseOffscreen),
+                    checkbox(self.shade_config.rendering.pause_fullscreen)
+                        .label("Pause on fullscreen app")
+                        .on_toggle(Message::ShadePauseFullscreen),
                 ]
                 .spacing(16),
             ]
@@ -630,10 +658,11 @@ impl KromaApp {
         );
 
         // Audio section
-        let audio = self.card(
-            "Audio",
-            column![
-                iced::widget::checkbox("Enable audio capture", self.shade_config.audio.enabled)
+        let audio =
+            self.card(
+                "Audio",
+                column![
+                checkbox(self.shade_config.audio.enabled).label("Enable audio capture")
                     .on_toggle(Message::ShadeAudioEnabled),
                 row![
                     text("Source:").size(13).width(80),
@@ -650,8 +679,8 @@ impl KromaApp {
                 text("Select an audio source from the system, or 'default' for the default device.")
                     .size(11),
             ]
-            .spacing(8),
-        );
+                .spacing(8),
+            );
 
         // Uniforms section
         let mut uniform_items: Vec<Element<'_, Message>> = Vec::new();
@@ -798,7 +827,8 @@ impl KromaApp {
                         .size(12)
                         .on_input(move |v| Message::ShadeBufferShaderChanged(buf_name.clone(), v))
                         .width(Fill),
-                    iced::widget::checkbox("Feedback", buf_def.feedback)
+                    checkbox(buf_def.feedback)
+                        .label("Feedback")
                         .on_toggle(move |_| Message::ShadeBufferFeedbackToggled(buf_name2.clone()))
                         .size(14),
                     button(text("Remove").size(11))
@@ -812,7 +842,8 @@ impl KromaApp {
         }
         if self.shade_config.buffers.len() < 4 {
             buffer_items.push(
-                self.btn_secondary("+ Add Buffer", Message::ShadeAddBuffer).into(),
+                self.btn_secondary("+ Add Buffer", Message::ShadeAddBuffer)
+                    .into(),
             );
         }
         buffer_items.push(
@@ -896,9 +927,11 @@ pub fn view_shade_settings_inline<'a>(ctx: crate::panels::AppContext<'a>) -> Ele
                     .width(80),
             ]
             .spacing(8),
-            iced::widget::checkbox("Pause offscreen", cfg.rendering.pause_offscreen)
+            checkbox(cfg.rendering.pause_offscreen)
+                .label("Pause offscreen")
                 .on_toggle(Message::ShadePauseOffscreen),
-            iced::widget::checkbox("Pause fullscreen", cfg.rendering.pause_fullscreen)
+            checkbox(cfg.rendering.pause_fullscreen)
+                .label("Pause fullscreen")
                 .on_toggle(Message::ShadePauseFullscreen),
         ]
         .spacing(8),
@@ -909,7 +942,8 @@ pub fn view_shade_settings_inline<'a>(ctx: crate::panels::AppContext<'a>) -> Ele
     let audio = card(
         "Audio",
         column![
-            iced::widget::checkbox("Enable audio", cfg.audio.enabled)
+            checkbox(cfg.audio.enabled)
+                .label("Enable audio")
                 .on_toggle(Message::ShadeAudioEnabled),
             row![
                 text("Source:").size(13).width(80),
@@ -928,13 +962,10 @@ pub fn view_shade_settings_inline<'a>(ctx: crate::panels::AppContext<'a>) -> Ele
     );
 
     scrollable(
-        column![
-            row![meta, render].spacing(16),
-            audio,
-        ]
-        .spacing(12)
-        .padding(t.spacing_md)
-        .width(Fill),
+        column![row![meta, render].spacing(16), audio,]
+            .spacing(12)
+            .padding(t.spacing_md)
+            .width(Fill),
     )
     .width(Fill)
     .height(Fill)

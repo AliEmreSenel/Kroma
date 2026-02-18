@@ -13,6 +13,8 @@ use kroma_shared::types::{ShaderUniforms, TextureDef};
 use wgpu::wgt::PollType;
 use wgpu::{FilterMode, MipmapFilterMode};
 
+use crate::audio::SPECTRUM_BANDS;
+
 /// Default fullscreen triangle vertex shader (WGSL).
 ///
 /// Draws a full-screen triangle with UVs — the fragment shader does the rest.
@@ -716,6 +718,7 @@ impl RenderState {
     pub fn load_shade(&mut self, pkg: LiveShadePackage) -> Result<LoadResult> {
         // Reset slideshow state
         self.slideshow = None;
+        self.textures.clear();
         // Clear any existing buffer passes from the previous shader
         self.buffer_passes.clear();
 
@@ -764,7 +767,7 @@ impl RenderState {
                 "placeholde-slide",
             );
             self.textures.push(placeholder);
-            self.build_texture_bind_group()?;
+            self.load_package_textures(&pkg, false)?;
 
             info!(
                 "Slideshow initialized: {} textures, {:.1}s interval",
@@ -772,7 +775,7 @@ impl RenderState {
             );
         } else {
             // Load all textures from package assets (images, fonts, etc.)
-            self.load_package_textures(&pkg)?;
+            self.load_package_textures(&pkg, true)?;
         }
 
         // Initialize custom uniforms (creates storage buffer + rebuilds BGL0).
@@ -1294,14 +1297,13 @@ impl RenderState {
     }
 
     /// Load all textures referenced by a shade package's config.
-    fn load_package_textures(&mut self, pkg: &LiveShadePackage) -> Result<()> {
+    fn load_package_textures(&mut self, pkg: &LiveShadePackage, load_texs: bool) -> Result<()> {
         let device = self
             .device
             .as_ref()
             .context("GPU not initialised — cannot load textures")?;
         let queue = self.queue.as_ref().context("GPU queue not initialised")?;
 
-        self.textures.clear();
         self.audio_spectrum = None; // Important: Clear old spectrum
         self.texture_bind_group = None;
         self.texture_bind_group_layout = None;
@@ -1310,10 +1312,12 @@ impl RenderState {
         let mut tex_defs: Vec<_> = pkg.config.textures.iter().collect();
         tex_defs.sort_by_key(|(_, def)| def.binding.unwrap_or(u32::MAX));
 
-        for (name, def) in &tex_defs {
-            match self.load_texture(device, queue, name, pkg, def) {
-                Some(tex) => self.textures.push(tex),
-                None => (),
+        if load_texs {
+            for (name, def) in &tex_defs {
+                match self.load_texture(device, queue, name, pkg, def) {
+                    Some(tex) => self.textures.push(tex),
+                    None => (),
+                }
             }
         }
 
@@ -1524,8 +1528,8 @@ impl RenderState {
     pub fn update_audio_spectrum(&mut self, spectrum: &[f32]) {
         if let (Some(ref audio), Some(queue)) = (&self.audio_spectrum, self.queue.as_ref()) {
             // Ensure exactly 512 values
-            let mut padded = [0.0f32; 512];
-            let len = spectrum.len().min(512);
+            let mut padded = [0.0f32; SPECTRUM_BANDS];
+            let len = spectrum.len().min(SPECTRUM_BANDS);
             padded[..len].copy_from_slice(&spectrum[..len]);
 
             queue.write_texture(
@@ -2078,7 +2082,7 @@ impl RenderState {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(PollType::wait_indefinitely());
+        let _ = device.poll(PollType::wait_indefinitely())?;
 
         rx.recv()
             .map_err(|_| anyhow::anyhow!("Buffer map channel closed"))?

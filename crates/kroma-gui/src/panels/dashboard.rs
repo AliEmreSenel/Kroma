@@ -1,6 +1,6 @@
 //! Dashboard panel — daemon status, FPS, quick actions, event log.
 
-use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::widget::{button, column, container, progress_bar, row, scrollable, text, Space};
 use iced::{Border, Element, Fill, Padding, Theme};
 
 use crate::panels::{AppContext, Panel};
@@ -41,7 +41,7 @@ impl Panel for DashboardPanel {
             "Performance",
             column![
                 text(format!("FPS: {}", fps_display)).size(t.font_size_lg),
-                iced::widget::progress_bar(0.0..=120.0, ctx.fps).width(Fill),
+                progress_bar(0.0..=120.0, ctx.fps).length(Fill),
             ]
             .spacing(t.spacing_sm),
             t,
@@ -149,7 +149,7 @@ pub fn card<'a>(
     let pad = tokens.spacing_md;
     container(column![
         text(title).size(title_size),
-        Space::with_height(tokens.spacing_sm),
+        Space::new().height(tokens.spacing_sm),
         content.into(),
     ])
     .width(Fill)

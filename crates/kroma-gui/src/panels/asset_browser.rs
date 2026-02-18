@@ -44,13 +44,13 @@ impl Panel for AssetBrowserPanel {
             .align_y(iced::Alignment::Center)
             .into(),
         );
-        items.push(Space::with_height(4).into());
+        items.push(Space::new().height(4).into());
 
         // Core shade files
         items.push(tree_btn("config.toml", ctx.shade_selected_file, t));
         items.push(tree_btn("shader.frag", ctx.shade_selected_file, t));
 
-        items.push(Space::with_height(6).into());
+        items.push(Space::new().height(6).into());
         items.push(
             row![
                 text(icons::FOLDER).font(icons::ICON_FONT).size(12),
@@ -93,36 +93,38 @@ impl Panel for AssetBrowserPanel {
                             row![
                                 text(icon).font(icons::ICON_FONT).size(11),
                                 text(format!(" {}{}", short, sz)).size(11),
-                            ].spacing(2).align_y(iced::Alignment::Center)
+                            ]
+                            .spacing(2)
+                            .align_y(iced::Alignment::Center)
                         )
-                            .width(Fill)
-                            .padding(Padding::from([3, 6]))
-                            .on_press(Message::ShadeSelectFile(name_c))
-                            .style(move |_theme: &Theme, status| {
-                                if is_sel {
-                                    button::Style {
-                                        background: Some(sel_bg.into()),
-                                        text_color: sel_text,
+                        .width(Fill)
+                        .padding(Padding::from([3, 6]))
+                        .on_press(Message::ShadeSelectFile(name_c))
+                        .style(move |_theme: &Theme, status| {
+                            if is_sel {
+                                button::Style {
+                                    background: Some(sel_bg.into()),
+                                    text_color: sel_text,
+                                    border: Border::default().rounded(4),
+                                    ..Default::default()
+                                }
+                            } else {
+                                match status {
+                                    button::Status::Hovered => button::Style {
+                                        background: Some(hover_bg.into()),
+                                        text_color: normal_text,
                                         border: Border::default().rounded(4),
                                         ..Default::default()
-                                    }
-                                } else {
-                                    match status {
-                                        button::Status::Hovered => button::Style {
-                                            background: Some(hover_bg.into()),
-                                            text_color: normal_text,
-                                            border: Border::default().rounded(4),
-                                            ..Default::default()
-                                        },
-                                        _ => button::Style {
-                                            background: None,
-                                            text_color: normal_text,
-                                            border: Border::default().rounded(4),
-                                            ..Default::default()
-                                        },
-                                    }
+                                    },
+                                    _ => button::Style {
+                                        background: None,
+                                        text_color: normal_text,
+                                        border: Border::default().rounded(4),
+                                        ..Default::default()
+                                    },
                                 }
-                            }),
+                            }
+                        }),
                         button(text("X").size(10))
                             .padding(Padding::from([2, 6]))
                             .on_press(Message::ShadeRemoveAsset(remove_c))
@@ -140,7 +142,7 @@ impl Panel for AssetBrowserPanel {
             }
         }
 
-        items.push(Space::with_height(8).into());
+        items.push(Space::new().height(8).into());
 
         // Drop zone indicator when a file is being dragged over the window
         if ctx.drop_hover_active {
@@ -161,7 +163,7 @@ impl Panel for AssetBrowserPanel {
                 })
                 .into(),
             );
-            items.push(Space::with_height(4).into());
+            items.push(Space::new().height(4).into());
         }
 
         items.push(
@@ -210,35 +212,37 @@ fn tree_btn<'a>(
         row![
             text(icons::FILE).font(icons::ICON_FONT).size(12),
             text(format!(" {}", file_id)).size(12),
-        ].spacing(2).align_y(iced::Alignment::Center)
+        ]
+        .spacing(2)
+        .align_y(iced::Alignment::Center),
     )
-        .width(Fill)
-        .padding(Padding::from([4, 8]))
-        .on_press(Message::ShadeSelectFile(id_owned))
-        .style(move |_theme: &Theme, status| {
-            if is_sel {
-                button::Style {
-                    background: Some(sel_bg.into()),
-                    text_color: sel_text,
+    .width(Fill)
+    .padding(Padding::from([4, 8]))
+    .on_press(Message::ShadeSelectFile(id_owned))
+    .style(move |_theme: &Theme, status| {
+        if is_sel {
+            button::Style {
+                background: Some(sel_bg.into()),
+                text_color: sel_text,
+                border: Border::default().rounded(4),
+                ..Default::default()
+            }
+        } else {
+            match status {
+                button::Status::Hovered => button::Style {
+                    background: Some(hover_bg.into()),
+                    text_color: normal_text,
                     border: Border::default().rounded(4),
                     ..Default::default()
-                }
-            } else {
-                match status {
-                    button::Status::Hovered => button::Style {
-                        background: Some(hover_bg.into()),
-                        text_color: normal_text,
-                        border: Border::default().rounded(4),
-                        ..Default::default()
-                    },
-                    _ => button::Style {
-                        background: None,
-                        text_color: normal_text,
-                        border: Border::default().rounded(4),
-                        ..Default::default()
-                    },
-                }
+                },
+                _ => button::Style {
+                    background: None,
+                    text_color: normal_text,
+                    border: Border::default().rounded(4),
+                    ..Default::default()
+                },
             }
-        })
-        .into()
+        }
+    })
+    .into()
 }

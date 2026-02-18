@@ -86,7 +86,7 @@ impl Panel for LibraryPanel {
                         .align_y(iced::Alignment::Center),
                         row![
                             text(&entry.size_str).size(10),
-                            Space::with_width(Fill),
+                            Space::new().width(Fill),
                             button(text("Edit").size(10))
                                 .on_press(Message::ShadeOpenResult(Some(edit_path)))
                                 .padding(Padding::from([2, 8]))

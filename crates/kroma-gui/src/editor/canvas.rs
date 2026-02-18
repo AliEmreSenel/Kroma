@@ -4,8 +4,10 @@
 //! as smooth Bézier curves.  Supports drag-to-move, drag-to-connect,
 //! and selection.
 
-use iced::mouse;
-use iced::widget::canvas::{self, Canvas, Event, Frame, Geometry, Path, Stroke, Text};
+use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke, Text};
+use iced::widget::text::Alignment;
+use iced::widget::Action;
+use iced::{mouse, Event};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
 use std::collections::HashSet;
 
@@ -292,7 +294,7 @@ fn draw_node(
             position: Point::new(x + w - 20.0 * zoom, y + 6.0 * zoom),
             color: Color::from_rgba(1.0, 1.0, 1.0, 0.5),
             size: iced::Pixels(10.0 * zoom),
-            horizontal_alignment: iced::alignment::Horizontal::Right,
+            align_x: Alignment::Right,
             ..Text::default()
         };
         frame.fill_text(icon);
@@ -360,7 +362,7 @@ fn draw_node(
             position: Point::new(x + w - 10.0 * zoom, py - 6.0 * zoom),
             color: Color::from_rgb(0.8, 0.8, 0.8),
             size: iced::Pixels(small_font),
-            horizontal_alignment: iced::alignment::Horizontal::Right,
+            align_x: Alignment::Right,
             ..Text::default()
         };
         frame.fill_text(port_label);
@@ -415,12 +417,12 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
     fn update(
         &self,
         state: &mut Self::State,
-        event: Event,
+        event: &Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-    ) -> (canvas::event::Status, Option<GraphMessage>) {
+    ) -> Option<Action<GraphMessage>> {
         let Some(cursor_pos) = cursor.position_in(bounds) else {
-            return (canvas::event::Status::Ignored, None);
+            return None;
         };
 
         let offset = self.canvas_state.offset;
@@ -431,7 +433,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 let scroll_y = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => y,
-                    mouse::ScrollDelta::Pixels { y, .. } => y / 80.0,
+                    mouse::ScrollDelta::Pixels { y, .. } => &(y / 80.0),
                 };
 
                 // Check if hovering over an input port — adjust default value
@@ -470,11 +472,11 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                                             clamp(v[3] + step),
                                         ]),
                                     };
-                                    return (
-                                        canvas::event::Status::Captured,
-                                        Some(GraphMessage::DefaultChanged(
+                                    return Some(
+                                        Action::publish(GraphMessage::DefaultChanged(
                                             node_id, port_idx, new_def,
-                                        )),
+                                        ))
+                                        .and_capture(),
                                     );
                                 }
                             }
@@ -483,7 +485,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 }
 
                 // Otherwise: zoom
-                let factor = if scroll_y > 0.0 { 1.1 } else { 1.0 / 1.1 };
+                let factor = if *scroll_y > 0.0 { 1.1 } else { 1.0 / 1.1 };
                 let new_zoom = (zoom * factor).clamp(0.15, 5.0);
                 let world_x = (cursor_pos.x - offset.x) / zoom;
                 let world_y = (cursor_pos.y - offset.y) / zoom;
@@ -491,10 +493,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                     cursor_pos.x - world_x * new_zoom,
                     cursor_pos.y - world_y * new_zoom,
                 );
-                (
-                    canvas::event::Status::Captured,
-                    Some(GraphMessage::Zoomed(new_zoom, new_offset)),
-                )
+                Some(Action::publish(GraphMessage::Zoomed(new_zoom, new_offset)).and_capture())
             }
 
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
@@ -510,9 +509,9 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                     if let Some((node_id, port_idx)) =
                         self.hit_test_value_pill(cursor_pos, offset, zoom)
                     {
-                        return (
-                            canvas::event::Status::Captured,
-                            Some(GraphMessage::StartEditValue(node_id, port_idx)),
+                        return Some(
+                            Action::publish(GraphMessage::StartEditValue(node_id, port_idx))
+                                .and_capture(),
                         );
                     }
                 }
@@ -530,22 +529,21 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                             from_pos: port_pos,
                             end: cursor_pos,
                         };
-                        return (canvas::event::Status::Captured, None);
+                        return Some(Action::capture());
                     }
                 }
 
                 // Check if clicking on a wire (connection)
                 if let Some(conn_id) = self.hit_test_wire(cursor_pos, offset, zoom) {
-                    return (
-                        canvas::event::Status::Captured,
-                        Some(GraphMessage::ConnectionDeleted(conn_id)),
+                    return Some(
+                        Action::publish(GraphMessage::ConnectionDeleted(conn_id)).and_capture(),
                     );
                 }
 
                 // Check if clicking on a node
                 if let Some(node_id) = self.hit_test_node(cursor_pos, offset, zoom) {
                     let Some(node) = self.graph.node(node_id) else {
-                        return (canvas::event::Status::Ignored, None);
+                        return None;
                     };
 
                     // Double-click detection for sub-graph nodes
@@ -557,9 +555,9 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                         if let Some((last_time, last_id)) = state.last_click {
                             if last_id == node_id && last_time.elapsed().as_millis() < 400 {
                                 state.last_click = None;
-                                return (
-                                    canvas::event::Status::Captured,
-                                    Some(GraphMessage::EnterSubGraph(node_id)),
+                                return Some(
+                                    Action::publish(GraphMessage::EnterSubGraph(node_id))
+                                        .and_capture(),
                                 );
                             }
                         }
@@ -574,9 +572,9 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                         start_pos: node.position,
                     };
                     // shift flag = additive select (true means toggle)
-                    return (
-                        canvas::event::Status::Captured,
-                        Some(GraphMessage::NodeSelected(node_id, state.shift_held)),
+                    return Some(
+                        Action::publish(GraphMessage::NodeSelected(node_id, state.shift_held))
+                            .and_capture(),
                     );
                 }
 
@@ -586,7 +584,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                         start: cursor_pos,
                         current: cursor_pos,
                     };
-                    return (canvas::event::Status::Captured, None);
+                    return Some(Action::capture());
                 }
 
                 // If a pending node from palette, place it here
@@ -595,9 +593,8 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                         (cursor_pos.x - offset.x) / zoom,
                         (cursor_pos.y - offset.y) / zoom,
                     ];
-                    return (
-                        canvas::event::Status::Captured,
-                        Some(GraphMessage::PlacePendingNode(world_pos)),
+                    return Some(
+                        Action::publish(GraphMessage::PlacePendingNode(world_pos)).and_capture(),
                     );
                 }
 
@@ -606,7 +603,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                     start: cursor_pos,
                     start_offset: offset,
                 };
-                (canvas::event::Status::Captured, None)
+                Some(Action::capture())
             }
 
             Event::Mouse(mouse::Event::CursorMoved { .. }) => match &mut state.interaction {
@@ -619,18 +616,16 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                     let delta_x = (cursor_pos.x - start_mouse.x) / zoom;
                     let delta_y = (cursor_pos.y - start_mouse.y) / zoom;
                     let new_pos = [start_pos[0] + delta_x, start_pos[1] + delta_y];
-                    (
-                        canvas::event::Status::Captured,
-                        Some(GraphMessage::NodeMoved(*node_id, new_pos)),
-                    )
+
+                    Some(Action::publish(GraphMessage::NodeMoved(*node_id, new_pos)).and_capture())
                 }
                 Interaction::DraggingWire { end, .. } => {
                     *end = cursor_pos;
-                    (canvas::event::Status::Captured, None)
+                    Some(Action::capture())
                 }
                 Interaction::BoxSelecting { current, .. } => {
                     *current = cursor_pos;
-                    (canvas::event::Status::Captured, None)
+                    Some(Action::capture())
                 }
                 Interaction::Panning {
                     start,
@@ -639,12 +634,10 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                     let dx = cursor_pos.x - start.x;
                     let dy = cursor_pos.y - start.y;
                     let new_offset = Vector::new(start_offset.x + dx, start_offset.y + dy);
-                    (
-                        canvas::event::Status::Captured,
-                        Some(GraphMessage::Panned(new_offset)),
-                    )
+
+                    Some(Action::publish(GraphMessage::Panned(new_offset)).and_capture())
                 }
-                Interaction::None => (canvas::event::Status::Ignored, None),
+                Interaction::None => None,
             },
 
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
@@ -701,7 +694,11 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                     _ => None,
                 };
                 state.interaction = Interaction::None;
-                (canvas::event::Status::Captured, msg)
+                Some(
+                    msg.map(|m| Action::publish(m))
+                        .unwrap_or(Action::capture())
+                        .and_capture(),
+                )
             }
 
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) => {
@@ -710,10 +707,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                     (cursor_pos.x - offset.x) / zoom,
                     (cursor_pos.y - offset.y) / zoom,
                 ];
-                (
-                    canvas::event::Status::Captured,
-                    Some(GraphMessage::OpenPalette(world_pos)),
-                )
+                Some(Action::publish(GraphMessage::OpenPalette(world_pos)).and_capture())
             }
 
             // Ctrl+C: copy selected nodes
@@ -721,40 +715,36 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 key: iced::keyboard::Key::Character(c),
                 modifiers,
                 ..
-            }) if modifiers.control() && c.as_ref() == "c" => (
-                canvas::event::Status::Captured,
-                Some(GraphMessage::CopySelected),
-            ),
+            }) if modifiers.control() && c.as_ref() == "c" => {
+                Some(Action::publish(GraphMessage::CopySelected).and_capture())
+            }
 
             // Ctrl+V: paste nodes
             Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Character(c),
                 modifiers,
                 ..
-            }) if modifiers.control() && c.as_ref() == "v" => (
-                canvas::event::Status::Captured,
-                Some(GraphMessage::PasteNodes),
-            ),
+            }) if modifiers.control() && c.as_ref() == "v" => {
+                Some(Action::publish(GraphMessage::PasteNodes).and_capture())
+            }
 
             // Ctrl+G: group selected nodes
             Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Character(c),
                 modifiers,
                 ..
-            }) if modifiers.control() && c.as_ref() == "g" => (
-                canvas::event::Status::Captured,
-                Some(GraphMessage::GroupSelected),
-            ),
+            }) if modifiers.control() && c.as_ref() == "g" => {
+                Some(Action::publish(GraphMessage::GroupSelected))
+            }
 
             // M: toggle minimap overlay
             Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Character(c),
                 modifiers,
                 ..
-            }) if !modifiers.control() && (c.as_ref() == "m" || c.as_ref() == "M") => (
-                canvas::event::Status::Captured,
-                Some(GraphMessage::ToggleMinimap),
-            ),
+            }) if !modifiers.control() && (c.as_ref() == "m" || c.as_ref() == "M") => {
+                Some(Action::publish(GraphMessage::ToggleMinimap).and_capture())
+            }
 
             Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete),
@@ -763,17 +753,14 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
             | Event::Keyboard(iced::keyboard::Event::KeyPressed {
                 key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Backspace),
                 ..
-            }) => (
-                canvas::event::Status::Captured,
-                Some(GraphMessage::DeleteSelected),
-            ),
+            }) => Some(Action::publish(GraphMessage::DeleteSelected).and_capture()),
 
             // Track Shift key state for multi-select
             Event::Keyboard(iced::keyboard::Event::ModifiersChanged(mods)) => {
                 // This is a mutable self issue — but GraphProgram borrows canvas_state
                 // immutably.  We'll track shift via the CanvasInteraction state instead.
                 state.shift_held = mods.shift();
-                (canvas::event::Status::Ignored, None)
+                None
             }
 
             // Escape: cancel pending node / cancel editing / exit sub-graph
@@ -782,15 +769,15 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 ..
             }) => {
                 if self.canvas_state.pending_node.is_some() {
-                    (canvas::event::Status::Captured, Some(GraphMessage::CancelPending))
+                    Some(Action::publish(GraphMessage::CancelPending).and_capture())
                 } else if self.canvas_state.editing_value.is_some() {
-                    (canvas::event::Status::Captured, Some(GraphMessage::CancelEditValue))
+                    Some(Action::publish(GraphMessage::CancelEditValue).and_capture())
                 } else {
-                    (canvas::event::Status::Captured, Some(GraphMessage::ExitSubGraph))
+                    Some(Action::publish(GraphMessage::ExitSubGraph).and_capture())
                 }
             }
 
-            _ => (canvas::event::Status::Ignored, None),
+            _ => None,
         }
     }
 
@@ -1346,7 +1333,7 @@ pub fn graph_canvas<'a>(
     canvas_state: &'a GraphCanvas,
     tokens: &'a ThemeTokens,
 ) -> Element<'a, GraphMessage> {
-    use iced::widget::{stack, text_input, column, row, Space};
+    use iced::widget::{column, row, stack, text_input, Space};
     use iced::Padding;
 
     let canvas_elem: Element<'a, GraphMessage> = Canvas::new(GraphProgram {
@@ -1364,8 +1351,11 @@ pub fn graph_canvas<'a>(
             let offset = canvas_state.offset;
 
             let pill_x = node.position[0] * zoom + offset.x + 60.0 * zoom;
-            let pill_y = node.position[1] * zoom + offset.y + HEADER_HEIGHT * zoom
-                        + port_idx as f32 * PORT_SPACING * zoom + 5.0 * zoom;
+            let pill_y = node.position[1] * zoom
+                + offset.y
+                + HEADER_HEIGHT * zoom
+                + port_idx as f32 * PORT_SPACING * zoom
+                + 5.0 * zoom;
             let pill_w = (node.width() - 65.0) * zoom;
 
             let px = pill_x.max(0.0);
@@ -1382,27 +1372,22 @@ pub fn graph_canvas<'a>(
                 .size(11.0 * zoom.max(0.5))
                 .width(pw)
                 .padding(Padding::from([2, 4]))
-                .style(move |_theme: &Theme, _status| {
-                    text_input::Style {
-                        background: iced::Background::Color(bg),
-                        border: iced::Border {
-                            color: accent,
-                            width: 1.5,
-                            radius: (3.0).into(),
-                        },
-                        icon: txt_color,
-                        placeholder: Color::from_rgba(0.5, 0.5, 0.5, 0.6),
-                        value: txt_color,
-                        selection: Color::from_rgba(0.3, 0.5, 0.8, 0.4),
-                    }
+                .style(move |_theme: &Theme, _status| text_input::Style {
+                    background: iced::Background::Color(bg),
+                    border: iced::Border {
+                        color: accent,
+                        width: 1.5,
+                        radius: (3.0).into(),
+                    },
+                    icon: txt_color,
+                    placeholder: Color::from_rgba(0.5, 0.5, 0.5, 0.6),
+                    value: txt_color,
+                    selection: Color::from_rgba(0.3, 0.5, 0.8, 0.4),
                 });
 
             let overlay: Element<'a, GraphMessage> = column![
-                Space::new(0, py),
-                row![
-                    Space::new(px, 0),
-                    input,
-                ],
+                Space::new().width(0).height(py),
+                row![Space::new().width(px).height(0), input,],
             ]
             .into();
 

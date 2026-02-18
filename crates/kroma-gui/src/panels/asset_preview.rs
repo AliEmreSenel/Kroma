@@ -504,14 +504,14 @@ fn build_font_preview<'a>(
         text(size_str.to_owned())
             .size(10)
             .color(tokens.text_secondary),
-        iced::widget::Space::with_height(8),
+        iced::widget::Space::new().height(8),
         text("Sample (system font):")
             .size(10)
             .color(tokens.text_secondary),
         text(sample_text.to_string()).size(24),
         text(sample_text.to_string()).size(16),
         text(sample_text.to_string()).size(12),
-        iced::widget::Space::with_height(4),
+        iced::widget::Space::new().height(4),
         text(pangram_upper.to_string()).size(18),
         text(digits.to_string())
             .size(14)

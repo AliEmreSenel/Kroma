@@ -1,5 +1,6 @@
 //! Async IPC client with persistent connection and auto-reconnect.
 
+use iced::futures::channel::mpsc::Sender;
 use iced::futures::SinkExt;
 use iced::Subscription;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -53,7 +54,7 @@ pub fn ipc_subscription() -> Subscription<(IpcEvent, Option<IpcHandle>)> {
 
 /// The background worker that maintains a persistent daemon connection.
 fn ipc_worker() -> impl iced::futures::Stream<Item = (IpcEvent, Option<IpcHandle>)> {
-    iced::stream::channel(256, |mut output| async move {
+    iced::stream::channel(256, |mut output: Sender<_>| async move {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
 
         // Build the handle upfront so we can share it with the GUI,

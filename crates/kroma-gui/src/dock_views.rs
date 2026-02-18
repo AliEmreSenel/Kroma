@@ -6,6 +6,8 @@ use crate::panels;
 use crate::panels::Panel;
 use crate::Message;
 
+use iced::widget::rule;
+use iced::widget::space::horizontal;
 use iced::widget::{button, column, container, row, text, Space};
 use iced::{Border, Element, Fill, Length, Padding, Theme};
 
@@ -22,29 +24,35 @@ impl KromaApp {
         let dock_content = self.view_dock_node(&self.dock.root, ctx, &[]);
         let menu_bar = self.view_menu_bar();
 
-        let base: Element<'_, Message> = container(
-            column![menu_bar, dock_content]
+        let base: Element<'_, Message> =
+            container(column![menu_bar, dock_content].width(Fill).height(Fill))
                 .width(Fill)
-                .height(Fill),
-        )
-        .width(Fill)
-        .height(Fill)
-        .style(move |_theme: &Theme| container::Style {
-            background: Some(bg_primary.into()),
-            ..Default::default()
-        })
-        .into();
+                .height(Fill)
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(bg_primary.into()),
+                    ..Default::default()
+                })
+                .into();
 
         let toasts = self.view_toasts();
 
         if self.show_settings {
             let overlay = self.view_settings_overlay();
-            iced::widget::stack![base, overlay, toasts].width(Fill).height(Fill).into()
+            iced::widget::stack![base, overlay, toasts]
+                .width(Fill)
+                .height(Fill)
+                .into()
         } else if self.show_import {
             let overlay = self.view_import_overlay();
-            iced::widget::stack![base, overlay, toasts].width(Fill).height(Fill).into()
+            iced::widget::stack![base, overlay, toasts]
+                .width(Fill)
+                .height(Fill)
+                .into()
         } else {
-            iced::widget::stack![base, toasts].width(Fill).height(Fill).into()
+            iced::widget::stack![base, toasts]
+                .width(Fill)
+                .height(Fill)
+                .into()
         }
     }
 
@@ -106,12 +114,10 @@ impl KromaApp {
         ]
         .spacing(2);
 
-        let view_menu = row![
-            button(text("Settings").size(12).color(txt))
-                .on_press(Message::ToggleSettings)
-                .style(menu_btn_style)
-                .padding(Padding::from([4, 8])),
-        ]
+        let view_menu = row![button(text("Settings").size(12).color(txt))
+            .on_press(Message::ToggleSettings)
+            .style(menu_btn_style)
+            .padding(Padding::from([4, 8])),]
         .spacing(2);
 
         let separator = text("|").size(12).color(txt_sec);
@@ -131,7 +137,7 @@ impl KromaApp {
             "Offline"
         };
         let daemon_status = row![
-            container(Space::new(6, 6)).style(move |_: &Theme| container::Style {
+            container(Space::new().width(6).height(6)).style(move |_: &Theme| container::Style {
                 background: Some(iced::Background::Color(status_color)),
                 border: Border {
                     radius: 3.0.into(),
@@ -146,15 +152,15 @@ impl KromaApp {
 
         let left_items = row![
             brand,
-            Space::new(12, 0),
+            Space::new().width(12).height(0),
             file_menu,
-            Space::new(4, 0),
+            Space::new().width(4).height(0),
             separator,
-            Space::new(4, 0),
+            Space::new().width(4).height(0),
             edit_menu,
-            Space::new(4, 0),
+            Space::new().width(4).height(0),
             separator2,
-            Space::new(4, 0),
+            Space::new().width(4).height(0),
             view_menu,
         ]
         .align_y(iced::alignment::Vertical::Center);
@@ -170,11 +176,18 @@ impl KromaApp {
             .on_press(Message::SwitchToEditor)
             .padding(Padding::from([4, 12]))
             .style(move |_: &Theme, _| {
-                let bg_c = if is_editor { tab_active_bg } else { tab_inactive_bg };
+                let bg_c = if is_editor {
+                    tab_active_bg
+                } else {
+                    tab_inactive_bg
+                };
                 button::Style {
                     background: Some(iced::Background::Color(bg_c)),
                     text_color: txt,
-                    border: Border { radius: (radius * 0.5).into(), ..Default::default() },
+                    border: Border {
+                        radius: (radius * 0.5).into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 }
             });
@@ -183,11 +196,18 @@ impl KromaApp {
             .on_press(Message::SwitchToDashboard)
             .padding(Padding::from([4, 12]))
             .style(move |_: &Theme, _| {
-                let bg_c = if is_dashboard { tab_active_bg } else { tab_inactive_bg };
+                let bg_c = if is_dashboard {
+                    tab_active_bg
+                } else {
+                    tab_inactive_bg
+                };
                 button::Style {
                     background: Some(iced::Background::Color(bg_c)),
                     text_color: txt,
-                    border: Border { radius: (radius * 0.5).into(), ..Default::default() },
+                    border: Border {
+                        radius: (radius * 0.5).into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 }
             });
@@ -196,11 +216,18 @@ impl KromaApp {
             .on_press(Message::SwitchToDesigner)
             .padding(Padding::from([4, 12]))
             .style(move |_: &Theme, _| {
-                let bg_c = if is_designer { tab_active_bg } else { tab_inactive_bg };
+                let bg_c = if is_designer {
+                    tab_active_bg
+                } else {
+                    tab_inactive_bg
+                };
                 button::Style {
                     background: Some(iced::Background::Color(bg_c)),
                     text_color: txt,
-                    border: Border { radius: (radius * 0.5).into(), ..Default::default() },
+                    border: Border {
+                        radius: (radius * 0.5).into(),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 }
             });
@@ -209,9 +236,9 @@ impl KromaApp {
 
         let bar = row![
             left_items,
-            iced::widget::horizontal_space(),
+            horizontal(),
             screen_tabs,
-            Space::new(12, 0),
+            Space::new().width(12).height(0),
             daemon_status,
         ]
         .spacing(8)
@@ -238,7 +265,7 @@ impl KromaApp {
         use iced::{alignment, Border, Color, Fill, Length, Padding};
 
         if self.toasts.is_empty() {
-            return Space::new(0, 0).into();
+            return Space::new().width(0).height(0).into();
         }
 
         let tokens = &self.theme_tokens;
@@ -282,7 +309,7 @@ impl KromaApp {
                 let border_color = accent_color;
 
                 container(
-                    row![icon_text, msg_text, iced::widget::horizontal_space(), dismiss]
+                    row![icon_text, msg_text, horizontal(), dismiss]
                         .spacing(8)
                         .align_y(alignment::Vertical::Center)
                         .width(320),
@@ -333,7 +360,10 @@ impl KromaApp {
         .into();
 
         let toasts = self.view_toasts();
-        iced::widget::stack![base, toasts].width(Fill).height(Fill).into()
+        iced::widget::stack![base, toasts]
+            .width(Fill)
+            .height(Fill)
+            .into()
     }
 
     /// Designer screen — simple no-code wallpaper designer.
@@ -343,21 +373,21 @@ impl KromaApp {
         let menu_bar = self.view_menu_bar();
         let designer_content = self.panel_designer.view(ctx);
 
-        let base: Element<'_, Message> = container(
-            column![menu_bar, designer_content]
+        let base: Element<'_, Message> =
+            container(column![menu_bar, designer_content].width(Fill).height(Fill))
                 .width(Fill)
-                .height(Fill),
-        )
-        .width(Fill)
-        .height(Fill)
-        .style(move |_theme: &Theme| container::Style {
-            background: Some(bg_primary.into()),
-            ..Default::default()
-        })
-        .into();
+                .height(Fill)
+                .style(move |_theme: &Theme| container::Style {
+                    background: Some(bg_primary.into()),
+                    ..Default::default()
+                })
+                .into();
 
         let toasts = self.view_toasts();
-        iced::widget::stack![base, toasts].width(Fill).height(Fill).into()
+        iced::widget::stack![base, toasts]
+            .width(Fill)
+            .height(Fill)
+            .into()
     }
 
     /// Settings overlay — semi-transparent backdrop with centered settings panel.
@@ -393,12 +423,12 @@ impl KromaApp {
             column![
                 row![
                     text("Settings").size(18).color(tokens.text_primary),
-                    iced::widget::horizontal_space(),
+                    horizontal(),
                     close_btn,
                 ]
                 .align_y(iced::alignment::Vertical::Center)
                 .padding(Padding::from([12, 16])),
-                iced::widget::horizontal_rule(1),
+                rule::horizontal(1),
                 settings_content,
             ]
             .width(500)
@@ -415,19 +445,14 @@ impl KromaApp {
         });
 
         // Backdrop — clicking it also closes settings
-        let backdrop = button(
-            container(panel)
-                .center(Fill)
-                .width(Fill)
-                .height(Fill),
-        )
-        .on_press(Message::ToggleSettings)
-        .width(Fill)
-        .height(Fill)
-        .style(move |_: &Theme, _status| button::Style {
-            background: Some(iced::Background::Color(bg_overlay)),
-            ..Default::default()
-        });
+        let backdrop = button(container(panel).center(Fill).width(Fill).height(Fill))
+            .on_press(Message::ToggleSettings)
+            .width(Fill)
+            .height(Fill)
+            .style(move |_: &Theme, _status| button::Style {
+                background: Some(iced::Background::Color(bg_overlay)),
+                ..Default::default()
+            });
 
         backdrop.into()
     }
@@ -465,12 +490,12 @@ impl KromaApp {
             column![
                 row![
                     text("Import").size(18).color(tokens.text_primary),
-                    iced::widget::horizontal_space(),
+                    horizontal(),
                     close_btn,
                 ]
                 .align_y(iced::alignment::Vertical::Center)
                 .padding(Padding::from([12, 16])),
-                iced::widget::horizontal_rule(1),
+                rule::horizontal(1),
                 import_content,
             ]
             .width(500)
@@ -487,19 +512,14 @@ impl KromaApp {
         });
 
         // Backdrop — clicking it also closes the import popup
-        let backdrop = button(
-            container(panel)
-                .center(Fill)
-                .width(Fill)
-                .height(Fill),
-        )
-        .on_press(Message::ToggleImportPopup)
-        .width(Fill)
-        .height(Fill)
-        .style(move |_: &Theme, _status| button::Style {
-            background: Some(iced::Background::Color(bg_overlay)),
-            ..Default::default()
-        });
+        let backdrop = button(container(panel).center(Fill).width(Fill).height(Fill))
+            .on_press(Message::ToggleImportPopup)
+            .width(Fill)
+            .height(Fill)
+            .style(move |_: &Theme, _status| button::Style {
+                background: Some(iced::Background::Color(bg_overlay)),
+                ..Default::default()
+            });
 
         backdrop.into()
     }
@@ -543,11 +563,16 @@ impl KromaApp {
             shade_graph_canvas: &self.shade_graph_canvas,
             shade_subgraphs: &self.shade_subgraphs,
             shade_nav_path: &self.shade_nav_path,
-            shade_nav_labels: self.shade_nav_path.iter().map(|id| {
-                self.shade_graph.node(*id)
-                    .map(|n| n.kind.label().to_string())
-                    .unwrap_or_else(|| format!("Node {:?}", id))
-            }).collect(),
+            shade_nav_labels: self
+                .shade_nav_path
+                .iter()
+                .map(|id| {
+                    self.shade_graph
+                        .node(*id)
+                        .map(|n| n.kind.label().to_string())
+                        .unwrap_or_else(|| format!("Node {:?}", id))
+                })
+                .collect(),
             // Editor
             editor_glsl_content: &self.editor_glsl_content,
             editor_glsl_preview: &self.editor_glsl_preview,
@@ -618,14 +643,15 @@ impl KromaApp {
                     self.theme_tokens.border_default
                 };
 
-                let divider_visual: Element<'a, Message> = container(Space::new(Fill, Fill))
-                    .width(Fill)
-                    .height(Fill)
-                    .style(move |_theme: &Theme| container::Style {
-                        background: Some(divider_color.into()),
-                        ..Default::default()
-                    })
-                    .into();
+                let divider_visual: Element<'a, Message> =
+                    container(Space::new().width(Fill).height(Fill))
+                        .width(Fill)
+                        .height(Fill)
+                        .style(move |_theme: &Theme| container::Style {
+                            background: Some(divider_color.into()),
+                            ..Default::default()
+                        })
+                        .into();
 
                 let divider: Element<'a, Message> = iced::widget::mouse_area(divider_visual)
                     .on_press(Message::DividerDragStart(divider_path, divider_axis))
@@ -668,7 +694,7 @@ impl KromaApp {
             dock::tree::DockNode::Leaf { tabs, active } => {
                 self.view_dock_leaf(tabs, *active, ctx, path)
             }
-            dock::tree::DockNode::Empty => Space::new(Fill, Fill).into(),
+            dock::tree::DockNode::Empty => Space::new().width(Fill).height(Fill).into(),
         }
     }
 
@@ -760,7 +786,7 @@ impl KromaApp {
         let mut tab_row = row(tab_buttons).spacing(1);
         if let Some(dragged) = dragging_panel {
             tab_row = tab_row
-                .push(iced::widget::horizontal_space())
+                .push(horizontal())
                 .push(
                     text(format!("Moving: {}", dragged.title()))
                         .size(10)

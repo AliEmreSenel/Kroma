@@ -1,5 +1,6 @@
 //! Error Log panel — compile errors, daemon messages, severity filtering.
 
+use iced::widget::space::horizontal;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Border, Element, Fill, Padding, Theme};
 
@@ -26,7 +27,10 @@ impl Panel for ErrorLogPanel {
             let msg = format!("L{}: {}", line, err.message);
             items.push(
                 row![
-                    text(icons::ERROR).font(icons::ICON_FONT).size(10).color(t.error),
+                    text(icons::ERROR)
+                        .font(icons::ICON_FONT)
+                        .size(10)
+                        .color(t.error),
                     text(msg).size(10).color(t.error),
                 ]
                 .spacing(4)
@@ -39,7 +43,10 @@ impl Panel for ErrorLogPanel {
         for warn in ctx.compile_warnings {
             items.push(
                 row![
-                    text(icons::WARNING).font(icons::ICON_FONT).size(10).color(t.warning),
+                    text(icons::WARNING)
+                        .font(icons::ICON_FONT)
+                        .size(10)
+                        .color(t.warning),
                     text(warn.as_str()).size(10).color(t.warning),
                 ]
                 .spacing(4)
@@ -63,7 +70,7 @@ impl Panel for ErrorLogPanel {
         let clear_text = t.text_primary;
         let header = row![
             text("Errors").size(t.font_size_sm),
-            iced::widget::horizontal_space(),
+            horizontal(),
             button(text("Clear").size(10))
                 .padding(Padding::from([2, 8]))
                 .on_press(Message::ClearLog)

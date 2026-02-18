@@ -19,7 +19,7 @@ impl KromaApp {
         let card_border = self.theme_tokens.border_default;
         container(column![
             text(title).size(self.theme_tokens.font_size_md),
-            Space::with_height(6),
+            Space::new().height(6),
             content.into(),
         ])
         .width(Fill)
