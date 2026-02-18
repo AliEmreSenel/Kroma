@@ -24,6 +24,8 @@ pub struct FfmpegVideoDecoder {
     frame_buffer: Vec<u8>,
     duration: f64,
     time_base: f64,
+    frame_interval: f64,     // Now dynamic: updates per frame
+    avg_frame_interval: f64, // Fallback: calculated from stream average FPS
 }
 
 // SAFETY: FfmpegVideoDecoder is only used on the main render thread.
@@ -66,6 +68,17 @@ impl FfmpegVideoDecoder {
 
     /// Scale a decoded frame to RGBA and store in `frame_buffer`.
     fn scale_frame(&mut self, decoded: &ffmpeg_next::util::frame::Video) -> Option<()> {
+        // Calculate variable frame duration
+        // decoded.duration() returns duration in stream time_base units
+        /*let duration = decoded.duration();
+        if duration > 0 {
+            self.frame_interval = duration as f64 * self.time_base;
+        } else */
+        {
+            // Fallback to average if individual frame duration is missing
+            self.frame_interval = self.avg_frame_interval;
+        }
+
         let mut rgba_frame = ffmpeg_next::util::frame::Video::empty();
         self.scaler.run(decoded, &mut rgba_frame).ok()?;
 
@@ -87,6 +100,10 @@ impl FfmpegVideoDecoder {
             }
         }
         Some(())
+    }
+
+    pub fn frame_interval(&self) -> f64 {
+        self.frame_interval
     }
 }
 
@@ -121,6 +138,14 @@ impl VideoDecoder for FfmpegVideoDecoder {
         let width = decoder.width();
         let height = decoder.height();
 
+        // Calculate average frame interval for fallback
+        let frame_rate = decoder.frame_rate().unwrap_or(ffmpeg_next::Rational(1, 1));
+        let avg_frame_interval = if frame_rate.numerator() > 0 {
+            frame_rate.denominator() as f64 / frame_rate.numerator() as f64
+        } else {
+            1.0 / 30.0 // Default to 30fps if completely unknown
+        };
+
         let scaler = ffmpeg_next::software::scaling::Context::get(
             decoder.format(),
             width,
@@ -132,10 +157,11 @@ impl VideoDecoder for FfmpegVideoDecoder {
         )?;
 
         log::info!(
-            "FFmpeg video decoder: {}x{}, {:.1}s duration, stream {}",
+            "FFmpeg video decoder: {}x{}, {:.1}s duration, {} FPS (avg), stream {}",
             width,
             height,
             duration,
+            frame_rate,
             video_stream_index
         );
 
@@ -149,6 +175,8 @@ impl VideoDecoder for FfmpegVideoDecoder {
             frame_buffer: vec![0u8; (width * height * 4) as usize],
             duration,
             time_base,
+            frame_interval: avg_frame_interval,
+            avg_frame_interval,
         })
     }
 

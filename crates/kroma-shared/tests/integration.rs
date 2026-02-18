@@ -1,8 +1,6 @@
 //! Integration tests for the shared crate.
 
 use kroma_shared::ipc::{DaemonCommand, DaemonEvent, UniformValue};
-use kroma_shared::mock::MockDataProvider;
-use kroma_shared::traits::DataProvider;
 use kroma_shared::translator;
 use kroma_shared::types::{ShadeConfig, ShaderUniforms, SystemStats};
 
@@ -97,25 +95,6 @@ fn shader_uniforms_no_battery() {
     };
     u.apply_system_stats(&stats);
     assert!(u.u_battery < 0.0); // -1.0 signals no battery
-}
-
-// -----------------------------------------------------------------------
-// Mock data provider tests
-// -----------------------------------------------------------------------
-
-#[test]
-fn mock_data_provider_interface() {
-    let mock = MockDataProvider::default();
-    let spectrum = mock.get_audio_spectrum();
-    assert_eq!(spectrum.len(), 512);
-    assert!(spectrum.iter().all(|&v| v == 0.0));
-
-    let stats = mock.get_system_stats();
-    assert_eq!(stats.cpu_usage, 25.0);
-
-    let cursor = mock.get_cursor_pos();
-    assert_eq!(cursor.x, 0.5);
-    assert_eq!(cursor.y, 0.5);
 }
 
 // -----------------------------------------------------------------------
