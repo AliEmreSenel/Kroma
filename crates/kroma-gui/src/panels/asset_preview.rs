@@ -43,7 +43,12 @@ impl Panel for AssetPreviewPanel {
             Some("config.toml") => {
                 return self.view_config_editor(ctx);
             }
-            Some(name) if name == "shader.frag" || name.ends_with(".glsl") || name.ends_with(".frag") || name.ends_with(".vert") => {
+            Some(name)
+                if name == "shader.frag"
+                    || name.ends_with(".glsl")
+                    || name.ends_with(".frag")
+                    || name.ends_with(".vert") =>
+            {
                 return self.view_shader_editor(ctx, name);
             }
             Some(name) => {
@@ -60,21 +65,15 @@ impl AssetPreviewPanel {
         let edit_mode = ctx.shade_edit_mode;
 
         // Mode toggle bar
-        let mode_bar = self.build_mode_bar(
-            &["settings", "toml"],
-            &["Settings", "TOML"],
-            edit_mode,
-            t,
-        );
+        let mode_bar =
+            self.build_mode_bar(&["settings", "toml"], &["Settings", "TOML"], edit_mode, t);
 
         let content: Element<'_, Message> = if edit_mode == "toml" {
             // Raw TOML editor
             use iced::widget::text_editor;
-            column![
-                text_editor(ctx.shade_config_toml)
-                    .on_action(Message::ShadeConfigToml)
-                    .height(Fill),
-            ]
+            column![text_editor(ctx.shade_config_toml)
+                .on_action(Message::ShadeConfigToml)
+                .height(Fill),]
             .width(Fill)
             .height(Fill)
             .into()
@@ -120,17 +119,17 @@ impl AssetPreviewPanel {
                         (ctx.shade_graph, ctx.shade_graph_canvas)
                     };
 
-                let canvas = crate::editor::canvas::graph_canvas(
-                    active_graph,
-                    active_canvas,
-                    t,
-                )
-                .map(Message::ShadeGraphMsg);
+                let canvas = crate::editor::canvas::graph_canvas(active_graph, active_canvas, t)
+                    .map(Message::ShadeGraphMsg);
 
                 let palette = crate::panels::node_editor::build_node_palette(
                     ctx.editor_palette_filter,
                     t,
-                    |kind| Message::ShadeGraphMsg(crate::editor::canvas::GraphMessage::SetPendingNode(kind)),
+                    |kind| {
+                        Message::ShadeGraphMsg(crate::editor::canvas::GraphMessage::SetPendingNode(
+                            kind,
+                        ))
+                    },
                 );
 
                 let toolbar = iced::widget::row![
@@ -165,12 +164,9 @@ impl AssetPreviewPanel {
                 // Build breadcrumb bar when navigated into sub-graphs
                 let main_content: Element<'_, Message> = column![
                     toolbar,
-                    row![
-                        iced::widget::container(palette).width(180),
-                        canvas,
-                    ]
-                    .width(Fill)
-                    .height(Fill),
+                    row![iced::widget::container(palette).width(180), canvas,]
+                        .width(Fill)
+                        .height(Fill),
                 ]
                 .width(Fill)
                 .height(Fill)
@@ -202,23 +198,18 @@ impl AssetPreviewPanel {
                     );
                     // Nav path labels
                     for label in &ctx.shade_nav_labels {
-                        crumbs.push(
-                            text(" > ").size(11).color(t.text_secondary).into(),
-                        );
-                        crumbs.push(
-                            text(label.clone()).size(11).color(text_primary).into(),
-                        );
+                        crumbs.push(text(" > ").size(11).color(t.text_secondary).into());
+                        crumbs.push(text(label.clone()).size(11).color(text_primary).into());
                     }
 
-                    let breadcrumb_bar = container(
-                        row(crumbs).spacing(2).align_y(iced::Alignment::Center),
-                    )
-                    .padding(iced::Padding::from([4, 8]))
-                    .width(Fill)
-                    .style(move |_: &iced::Theme| container::Style {
-                        background: Some(iced::Background::Color(bar_bg)),
-                        ..Default::default()
-                    });
+                    let breadcrumb_bar =
+                        container(row(crumbs).spacing(2).align_y(iced::Alignment::Center))
+                            .padding(iced::Padding::from([4, 8]))
+                            .width(Fill)
+                            .style(move |_: &iced::Theme| container::Style {
+                                background: Some(iced::Background::Color(bar_bg)),
+                                ..Default::default()
+                            });
 
                     column![breadcrumb_bar, main_content]
                         .width(Fill)
@@ -264,7 +255,7 @@ impl AssetPreviewPanel {
             .height(Fill)
             .into()
     }
-
+    // TODO: Use mime-type to deicde not extensions
     /// View for asset files — image/video/font/audio/text preview.
     fn view_asset<'a>(&'a self, ctx: AppContext<'a>, asset_name: &str) -> Element<'a, Message> {
         let t = ctx.tokens;
@@ -273,13 +264,11 @@ impl AssetPreviewPanel {
         let _ext = short.rsplit('.').next().unwrap_or("").to_lowercase();
 
         // Header with file name
-        let _header: Element<'_, Message> = iced::widget::row![
-            text(short).size(12).color(t.text_primary),
-        ]
-        .spacing(4)
-        .padding(iced::Padding::from([4, 8]))
-        .into();
-
+        let _header: Element<'_, Message> =
+            iced::widget::row![text(short).size(12).color(t.text_primary),]
+                .spacing(4)
+                .padding(iced::Padding::from([4, 8]))
+                .into();
 
         let short = asset_name.rsplit('/').next().unwrap_or(asset_name);
         let ext = short.rsplit('.').next().unwrap_or("").to_lowercase();
@@ -303,7 +292,9 @@ impl AssetPreviewPanel {
                             iced::widget::row![
                                 text(icons::CODE).font(icons::ICON_FONT).size(12),
                                 text(format!(" {}", short)).size(12),
-                            ].spacing(2).align_y(iced::Alignment::Center),
+                            ]
+                            .spacing(2)
+                            .align_y(iced::Alignment::Center),
                             text(size_str.clone()).size(10).color(t.text_secondary),
                             scrollable(text(source.to_string()).size(10))
                                 .width(Fill)
@@ -325,7 +316,9 @@ impl AssetPreviewPanel {
                         iced::widget::row![
                             text(icons::AUDIO).font(icons::ICON_FONT).size(12),
                             text(format!(" {}", short)).size(12),
-                        ].spacing(2).align_y(iced::Alignment::Center),
+                        ]
+                        .spacing(2)
+                        .align_y(iced::Alignment::Center),
                         text(size_str.clone()).size(10).color(t.text_secondary),
                         build_audio_info(data, t),
                     ]
@@ -337,7 +330,9 @@ impl AssetPreviewPanel {
                             iced::widget::row![
                                 text(icons::FILE).font(icons::ICON_FONT).size(12),
                                 text(format!(" {}", short)).size(12),
-                            ].spacing(2).align_y(iced::Alignment::Center),
+                            ]
+                            .spacing(2)
+                            .align_y(iced::Alignment::Center),
                             text(size_str.clone()).size(10).color(t.text_secondary),
                             scrollable(text(source.to_string()).size(10))
                                 .width(Fill)
@@ -350,7 +345,9 @@ impl AssetPreviewPanel {
                         iced::widget::row![
                             text(icons::FILE).font(icons::ICON_FONT).size(12),
                             text(format!(" {}", short)).size(12),
-                        ].spacing(2).align_y(iced::Alignment::Center),
+                        ]
+                        .spacing(2)
+                        .align_y(iced::Alignment::Center),
                         text(size_str.clone()).size(10).color(t.text_secondary),
                         text(format!("Binary file ({} extension)", ext))
                             .size(10)
@@ -445,7 +442,9 @@ fn build_image_preview<'a>(
                 iced::widget::row![
                     text(icons::IMAGE).font(icons::ICON_FONT).size(12),
                     text(format!(" {}", name)).size(12),
-                ].spacing(2).align_y(iced::Alignment::Center),
+                ]
+                .spacing(2)
+                .align_y(iced::Alignment::Center),
                 text(format!("{} | {}x{}", size_str, w, h))
                     .size(10)
                     .color(tokens.text_secondary),
@@ -463,7 +462,9 @@ fn build_image_preview<'a>(
             iced::widget::row![
                 text(icons::IMAGE).font(icons::ICON_FONT).size(12),
                 text(format!(" {}", name)).size(12),
-            ].spacing(2).align_y(iced::Alignment::Center),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
             text(size_str.to_owned())
                 .size(10)
                 .color(tokens.text_secondary),
@@ -479,7 +480,7 @@ fn build_image_preview<'a>(
 // ---------------------------------------------------------------------------
 // Font preview — show sample text at multiple sizes
 // ---------------------------------------------------------------------------
-
+// TODO: Proper font preview
 fn build_font_preview<'a>(
     name: &str,
     size_str: &str,
@@ -497,7 +498,9 @@ fn build_font_preview<'a>(
         iced::widget::row![
             text(icons::FONT).font(icons::ICON_FONT).size(12),
             text(format!(" {}", name)).size(12),
-        ].spacing(2).align_y(iced::Alignment::Center),
+        ]
+        .spacing(2)
+        .align_y(iced::Alignment::Center),
         text(size_str.to_owned())
             .size(10)
             .color(tokens.text_secondary),
@@ -522,7 +525,7 @@ fn build_font_preview<'a>(
 // ---------------------------------------------------------------------------
 // Video preview — decode first frame with FFmpeg and display as image
 // ---------------------------------------------------------------------------
-
+// TODO: Auto create player
 fn build_video_preview<'a>(
     name: &str,
     size_str: &str,
@@ -545,13 +548,19 @@ fn build_video_preview<'a>(
                     0.0
                 };
 
-                let play_icon = if player.playing { icons::PAUSE } else { icons::PLAY };
+                let play_icon = if player.playing {
+                    icons::PAUSE
+                } else {
+                    icons::PLAY
+                };
 
                 return column![
                     iced::widget::row![
                         text(icons::VIDEO).font(icons::ICON_FONT).size(12),
                         text(format!(" {}", name)).size(12),
-                    ].spacing(2).align_y(iced::Alignment::Center),
+                    ]
+                    .spacing(2)
+                    .align_y(iced::Alignment::Center),
                     text(format!("{} | {}", size_str, player.format_info))
                         .size(10)
                         .color(tokens.text_secondary),
@@ -588,7 +597,9 @@ fn build_video_preview<'a>(
             iced::widget::row![
                 text(icons::VIDEO).font(icons::ICON_FONT).size(12),
                 text(format!(" {}", name)).size(12),
-            ].spacing(2).align_y(iced::Alignment::Center),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
             text("Empty video file").size(10).color(tokens.error),
         ]
         .spacing(4)
@@ -610,7 +621,9 @@ fn build_video_preview<'a>(
             iced::widget::row![
                 text(icons::VIDEO).font(icons::ICON_FONT).size(12),
                 text(format!(" {}", name)).size(12),
-            ].spacing(2).align_y(iced::Alignment::Center),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
             text(size_str.to_owned())
                 .size(10)
                 .color(tokens.text_secondary),
@@ -644,7 +657,9 @@ fn build_video_preview<'a>(
                 iced::widget::row![
                     text(icons::VIDEO).font(icons::ICON_FONT).size(12),
                     text(format!(" {}", name)).size(12),
-                ].spacing(2).align_y(iced::Alignment::Center),
+                ]
+                .spacing(2)
+                .align_y(iced::Alignment::Center),
                 text(format!("{} | {}x{}{}", size_str, w, h, dur_str))
                     .size(10)
                     .color(tokens.text_secondary),
@@ -656,10 +671,12 @@ fn build_video_preview<'a>(
                     iced::widget::row![
                         text(icons::PLAY).font(icons::ICON_FONT).size(11),
                         text(" Play").size(11),
-                    ].spacing(2).align_y(iced::Alignment::Center)
+                    ]
+                    .spacing(2)
+                    .align_y(iced::Alignment::Center)
                 )
-                    .on_press(Message::VideoPlay(owned_name))
-                    .padding(iced::Padding::from([4, 12])),
+                .on_press(Message::VideoPlay(owned_name))
+                .padding(iced::Padding::from([4, 12])),
             ]
             .spacing(4)
             .width(Fill)
@@ -670,7 +687,9 @@ fn build_video_preview<'a>(
             iced::widget::row![
                 text(icons::VIDEO).font(icons::ICON_FONT).size(12),
                 text(format!(" {}", name)).size(12),
-            ].spacing(2).align_y(iced::Alignment::Center),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
             text(size_str.to_owned())
                 .size(10)
                 .color(tokens.text_secondary),
@@ -687,7 +706,9 @@ fn build_video_preview<'a>(
 pub type FirstFrame = (u32, u32, Vec<u8>, f64);
 
 /// Decode the first video frame from a file path, returning (width, height, rgba_bytes, duration).
-pub fn decode_first_frame(path: &std::path::Path) -> Result<FirstFrame, Box<dyn std::error::Error>> {
+pub fn decode_first_frame(
+    path: &std::path::Path,
+) -> Result<FirstFrame, Box<dyn std::error::Error>> {
     let mut input = ffmpeg_next::format::input(path)?;
 
     let video_stream = input
@@ -756,7 +777,7 @@ pub fn decode_first_frame(path: &std::path::Path) -> Result<FirstFrame, Box<dyn 
 // ---------------------------------------------------------------------------
 // Audio info — basic format info from header bytes
 // ---------------------------------------------------------------------------
-
+// TODO: Use FFMPEG for perfect info and playback
 fn build_audio_info<'a>(data: &[u8], tokens: &crate::theme::ThemeTokens) -> Element<'a, Message> {
     // Parse WAV header for basic info, otherwise just show size
     if data.len() >= 44 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE" {

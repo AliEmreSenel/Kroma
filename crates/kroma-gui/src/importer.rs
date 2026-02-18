@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use log::info;
 
-use kroma_shared::shade::ShadePackage;
+use kroma_shared::shade::LiveShadePackage;
 use kroma_shared::translator;
 
 /// Import a Shadertoy GLSL file and write a `.shade` package next to it.
@@ -22,12 +22,8 @@ pub fn import_shadertoy_file(glsl_path: &Path, name: &str, author: &str) -> Resu
         log::warn!("Translator warning: {}", w);
     }
 
-    let package = ShadePackage {
-        config: result.config,
-        shader_source: Some(result.shader_source),
-        preview: None,
-        assets: Vec::new(),
-    };
+    let mut package = LiveShadePackage::new_empty(result.config);
+    package.shader_source = Some(result.shader_source);
 
     let output_path = glsl_path.with_extension("shade");
     package
@@ -177,12 +173,8 @@ pub async fn download_shadertoy(
         log::warn!("Translator warning: {}", w);
     }
 
-    let package = ShadePackage {
-        config: result.config,
-        shader_source: Some(result.shader_source),
-        preview: None,
-        assets: Vec::new(),
-    };
+    let mut package = LiveShadePackage::new_empty(result.config);
+    package.shader_source = Some(result.shader_source);
 
     let shade_path = output_dir.join(format!("{}.shade", safe_name));
     package

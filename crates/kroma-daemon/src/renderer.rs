@@ -8,8 +8,10 @@ use std::ptr::NonNull;
 use anyhow::{Context, Result};
 use log::{info, warn};
 
-use kroma_shared::shade::ShadePackage;
-use kroma_shared::types::ShaderUniforms;
+use kroma_shared::shade::LiveShadePackage;
+use kroma_shared::types::{ShaderUniforms, TextureDef};
+use wgpu::wgt::PollType;
+use wgpu::{FilterMode, MipmapFilterMode};
 
 /// Default fullscreen triangle vertex shader (WGSL).
 ///
@@ -90,7 +92,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
 /// Maximum number of texture channels (beyond this we ignore extra ones).
-const MAX_TEXTURE_SLOTS: usize = 8;
+const MAX_TEXTURE_SLOTS: usize = 16;
 
 /// Maximum number of custom uniform float slots.
 const MAX_CUSTOM_UNIFORMS: usize = 32;
@@ -113,18 +115,25 @@ struct AudioSpectrumTexture {
 
 /// Slideshow state: tracks which image is displayed and when to switch.
 struct SlideshowState {
-    /// All slideshow textures loaded from assets.
-    all_textures: Vec<LoadedTexture>,
-    /// Display order indices (may be shuffled).
+    /// Configuration for all slides.
+    defs: Vec<TextureDef>,
+    /// Display order indices.
     order: Vec<usize>,
     /// Current index into `order`.
     current: usize,
-    /// Timer tracking seconds since last slide change.
     timer: f64,
-    /// Configured interval (seconds between slides).
     interval: f64,
-    /// Crossfade duration in seconds (0 = instant). TODO: implement crossfade blending.
-    _crossfade: f64,
+}
+
+pub enum SlideshowEvent {
+    None,
+    SwappedToImage,
+    SwappedToVideo { source: String },
+}
+
+pub enum LoadResult {
+    Slideshow(SlideshowEvent),
+    Other,
 }
 
 /// State for a single render buffer pass (multi-pass rendering).
@@ -153,6 +162,8 @@ struct BufferPassState {
 pub struct RenderState {
     /// Current shader uniforms (CPU side).
     pub uniforms: ShaderUniforms,
+
+    pub active_package: Option<LiveShadePackage>,
 
     /// Custom uniforms set via IPC (name → value).
     custom_uniforms: std::collections::HashMap<String, kroma_shared::ipc::UniformValue>,
@@ -194,6 +205,7 @@ impl RenderState {
     /// Create a new render state. Does NOT initialise the GPU yet.
     pub fn new() -> Result<Self> {
         Ok(Self {
+            active_package: None,
             uniforms: ShaderUniforms::default(),
             custom_uniforms: std::collections::HashMap::new(),
             custom_uniform_indices: std::collections::HashMap::new(),
@@ -277,13 +289,10 @@ impl RenderState {
             adapter_info.name, adapter_info.backend
         );
 
-        let (device, queue) = pollster_block(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("kroma-device"),
-                ..Default::default()
-            },
-            None,
-        ))
+        let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("kroma-device"),
+            ..Default::default()
+        }))
         .context("Failed to create GPU device")?;
 
         // Determine the best surface format
@@ -362,7 +371,7 @@ impl RenderState {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("kroma-pl"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         // Shader modules
@@ -402,7 +411,7 @@ impl RenderState {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -493,13 +502,10 @@ impl RenderState {
             adapter_info.name, adapter_info.backend
         );
 
-        let (device, queue) = pollster_block(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("kroma-device"),
-                ..Default::default()
-            },
-            None,
-        ))
+        let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("kroma-device"),
+            ..Default::default()
+        }))
         .context("Failed to create GPU device")?;
 
         let surface_caps = surface.get_capabilities(&adapter);
@@ -575,7 +581,7 @@ impl RenderState {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("kroma-pl"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let vert_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -613,7 +619,7 @@ impl RenderState {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -653,13 +659,10 @@ impl RenderState {
 
         info!("GPU adapter (headless): {}", adapter.get_info().name);
 
-        let (device, queue) = pollster_block(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("kroma-device-headless"),
-                ..Default::default()
-            },
-            None,
-        ))
+        let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("kroma-device-headless"),
+            ..Default::default()
+        }))
         .context("Failed to create GPU device")?;
 
         // Create uniform buffer
@@ -710,41 +713,23 @@ impl RenderState {
     /// If the package has a GLSL shader, translates it to WGSL and builds the
     /// pipeline. If it has image/video assets, loads them as GPU textures.
     /// If there is no shader (image/video mode), uses a default sampler shader.
-    pub fn load_shade(&mut self, pkg: &ShadePackage) -> Result<()> {
+    pub fn load_shade(&mut self, pkg: LiveShadePackage) -> Result<LoadResult> {
         // Reset slideshow state
         self.slideshow = None;
         // Clear any existing buffer passes from the previous shader
         self.buffer_passes.clear();
 
-        // Load all textures from package assets (images, fonts, etc.)
-        self.load_package_textures(pkg)?;
-
-        // Check if the package has any video textures — create a placeholder
-        // texture slot that the video decoder will overwrite each frame.
-        let has_video = pkg.config.textures.values().any(|t| t.ty == "video");
-        if has_video && self.textures.is_empty() {
-            let device = self
-                .device
-                .as_ref()
-                .context("GPU not initialised — cannot create video placeholder")?;
-            let queue = self.queue.as_ref().context("GPU queue not initialised")?;
-            let placeholder = Self::create_texture_from_raw_rgba(
-                device,
-                queue,
-                &[0, 0, 0, 255],
-                1,
-                1,
-                "video-placeholder",
-            );
-            self.textures.push(placeholder);
-            self.build_texture_bind_group()?;
-        }
+        let is_slide = pkg.config.slideshow.interval > 0.0;
+        let mut res = LoadResult::Other;
 
         // Set up slideshow if configured (interval > 0) and we have 2+ textures.
         // Works regardless of mode — any package can cycle through its textures.
-        if pkg.config.slideshow.interval > 0.0 && self.textures.len() > 1 {
+        if is_slide {
+            let mut tex_defs: Vec<TextureDef> = pkg.config.textures.values().cloned().collect();
+            tex_defs.sort_by(|a, b| a.source.cmp(&b.source));
+
             let config = &pkg.config.slideshow;
-            let count = self.textures.len();
+            let count = tex_defs.len();
             let mut order: Vec<usize> = (0..count).collect();
             if config.shuffle {
                 let seed = std::time::SystemTime::now()
@@ -757,22 +742,37 @@ impl RenderState {
                 }
             }
 
-            let all_textures: Vec<LoadedTexture> = self.textures.drain(..).collect();
-
             self.slideshow = Some(SlideshowState {
-                all_textures,
+                defs: tex_defs,
                 order,
                 current: 0,
                 timer: 0.0,
                 interval: config.interval,
-                _crossfade: config.crossfade,
             });
+            let device = self
+                .device
+                .as_ref()
+                .context("GPU not initialised — cannot load textures")?;
+            let queue = self.queue.as_ref().context("GPU queue not initialised")?;
 
-            self.swap_slideshow_texture(0);
+            let placeholder = Self::create_texture_from_raw_rgba(
+                device,
+                queue,
+                &[0, 0, 0, 255],
+                1,
+                1,
+                "placeholde-slide",
+            );
+            self.textures.push(placeholder);
+            self.build_texture_bind_group()?;
+
             info!(
                 "Slideshow initialized: {} textures, {:.1}s interval",
                 count, config.interval
             );
+        } else {
+            // Load all textures from package assets (images, fonts, etc.)
+            self.load_package_textures(&pkg)?;
         }
 
         // Initialize custom uniforms (creates storage buffer + rebuilds BGL0).
@@ -822,12 +822,17 @@ impl RenderState {
             }
         }
 
+        if is_slide {
+            res = LoadResult::Slideshow(self.swap_slideshow_texture(0)?);
+        }
+
         info!(
             "Shade package '{}' loaded successfully ({} textures)",
             pkg.config.meta.name,
             self.textures.len()
         );
-        Ok(())
+        self.active_package = Some(pkg);
+        Ok(res)
     }
 
     /// Load a raw WGSL fragment shader string (used for the default shader or testing).
@@ -918,7 +923,7 @@ impl RenderState {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -1152,7 +1157,7 @@ impl RenderState {
             address_mode_w: wgpu_wrap,
             mag_filter: wgpu_filter,
             min_filter: wgpu_filter,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -1225,16 +1230,79 @@ impl RenderState {
         }
     }
 
+    fn load_texture(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        name: &str,
+        pkg: &LiveShadePackage,
+        def: &TextureDef,
+    ) -> Option<LoadedTexture> {
+        if self.textures.len() >= MAX_TEXTURE_SLOTS {
+            warn!(
+                "Maximum {} texture slots reached — ignoring '{}'",
+                MAX_TEXTURE_SLOTS, name
+            );
+            return None;
+        }
+
+        if def.ty == "audio_spectrum" {
+            return None;
+        }
+
+        if def.ty == "video" {
+            let placeholder =
+                Self::create_texture_from_raw_rgba(device, queue, &[0, 0, 0, 255], 1, 1, name);
+            return Some(placeholder);
+        }
+
+        let source = match &def.source {
+            Some(s) => s.clone(),
+            None => {
+                warn!("Texture '{}' has no source — skipping", name);
+                return None;
+            }
+        };
+
+        if let Some(source) = &def.source {
+            // Try reading from mmap
+            if let Some(bytes) = pkg.read_asset(source) {
+                match Self::create_texture_from_bytes(
+                    device,
+                    queue,
+                    &bytes,
+                    name,
+                    &def.filter,
+                    &def.wrap,
+                ) {
+                    Ok(tex) => return Some(tex),
+                    Err(e) => warn!("Failed to decode image: {}", e),
+                }
+            } else {
+                warn!(
+                    "Asset '{}' not found in package for texture '{}'",
+                    source, name
+                );
+            }
+        } else {
+            warn!(
+                "Asset '{}' not found in package for texture '{}'",
+                source, name
+            );
+        }
+        return None;
+    }
+
     /// Load all textures referenced by a shade package's config.
-    fn load_package_textures(&mut self, pkg: &ShadePackage) -> Result<()> {
+    fn load_package_textures(&mut self, pkg: &LiveShadePackage) -> Result<()> {
         let device = self
             .device
             .as_ref()
             .context("GPU not initialised — cannot load textures")?;
         let queue = self.queue.as_ref().context("GPU queue not initialised")?;
 
-        // Clear previous textures
         self.textures.clear();
+        self.audio_spectrum = None; // Important: Clear old spectrum
         self.texture_bind_group = None;
         self.texture_bind_group_layout = None;
 
@@ -1243,60 +1311,9 @@ impl RenderState {
         tex_defs.sort_by_key(|(_, def)| def.binding.unwrap_or(u32::MAX));
 
         for (name, def) in &tex_defs {
-            if self.textures.len() >= MAX_TEXTURE_SLOTS {
-                warn!(
-                    "Maximum {} texture slots reached — ignoring '{}'",
-                    MAX_TEXTURE_SLOTS, name
-                );
-                break;
-            }
-
-            if def.ty == "audio_spectrum" {
-                // Audio spectrum is handled separately
-                continue;
-            }
-
-            if def.ty == "video" {
-                // Video textures are handled by the video decoder — skip image loading.
-                // A placeholder texture is created in load_shade() instead.
-                continue;
-            }
-
-            let source = match &def.source {
-                Some(s) => s.clone(),
-                None => {
-                    warn!("Texture '{}' has no source — skipping", name);
-                    continue;
-                }
-            };
-
-            // Find the asset data in the package
-            let asset_data = pkg
-                .assets
-                .iter()
-                .find(|(path, _)| path == &source || path.ends_with(&source))
-                .map(|(_, data)| data.as_slice());
-
-            match asset_data {
-                Some(bytes) => {
-                    match Self::create_texture_from_bytes(
-                        device,
-                        queue,
-                        bytes,
-                        name,
-                        &def.filter,
-                        &def.wrap,
-                    ) {
-                        Ok(tex) => self.textures.push(tex),
-                        Err(e) => warn!("Failed to load texture '{}': {}", name, e),
-                    }
-                }
-                None => {
-                    warn!(
-                        "Asset '{}' not found in package for texture '{}'",
-                        source, name
-                    );
-                }
+            match self.load_texture(device, queue, name, pkg, def) {
+                Some(tex) => self.textures.push(tex),
+                None => (),
             }
         }
 
@@ -1309,15 +1326,9 @@ impl RenderState {
                     break;
                 }
 
-                // Find font data in package assets
-                let font_data = pkg
-                    .assets
-                    .iter()
-                    .find(|(path, _)| path == &font_def.source || path.ends_with(&font_def.source))
-                    .map(|(_, data)| data.as_slice());
-
-                if let Some(font_bytes) = font_data {
-                    match font::rasterize_font_atlas(font_bytes, font_def.size) {
+                // Try reading from mmap
+                if let Some(bytes) = pkg.read_asset(&font_def.source) {
+                    match font::rasterize_font_atlas(&bytes, font_def.size) {
                         Ok(atlas) => {
                             // Upload the atlas RGBA texture
                             let tex = Self::create_texture_from_raw_rgba(
@@ -1345,8 +1356,18 @@ impl RenderState {
             }
         }
 
-        // Build texture bind group if we have textures
-        if !self.textures.is_empty() {
+        // 2. Initialize Audio Spectrum if requested
+        if pkg
+            .config
+            .textures
+            .iter()
+            .any(|tex| tex.1.ty == "audio_spectrum")
+        {
+            self.create_audio_spectrum_texture()?;
+        }
+
+        // 3. Build Bind Group (If we have images OR audio)
+        if !self.textures.is_empty() || self.audio_spectrum.is_some() {
             self.build_texture_bind_group()?;
         }
 
@@ -1393,7 +1414,7 @@ impl RenderState {
                 binding: tex_binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
@@ -1402,7 +1423,7 @@ impl RenderState {
             layout_entries.push(wgpu::BindGroupLayoutEntry {
                 binding: samp_binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                 count: None,
             });
         }
@@ -1483,8 +1504,9 @@ impl RenderState {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("kroma-audio-spectrum-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: FilterMode::Nearest,
+            min_filter: FilterMode::Nearest,
+            mipmap_filter: MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -1535,19 +1557,33 @@ impl RenderState {
     /// Swap the active display texture to a specific slideshow index.
     ///
     /// Rebuilds bind group so the GPU sees the new texture.
-    fn swap_slideshow_texture(&mut self, order_idx: usize) {
+    fn swap_slideshow_texture(&mut self, def_idx: usize) -> Result<SlideshowEvent> {
         let Some(ref slideshow) = self.slideshow else {
-            return;
+            return Ok(SlideshowEvent::None);
         };
-        let tex_idx = slideshow.order[order_idx];
-        let tex = &slideshow.all_textures[tex_idx];
+        // We need the package to read the asset
+        let Some(ref pkg) = self.active_package else {
+            return Ok(SlideshowEvent::None);
+        };
+
+        let def = slideshow.defs[def_idx].clone();
 
         // We need to create a new bind group pointing to this texture.
         // The simplest approach: override self.textures with a view into the slideshow.
         // Since we can't clone GPU textures, we rebuild the bind group directly.
         let device = match self.device.as_ref() {
             Some(d) => d,
-            None => return,
+            None => return Ok(SlideshowEvent::None),
+        };
+
+        let source = def.source.clone().unwrap_or_default();
+
+        // [CHANGED] Read from mmap
+
+        let Some(tex) =
+            self.load_texture(device, self.queue.as_ref().unwrap(), &source, &pkg, &def)
+        else {
+            return Ok(SlideshowEvent::None);
         };
 
         let mut layout_entries = vec![
@@ -1588,7 +1624,7 @@ impl RenderState {
                 binding: tex_binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
@@ -1597,7 +1633,7 @@ impl RenderState {
             layout_entries.push(wgpu::BindGroupLayoutEntry {
                 binding: samp_binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                 count: None,
             });
             group_entries.push(wgpu::BindGroupEntry {
@@ -1627,13 +1663,19 @@ impl RenderState {
         // Rebuild pipeline layout to include the new texture bind group
         if let Err(e) = self.rebuild_pipeline_layout() {
             warn!("Failed to rebuild pipeline layout for slideshow: {}", e);
+        };
+
+        if def.ty == "video" {
+            Ok(SlideshowEvent::SwappedToVideo { source })
+        } else {
+            Ok(SlideshowEvent::SwappedToImage)
         }
     }
 
     /// Advance slideshow timer and switch textures when needed.
     ///
     /// Called once per frame from the render loop with the frame's delta time.
-    pub fn update_slideshow(&mut self, dt: f64) {
+    pub fn update_slideshow(&mut self, dt: f64) -> Result<SlideshowEvent> {
         let should_advance = if let Some(ref mut slideshow) = self.slideshow {
             if slideshow.order.is_empty() {
                 false
@@ -1653,10 +1695,11 @@ impl RenderState {
 
         if let (true, Some(ref slideshow)) = (should_advance, &self.slideshow) {
             let idx = slideshow.current;
-            let total = slideshow.all_textures.len();
+            let total = slideshow.defs.len();
             info!("Slideshow: advancing to image {} of {}", idx + 1, total);
-            self.swap_slideshow_texture(idx);
-        }
+            return self.swap_slideshow_texture(idx);
+        };
+        Ok(SlideshowEvent::None)
     }
 
     // -------------------------------------------------------------------
@@ -1666,11 +1709,11 @@ impl RenderState {
     /// Create or resize the video frame texture.
     ///
     /// Called when a video is first loaded or when the video dimensions change.
-    pub fn create_video_texture(&mut self, width: u32, height: u32) -> Result<()> {
+    pub fn create_video_texture(&mut self, width: u32, height: u32, index: usize) -> Result<()> {
         let device = self.device.as_ref().context("GPU not initialised")?;
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("kroma-video-frame"),
+            label: Some(&format!("kroma-video-{}", index)),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -1686,13 +1729,13 @@ impl RenderState {
 
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("kroma-video-frame-sampler"),
+            label: Some(&format!("kroma-video-sampler-{}", index)),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
 
-        let video_tex = LoadedTexture {
+        let new_tex = LoadedTexture {
             texture,
             view,
             sampler,
@@ -1701,36 +1744,48 @@ impl RenderState {
         };
 
         // Put it in the main textures array (slot 0) and rebuild bind group
-        self.textures.clear();
-        self.textures.push(video_tex);
+        if index < self.textures.len() {
+            self.textures[index] = new_tex;
+        } else {
+            // Should not happen if placeholders were created correctly
+            warn!(
+                "Attempted to create video at index {} but only {} textures exist",
+                index,
+                self.textures.len()
+            );
+            self.textures.push(new_tex);
+        }
         self.build_texture_bind_group()?;
 
         // Also store a reference dimension in video_texture
         // (we use self.textures[0] for the actual GPU resources)
-        info!("Video texture created ({}x{})", width, height);
+        info!(
+            "Video texture created at index {} ({}x{})",
+            index, width, height
+        );
         Ok(())
     }
 
     /// Upload a raw RGBA frame to the video texture.
     ///
     /// Called once per frame from the render loop when a video is playing.
-    pub fn update_video_frame(&mut self, rgba_data: &[u8], width: u32, height: u32) {
+    pub fn update_video_frame(&mut self, rgba_data: &[u8], width: u32, height: u32, index: usize) {
         // Check if we need to resize
         let needs_resize = self.textures.is_empty()
-            || self.textures[0].width != width
-            || self.textures[0].height != height;
+            || self.textures[index].width != width
+            || self.textures[index].height != height;
 
         if needs_resize {
-            if let Err(e) = self.create_video_texture(width, height) {
+            if let Err(e) = self.create_video_texture(width, height, index) {
                 warn!("Failed to create/resize video texture: {}", e);
                 return;
             }
         }
 
-        if let (Some(queue), Some(tex)) = (self.queue.as_ref(), self.textures.first()) {
+        if let Some(queue) = self.queue.as_ref() {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &tex.texture,
+                    texture: &self.textures[index].texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -1768,7 +1823,7 @@ impl RenderState {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("kroma-pl"),
             bind_group_layouts: &layouts,
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         self.pipeline_layout = Some(pipeline_layout);
@@ -1870,10 +1925,12 @@ impl RenderState {
                         }),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
 
             if let (Some(pipeline), Some(bind_group)) = (pipeline, bind_group) {
@@ -1975,10 +2032,12 @@ impl RenderState {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind_group, &[]);
@@ -2019,7 +2078,7 @@ impl RenderState {
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(PollType::wait_indefinitely());
 
         rx.recv()
             .map_err(|_| anyhow::anyhow!("Buffer map channel closed"))?
@@ -2126,9 +2185,9 @@ fn glsl_to_wgsl(glsl_source: &str) -> Result<String> {
 
     // --- Step 1: GLSL → SPIR-V via shaderc -----------------------------------
     let compiler = shaderc::Compiler::new()
-        .ok_or_else(|| anyhow::anyhow!("Failed to create shaderc compiler"))?;
+        .map_err(|_| anyhow::anyhow!("Failed to create shaderc compiler"))?;
     let mut options = shaderc::CompileOptions::new()
-        .ok_or_else(|| anyhow::anyhow!("Failed to create shaderc compile options"))?;
+        .map_err(|_| anyhow::anyhow!("Failed to create shaderc compile options"))?;
     options.set_target_env(
         shaderc::TargetEnv::Vulkan,
         shaderc::EnvVersion::Vulkan1_0 as u32,

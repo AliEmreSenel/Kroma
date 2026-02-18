@@ -67,6 +67,14 @@ impl DockNode {
         }
     }
 
+    /// Create a leaf with a single panel.
+    pub fn multi_leaf(panels: Vec<PanelId>) -> Self {
+        Self::Leaf {
+            tabs: panels,
+            active: 0,
+        }
+    }
+
     /// Create a horizontal split (left | right).
     pub fn hsplit(ratio: f32, left: DockNode, right: DockNode) -> Self {
         Self::Split {
@@ -109,7 +117,7 @@ impl DockNode {
         let right_sidebar = DockNode::leaf(PanelId::LivePreview);
 
         // Center: Main view — Asset Preview (context-aware)
-        let center = DockNode::leaf(PanelId::AssetPreview);
+        let center = DockNode::multi_leaf(vec![PanelId::AssetPreview, PanelId::CodeEditor]);
 
         // Main area: left sidebar | center | right sidebar
         let main_area = DockNode::hsplit(
@@ -477,16 +485,6 @@ mod tests {
         } else {
             panic!("Expected Split");
         }
-    }
-
-    #[test]
-    fn find_panel_in_tree() {
-        let tree = DockNode::default_layout();
-        let path = tree.find_panel(PanelId::NodeEditor, &mut Vec::new());
-        assert!(
-            path.is_some(),
-            "NodeEditor should be findable in default layout"
-        );
     }
 
     /// Regression test: dropping a panel from the left child of a split onto

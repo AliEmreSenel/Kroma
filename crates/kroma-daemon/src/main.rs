@@ -14,69 +14,97 @@ mod surface;
 mod surface_x11;
 mod video;
 
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    path::Path,
+};
+
 use anyhow::Result;
 use glam::Vec2;
 use log::info;
 
-use kroma_shared::traits::{DataProvider, SurfaceProvider, VideoDecoder};
+use kroma_shared::{
+    shade::LiveShadePackage,
+    traits::{DataProvider, SurfaceProvider, VideoDecoder},
+};
 
-use crate::audio::{AudioProvider, CpalAudioProvider, SilentAudioProvider, SimulatedAudioProvider};
+use crate::{
+    audio::{AudioProvider, CpalAudioProvider, SilentAudioProvider},
+    renderer::{LoadResult, SlideshowEvent},
+    video::DefaultVideoDecoder,
+};
+
+fn video_decoder_for_source(
+    pkg: &LiveShadePackage,
+    source: &String,
+) -> Option<DefaultVideoDecoder> {
+    // We need to know the index of each texture to update the correct slot in RenderState.
+    // RenderState sorts textures by binding index. We must replicate that sort order here.
+    if let Some(video_data) = pkg.read_asset(source) {
+        match extract_video_to_temp(source, &video_data) {
+            Ok(temp_path) => match DefaultVideoDecoder::load(&temp_path) {
+                Ok(decoder) => {
+                    return Some(decoder);
+                }
+                Err(e) => {
+                    log::warn!("Decoder error: {}", e);
+                    return None;
+                }
+            },
+            Err(e) => {
+                log::warn!("Extract error: {}", e);
+                return None;
+            }
+        }
+    }
+    // 2. Try loading from disk (Folder package)
+    else {
+        let video_path = std::path::Path::new(source);
+        match DefaultVideoDecoder::load(video_path) {
+            Ok(decoder) => {
+                log::info!("Video decoder created for texture ({})", source);
+                return Some(decoder);
+            }
+            Err(e) => {
+                log::warn!("Failed to create video decoder for '{}': {}", source, e);
+                return None;
+            }
+        }
+    }
+}
 
 /// Try to create a video decoder for a shade package.
 ///
 /// Scans the package's texture definitions for any `ty == "video"` entries
 /// and attempts to create an FFmpeg decoder for the first one found.
 /// Works regardless of WallpaperMode — any package can include video textures.
-fn try_create_video_decoder(
-    pkg: &kroma_shared::shade::ShadePackage,
-) -> Option<video::DefaultVideoDecoder> {
-    // Find the first video texture source
-    for tex_def in pkg.config.textures.values() {
-        if tex_def.ty == "video" {
-            if let Some(ref source) = tex_def.source {
-                // Try loading from temp-extracted data first (for ZIP packages)
-                if let Some(video_data) = pkg
-                    .assets
-                    .iter()
-                    .find(|(path, _)| path == source || path.ends_with(source))
-                    .map(|(_, data)| data.as_slice())
-                {
-                    // Extract video to a temp file for FFmpeg
-                    match extract_video_to_temp(source, video_data) {
-                        Ok(temp_path) => match video::DefaultVideoDecoder::load(&temp_path) {
-                            Ok(decoder) => {
-                                log::info!("Video decoder created from package asset '{}'", source);
-                                return Some(decoder);
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Failed to create video decoder for '{}': {}",
-                                    source,
-                                    e
-                                );
-                            }
-                        },
-                        Err(e) => {
-                            log::warn!("Failed to extract video '{}' to temp: {}", source, e);
-                        }
-                    }
-                } else {
-                    // Try as a direct file path on disk
-                    let video_path = std::path::Path::new(source);
-                    match video::DefaultVideoDecoder::load(video_path) {
-                        Ok(decoder) => {
-                            log::info!("Video decoder created for '{}'", source);
-                            return Some(decoder);
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to create video decoder for '{}': {}", source, e);
-                        }
-                    }
+/// Try to create a video decoder for a shade package.
+///
+/// Scans the package's texture definitions for any `ty == "video"` entries
+/// and attempts to create an FFmpeg decoder for the first one found.
+/// Works regardless of WallpaperMode — any package can include video textures.
+fn try_create_video_decoders(pkg: &LiveShadePackage) -> Vec<(usize, DefaultVideoDecoder)> {
+    let mut decoders = Vec::new();
+
+    // We need to know the index of each texture to update the correct slot in RenderState.
+    // RenderState sorts textures by binding index. We must replicate that sort order here.
+    let mut tex_defs: Vec<_> = pkg.config.textures.iter().collect();
+    tex_defs.sort_by_key(|(_, def)| def.binding.unwrap_or(u32::MAX));
+
+    // Iterate through sorted textures to match RenderState's internal `self.textures` vector
+    for (i, (_name, def)) in tex_defs.iter().enumerate() {
+        if def.ty == "video" {
+            if let Some(ref source) = def.source {
+                // 1. Try loading from embedded assets (ZIP package)
+                match video_decoder_for_source(pkg, source) {
+                    Some(d) => decoders.push((i, d)),
+                    None => (),
                 }
             }
         }
     }
-    None
+
+    decoders
 }
 
 /// Extract embedded video data to a temp file so FFmpeg can open it.
@@ -90,14 +118,12 @@ fn extract_video_to_temp(source: &str, data: &[u8]) -> Result<std::path::PathBuf
     // Use a unique filename based on content hash to avoid clobbering
     // when multiple video textures or daemon instances exist.
     let hash = {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
         source.hash(&mut h);
         data.len().hash(&mut h);
         h.finish()
     };
-    let temp_path = temp_dir.join(format!("video_{:016x}.{}", hash, extension));
+    let temp_path = temp_dir.join(format!("kroma-video_{:016x}.{}", hash, extension));
     std::fs::write(&temp_path, data)?;
     log::info!("Extracted video to temp: {}", temp_path.display());
     Ok(temp_path)
@@ -302,19 +328,14 @@ fn main() -> Result<()> {
     // ---------------------------------------------------------------
     // 2b. Start audio provider
     // ---------------------------------------------------------------
-    let audio_provider: Box<dyn AudioProvider> = if std::env::var("KROMA_SIMULATE_AUDIO").is_ok() {
-        info!("Using simulated audio provider");
-        Box::new(SimulatedAudioProvider::new())
-    } else {
-        match CpalAudioProvider::new() {
-            Ok(provider) => {
-                info!("Using cpal audio provider (real audio capture)");
-                Box::new(provider)
-            }
-            Err(e) => {
-                info!("cpal audio unavailable ({}), using silent provider", e);
-                Box::new(SilentAudioProvider)
-            }
+    let audio_provider: Box<dyn AudioProvider> = match CpalAudioProvider::new() {
+        Ok(provider) => {
+            info!("Using cpal audio provider (real audio capture)");
+            Box::new(provider)
+        }
+        Err(e) => {
+            info!("cpal audio unavailable ({}), using silent provider", e);
+            Box::new(SilentAudioProvider)
         }
     };
 
@@ -420,20 +441,40 @@ fn main() -> Result<()> {
 
     // Load initial shade if configured
     let mut current_shade_path: Option<String> = None;
-    let mut video_decoder: Option<video::DefaultVideoDecoder> = None;
-    let mut video_frame_accum: f64 = 0.0; // Time accumulator for video frame pacing
-    const VIDEO_FPS: f64 = 30.0; // Default video frame rate
-    const VIDEO_FRAME_INTERVAL: f64 = 1.0 / VIDEO_FPS;
+    let mut video_decoders: Vec<(usize, DefaultVideoDecoder)> = vec![];
+    let mut video_frame_accums: Vec<f64> = vec![]; // Time accumulator for video frame pacing
     if let Some(ref shade_path) = daemon_config.current_shade {
         info!("Loading initial shade: {}", shade_path);
-        match kroma_shared::shade::ShadePackage::load(std::path::Path::new(shade_path)) {
+        match LiveShadePackage::load(Path::new(shade_path)) {
             Ok(pkg) => {
-                video_decoder = try_create_video_decoder(&pkg);
-                video_frame_accum = 0.0;
-                match render_state.load_shade(&pkg) {
-                    Ok(()) => {
+                if !(pkg.config.slideshow.interval > 0.0) {
+                    video_decoders = try_create_video_decoders(&pkg);
+                } else {
+                    video_decoders = vec![];
+                }
+                video_frame_accums = vec![0.0].repeat(video_decoders.len());
+
+                let pkg_name = pkg.config.meta.name.clone();
+                match render_state.load_shade(pkg) {
+                    Ok(res) => {
+                        match res {
+                            LoadResult::Slideshow(event) => match event {
+                                SlideshowEvent::SwappedToVideo { source } => {
+                                    video_decoders.push((
+                                        0,
+                                        video_decoder_for_source(
+                                            render_state.active_package.as_ref().unwrap(),
+                                            &source,
+                                        )
+                                        .unwrap(),
+                                    ));
+                                }
+                                SlideshowEvent::SwappedToImage | SlideshowEvent::None => (),
+                            },
+                            LoadResult::Other => (),
+                        }
                         current_shade_path = Some(shade_path.clone());
-                        info!("Initial shade loaded: {}", pkg.config.meta.name);
+                        info!("Initial shade loaded: {}", pkg_name);
                     }
                     Err(e) => log::warn!("Failed to compile initial shade shader: {}", e),
                 }
@@ -544,14 +585,38 @@ fn main() -> Result<()> {
                 }
                 DaemonCommand::LoadShade { path } => {
                     info!("Loading shade package: {}", path);
-                    match kroma_shared::shade::ShadePackage::load(std::path::Path::new(&path)) {
+                    match LiveShadePackage::load(std::path::Path::new(&path)) {
                         Ok(pkg) => {
-                            video_decoder = try_create_video_decoder(&pkg);
-                            video_frame_accum = 0.0;
-                            match render_state.load_shade(&pkg) {
-                                Ok(()) => {
-                                    current_shade_path = Some(path.clone());
-                                    info!("Loaded: {}", pkg.config.meta.name);
+                            if !(pkg.config.slideshow.interval > 0.0) {
+                                video_decoders = try_create_video_decoders(&pkg);
+                            } else {
+                                video_decoders = vec![];
+                            }
+                            video_frame_accums = vec![0.0].repeat(video_decoders.len());
+                            let pkg_name = pkg.config.meta.name.clone();
+                            match render_state.load_shade(pkg) {
+                                Ok(res) => {
+                                    match res {
+                                        LoadResult::Slideshow(event) => match event {
+                                            SlideshowEvent::SwappedToVideo { source } => {
+                                                video_decoders.push((
+                                                    0,
+                                                    video_decoder_for_source(
+                                                        render_state
+                                                            .active_package
+                                                            .as_ref()
+                                                            .unwrap(),
+                                                        &source,
+                                                    )
+                                                    .unwrap(),
+                                                ));
+                                            }
+                                            SlideshowEvent::SwappedToImage
+                                            | SlideshowEvent::None => (),
+                                        },
+                                        LoadResult::Other => (),
+                                    }
+                                    info!("Reloaded: {}", pkg_name);
                                     send_response(
                                         &response_tx,
                                         DaemonEvent::CompileResult {
@@ -598,13 +663,38 @@ fn main() -> Result<()> {
                 DaemonCommand::Reload => {
                     if let Some(ref path) = current_shade_path {
                         info!("Reloading shade: {}", path);
-                        match kroma_shared::shade::ShadePackage::load(std::path::Path::new(path)) {
+                        match LiveShadePackage::load(std::path::Path::new(path)) {
                             Ok(pkg) => {
-                                video_decoder = try_create_video_decoder(&pkg);
-                                video_frame_accum = 0.0;
-                                match render_state.load_shade(&pkg) {
-                                    Ok(()) => {
-                                        info!("Reloaded: {}", pkg.config.meta.name);
+                                if !(pkg.config.slideshow.interval > 0.0) {
+                                    video_decoders = try_create_video_decoders(&pkg);
+                                } else {
+                                    video_decoders = vec![];
+                                }
+                                video_frame_accums = vec![0.0].repeat(video_decoders.len());
+                                let pkg_name = pkg.config.meta.name.clone();
+                                match render_state.load_shade(pkg) {
+                                    Ok(res) => {
+                                        match res {
+                                            LoadResult::Slideshow(event) => match event {
+                                                SlideshowEvent::SwappedToVideo { source } => {
+                                                    video_decoders.push((
+                                                        0,
+                                                        video_decoder_for_source(
+                                                            render_state
+                                                                .active_package
+                                                                .as_ref()
+                                                                .unwrap(),
+                                                            &source,
+                                                        )
+                                                        .unwrap(),
+                                                    ));
+                                                }
+                                                SlideshowEvent::SwappedToImage
+                                                | SlideshowEvent::None => (),
+                                            },
+                                            LoadResult::Other => (),
+                                        }
+                                        info!("Reloaded: {}", pkg_name);
                                         send_response(
                                             &response_tx,
                                             DaemonEvent::CompileResult {
@@ -775,24 +865,49 @@ fn main() -> Result<()> {
         render_state.update_audio_spectrum(&audio_spectrum);
 
         // Advance slideshow if active
-        render_state.update_slideshow(dt as f64);
+
+        match render_state.update_slideshow(dt as f64) {
+            Ok(res) => match res {
+                SlideshowEvent::SwappedToVideo { source } => {
+                    video_decoders = vec![];
+                    video_decoders.push((
+                        0,
+                        video_decoder_for_source(
+                            render_state.active_package.as_ref().unwrap(),
+                            &source,
+                        )
+                        .unwrap(),
+                    ));
+                    video_frame_accums = vec![0.0].repeat(video_decoders.len());
+                }
+                SlideshowEvent::SwappedToImage => {
+                    video_decoders = vec![];
+                }
+                SlideshowEvent::None => (),
+            },
+
+            Err(e) => {
+                panic!("{:?}", e)
+            }
+        }
 
         // Decode and upload next video frame at the video's native FPS
-        if let Some(ref mut decoder) = video_decoder {
-            video_frame_accum += dt as f64;
-            while video_frame_accum >= VIDEO_FRAME_INTERVAL {
-                video_frame_accum -= VIDEO_FRAME_INTERVAL;
+
+        for (i, (tex_index, decoder)) in video_decoders.iter_mut().enumerate() {
+            video_frame_accums[i] += dt as f64;
+            while video_frame_accums[i] >= decoder.frame_interval() {
+                video_frame_accums[i] -= decoder.frame_interval();
                 let (vw, vh) = decoder.dimensions();
                 match decoder.next_frame() {
                     Some(rgba_data) => {
-                        render_state.update_video_frame(rgba_data, vw, vh);
+                        // Update the specific texture slot associated with this video
+                        render_state.update_video_frame(rgba_data, vw, vh, *tex_index);
                     }
                     None => {
-                        // End of video — loop back to start
+                        // Loop video
                         if let Err(e) = decoder.seek(0.0) {
-                            log::warn!("Video seek-to-start failed: {}", e);
+                            log::warn!("Video {} seek failed: {}", tex_index, e);
                         }
-                        break; // Don't try more frames after seek
                     }
                 }
             }

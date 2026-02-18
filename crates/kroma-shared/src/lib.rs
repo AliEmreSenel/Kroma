@@ -6,7 +6,6 @@
 
 pub mod error;
 pub mod ipc;
-pub mod mock;
 pub mod shade;
 pub mod traits;
 pub mod translator;

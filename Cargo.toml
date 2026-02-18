@@ -19,12 +19,12 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.8"
+toml = "1.0"
 log = "0.4"
 env_logger = "0.11"
 
 # GPU / Rendering
-wgpu = "24"
+wgpu = "28"
 raw-window-handle = "0.6"
 
 # Wayland
@@ -32,29 +32,29 @@ wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-smithay-client-toolkit = "0.19"
+smithay-client-toolkit = "0.20"
 
 # Data providers
-sysinfo = "0.33"
+sysinfo = "0.38"
 
 # Shader translation
 regex = "1"
-naga = { version = "24", features = ["glsl-in", "wgsl-out", "spv-in"] }
-shaderc = "0.8"
+naga = { version = "28", features = ["glsl-in", "wgsl-out", "spv-in"] }
+shaderc = "0.10"
 
 # X11 support
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr"] }
-libloading = "0.8"
+libloading = "0.9"
 
 # IPC
 tokio = { version = "1", features = ["full"] }
 
 # .shade packaging
-zip = { version = "2", features = ["zstd"] }
+zip = { version = "8", features = ["zstd"] }
 memmap2 = "0.9"
 
 # Math
-glam = "0.29"
+glam = "0.32"
 
 # Byte handling
 bytemuck = { version = "1", features = ["derive"] }
@@ -66,7 +66,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 base64 = "0.22"
 
 # Audio
-cpal = "0.15"
+cpal = "0.17"
 rustfft = "6"
 
 # Video decoding (optional, needs system ffmpeg libs)
@@ -77,10 +77,10 @@ fontdue = "0.9"
 
 # GUI
 iced = { version = "0.13", features = ["tokio", "canvas", "image"] }
-rfd = "0.15"
+rfd = "0.17"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.13", features = ["json"] }
 
 [profile.release]
 opt-level = 3

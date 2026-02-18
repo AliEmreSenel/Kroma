@@ -7,6 +7,9 @@ use crate::Message;
 
 use iced::widget::text_editor;
 use iced::Task;
+use kroma_shared::shade::LiveShadePackage;
+use kroma_shared::types::ShadeConfig;
+use kroma_shared::types::ShadeMeta;
 
 use super::KromaApp;
 
@@ -15,8 +18,8 @@ impl KromaApp {
     pub(crate) fn handle_shade_msg(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ShadeNew => {
-                let config = kroma_shared::types::ShadeConfig {
-                    meta: kroma_shared::types::ShadeMeta {
+                let config = ShadeConfig {
+                    meta: ShadeMeta {
                         name: "New Shader".into(),
                         author: "Kroma User".into(),
                         version: "1.0".into(),
@@ -34,14 +37,9 @@ impl KromaApp {
                 };
                 let default_frag = "// Kroma shader\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = fragCoord / u_resolution;\n    fragColor = vec4(uv, 0.5 + 0.5 * sin(u_time), 1.0);\n}\n";
                 self.shade_config = config.clone();
-                self.shade_package = Some(kroma_shared::shade::LiveShadePackage::from_package(
-                    kroma_shared::shade::ShadePackage {
-                        config,
-                        shader_source: Some(default_frag.into()),
-                        preview: None,
-                        assets: Vec::new(),
-                    },
-                ));
+                let mut pkg = LiveShadePackage::new_empty(config);
+                pkg.shader_source = Some(default_frag.into());
+                self.shade_package = Some(pkg);
                 self.shade_shader_content = text_editor::Content::with_text(default_frag);
                 self.shade_loaded_path = None;
                 self.shade_selected_file = Some("config.toml".into());
@@ -84,15 +82,7 @@ impl KromaApp {
                         match toml::from_str::<kroma_shared::types::ShadeConfig>(&toml_str) {
                             Ok(config) => {
                                 self.shade_config = config.clone();
-                                self.shade_package =
-                                    Some(kroma_shared::shade::LiveShadePackage::from_package(
-                                        kroma_shared::shade::ShadePackage {
-                                            config,
-                                            shader_source: None,
-                                            preview: None,
-                                            assets: Vec::new(),
-                                        },
-                                    ));
+                                self.shade_package = Some(LiveShadePackage::new_empty(config));
                                 self.shade_loaded_path = Some(path.clone());
                                 self.sync_shade_toml();
                                 self.log_msg(format!("Opened: {}", path.display()));
@@ -295,6 +285,7 @@ impl KromaApp {
             }
             Message::ShadeSendToDaemon => {
                 let src = self.shade_shader_content.text();
+                self.log_msg(src.clone());
                 if src.trim().is_empty() {
                     self.log_msg("No shader source to send".into());
                 } else {
@@ -369,11 +360,7 @@ impl KromaApp {
             Message::ShadeBindAssetToTexture(asset_name, channel) => {
                 let channel_name = format!("iChannel{}", channel);
                 // Determine texture type from extension
-                let ext = asset_name
-                    .rsplit('.')
-                    .next()
-                    .unwrap_or("")
-                    .to_lowercase();
+                let ext = asset_name.rsplit('.').next().unwrap_or("").to_lowercase();
                 let tex_type = match ext.as_str() {
                     "mp4" | "webm" | "avi" | "mkv" => "video",
                     "glsl" | "frag" => "glsl",
