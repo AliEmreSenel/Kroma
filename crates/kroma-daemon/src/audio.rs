@@ -11,6 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use anyhow::{anyhow, Context};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rustfft::{num_complex::Complex, FftPlanner};
 
@@ -101,72 +102,73 @@ impl CpalAudioProvider {
                     .ok_or_else(|| anyhow::anyhow!("No microphone available"))?
             }
             "desktop" | "" => {
-                // Try to find monitor source via pactl (Linux PulseAudio/PipeWire)
-                let pa_monitor = get_default_sink_monitor();
+                #[cfg(target_os = "windows")]
+                {
+                    // Windows: Loopback is captured via the render (output) device.
+                    // CPAL detects this usage and enables WASAPI loopback automatically.
+                    log::info!("Audio (Windows): Selecting default output for Loopback");
+                    host.default_output_device()
+                        .context("No default output device available")
+                }
 
-                let monitor_device = if let Some(ref monitor_name) = pa_monitor {
-                    log::info!("Audio: PulseAudio default sink monitor: {}", monitor_name);
+                #[cfg(target_os = "linux")]
+                {
+                    // Linux: We need to find the "Monitor" source.
+                    // 1. Try to find a device explicitly named "monitor"
+                    // 2. Fallback to "pulse" or "pipewire" which often default to the monitor in desktop environments.
 
-                    // Try direct match first
-                    let direct = host.input_devices().ok().and_then(|devices| {
-                        devices
-                            .filter_map(|d| {
-                                let name = d.name().ok()?;
-                                if name == *monitor_name {
-                                    Some(d)
-                                } else {
-                                    None
-                                }
-                            })
-                            .next()
-                    });
+                    log::info!("Audio (Linux): Searching for monitor device...");
 
-                    if direct.is_some() {
-                        direct
+                    let mut devices = host
+                        .input_devices()
+                        .context("Failed to list input devices")?;
+
+                    // Priority 1: Explicit Monitor Device
+                    // Some ALSA setups expose 'hw:0,0' and 'hw:0,1' where one is a monitor.
+                    // We look for 'monitor' in the name if CPAL exposes it.
+                    if let Some(dev) = devices.find(|d| {
+                        d.description()
+                            .map(|desc| desc.name().to_lowercase().contains("monitor"))
+                            .unwrap_or(false)
+                    }) {
+                        log::info!(
+                            "Audio: Found explicit monitor device: {}",
+                            dev.description()
+                                .map(|desc| desc.name().to_string())
+                                .unwrap_or_default()
+                        );
+                        dev
                     } else {
-                        // Fallback: Set PULSE_SOURCE and look for "pulse" or "default" ALSA device
-                        std::env::set_var("PULSE_SOURCE", monitor_name);
-                        host.input_devices().ok().and_then(|devices| {
-                            devices
-                                .filter_map(|d| {
-                                    let name = d.name().ok()?;
-                                    if name == "pulse" || name == "default" {
-                                        Some(d)
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .next()
-                        })
+                        // Priority 2: PulseAudio / PipeWire Server
+                        // If we can't find a hardware monitor, we connect to the sound server.
+                        // The *default* input on a desktop Linux setup is usually the mic,
+                        // BUT the "PulseAudio Sound Server" device is often the bridge we need.
+                        // We try to find the specific bridge device rather than the default input.
+                        let bridge = host.input_devices()?.find(|d| {
+                            let name = d
+                                .description()
+                                .map(|desc| desc.name().to_lowercase())
+                                .unwrap_or_default();
+                            name == "pulseaudio sound server" || name == "pipewire sound server"
+                        });
+
+                        if let Some(dev) = bridge {
+                            log::info!(
+                                "Audio: Using Sound Server Bridge: {}",
+                                dev.description()
+                                    .map(|desc| desc.name().to_string())
+                                    .unwrap_or_default()
+                            );
+                            dev
+                        } else {
+                            return Err(anyhow!("Audio: No monitor or bridge found."));
+                        }
                     }
-                } else {
-                    None
-                };
+                }
 
-                // Fallback: substring match "monitor"
-                let monitor_device = monitor_device.or_else(|| {
-                    host.input_devices().ok().and_then(|devices| {
-                        devices
-                            .filter_map(|d| {
-                                let name = d.name().ok()?.to_lowercase();
-                                if name.contains("monitor") {
-                                    Some(d)
-                                } else {
-                                    None
-                                }
-                            })
-                            .next()
-                    })
-                });
-
-                if let Some(dev) = monitor_device {
-                    log::info!(
-                        "Audio: using desktop monitor: {}",
-                        dev.name().unwrap_or_default()
-                    );
-                    dev
-                } else {
-                    return Err(anyhow::anyhow!("No desktop audio monitor source found."));
+                #[cfg(target_os = "macos")]
+                {
+                    return Err(anyhow!("MacOS doesnt support monitoring desktop output by default. Select the exact output to monitor."));
                 }
             }
             device_name => host
@@ -175,11 +177,13 @@ impl CpalAudioProvider {
                 .and_then(|devices| {
                     devices
                         .filter_map(|d| {
-                            let name = d.name().ok()?;
-                            if name.contains(device_name) {
-                                Some(d)
-                            } else {
-                                None
+                            match d
+                                .description()
+                                .map(|desc| desc.name().to_string().contains(device_name))
+                                .unwrap_or(false)
+                            {
+                                true => Some(d),
+                                false => None,
                             }
                         })
                         .next()
@@ -353,42 +357,6 @@ impl AudioProvider for CpalAudioProvider {
     fn get_level(&self) -> f32 {
         self.state.get_level()
     }
-}
-
-/// Query PulseAudio/PipeWire for the monitor source of the current default sink.
-///
-/// Runs `pactl get-default-sink` to get the default output device name, then
-/// appends ".monitor" which is the standard PulseAudio naming convention for
-/// the loopback/monitor source of a sink.
-///
-/// Returns `None` if pactl is not available or the command fails.
-fn get_default_sink_monitor() -> Option<String> {
-    use std::process::Command;
-
-    // Get the default sink name (e.g. "alsa_output.pci-0000_00_1f.3.analog-stereo")
-    let output = Command::new("pactl")
-        .arg("get-default-sink")
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        log::debug!("pactl get-default-sink failed (status {})", output.status);
-        return None;
-    }
-
-    let sink_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if sink_name.is_empty() {
-        return None;
-    }
-
-    // The monitor source is conventionally "<sink_name>.monitor"
-    let monitor_name = format!("{}.monitor", sink_name);
-    log::debug!(
-        "Default sink: {} → monitor source: {}",
-        sink_name,
-        monitor_name
-    );
-    Some(monitor_name)
 }
 
 #[cfg(test)]

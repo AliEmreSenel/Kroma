@@ -41,9 +41,6 @@ pub trait SurfaceProvider {
 
 /// Provides normalised system data to the shader uniform buffer.
 pub trait DataProvider: Send + Sync {
-    /// Returns a normalised audio spectrum (512 bands, each 0.0–1.0).
-    fn get_audio_spectrum(&self) -> Vec<f32>;
-
     /// Returns a snapshot of current system stats.
     fn get_system_stats(&self) -> SystemStats;
 

@@ -76,7 +76,7 @@ ffmpeg-next = "8"
 fontdue = "0.9"
 
 # GUI
-iced = { version = "0.13", features = ["tokio", "canvas", "image"] }
+iced = { version = "0.14", features = ["tokio", "canvas", "image"] }
 rfd = "0.17"
 
 # HTTP client

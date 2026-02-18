@@ -84,12 +84,6 @@ impl SystemDataProvider {
 }
 
 impl DataProvider for SystemDataProvider {
-    fn get_audio_spectrum(&self) -> Vec<f32> {
-        // TODO: Implement Pipewire/Pulse audio FFT capture.
-        // For now, return a silent 512-band spectrum.
-        vec![0.0; 512]
-    }
-
     fn get_system_stats(&self) -> SystemStats {
         let sys = self.sys.lock().unwrap_or_else(|e| e.into_inner());
         let cpu_usage = sys.global_cpu_usage();
