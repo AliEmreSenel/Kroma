@@ -1,5 +1,7 @@
 //! Core types shared across the Kroma engine.
 
+use std::collections::HashMap;
+
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
@@ -146,17 +148,16 @@ pub struct ShadeConfig {
     #[serde(default)]
     pub audio: AudioConfig,
     #[serde(default)]
-    pub uniforms: std::collections::HashMap<String, UniformDef>,
+    pub uniforms: HashMap<String, UniformDef>,
     #[serde(default)]
-    pub textures: std::collections::HashMap<String, TextureDef>,
+    pub textures: HashMap<String, TextureDef>,
+    pub slideshow: Option<SlideshowConfig>,
     #[serde(default)]
-    pub slideshow: SlideshowConfig,
-    #[serde(default)]
-    pub fonts: std::collections::HashMap<String, FontDef>,
+    pub fonts: HashMap<String, FontDef>,
     /// Render buffer passes (multi-pass shaders, Shadertoy-style).
     /// Keys are buffer names like "A", "B", "C", "D".
     #[serde(default)]
-    pub buffers: std::collections::HashMap<String, BufferDef>,
+    pub buffers: HashMap<String, BufferDef>,
 }
 
 /// Package metadata.

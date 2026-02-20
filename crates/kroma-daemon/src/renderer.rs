@@ -3,6 +3,7 @@
 //! Manages the GPU device, shader module, uniform buffer, and frame
 //! rendering. Renders to a real Wayland or X11 surface via wgpu.
 
+use std::collections::HashMap;
 use std::ptr::NonNull;
 
 use anyhow::{Context, Result};
@@ -133,11 +134,6 @@ pub enum SlideshowEvent {
     SwappedToVideo { source: String },
 }
 
-pub enum LoadResult {
-    Slideshow(SlideshowEvent),
-    Other,
-}
-
 /// State for a single render buffer pass (multi-pass rendering).
 #[allow(dead_code)]
 struct BufferPassState {
@@ -168,9 +164,9 @@ pub struct RenderState {
     pub active_package: Option<LiveShadePackage>,
 
     /// Custom uniforms set via IPC (name → value).
-    custom_uniforms: std::collections::HashMap<String, kroma_shared::ipc::UniformValue>,
+    custom_uniforms: HashMap<String, kroma_shared::ipc::UniformValue>,
     /// Mapping from custom uniform name → index in the storage buffer.
-    custom_uniform_indices: std::collections::HashMap<String, usize>,
+    custom_uniform_indices: HashMap<String, usize>,
     /// CPU-side custom uniform data (uploaded to GPU each frame).
     custom_uniform_data: Vec<f32>,
     /// GPU storage buffer for custom uniform values.
@@ -715,15 +711,14 @@ impl RenderState {
     /// If the package has a GLSL shader, translates it to WGSL and builds the
     /// pipeline. If it has image/video assets, loads them as GPU textures.
     /// If there is no shader (image/video mode), uses a default sampler shader.
-    pub fn load_shade(&mut self, pkg: LiveShadePackage) -> Result<LoadResult> {
+    pub fn load_shade(&mut self, pkg: LiveShadePackage) -> Result<()> {
         // Reset slideshow state
         self.slideshow = None;
         self.textures.clear();
         // Clear any existing buffer passes from the previous shader
         self.buffer_passes.clear();
 
-        let is_slide = pkg.config.slideshow.interval > 0.0;
-        let mut res = LoadResult::Other;
+        let is_slide = pkg.config.slideshow.is_some();
 
         // Set up slideshow if configured (interval > 0) and we have 2+ textures.
         // Works regardless of mode — any package can cycle through its textures.
@@ -731,7 +726,7 @@ impl RenderState {
             let mut tex_defs: Vec<TextureDef> = pkg.config.textures.values().cloned().collect();
             tex_defs.sort_by(|a, b| a.source.cmp(&b.source));
 
-            let config = &pkg.config.slideshow;
+            let config = pkg.config.slideshow.as_ref().unwrap();
             let count = tex_defs.len();
             let mut order: Vec<usize> = (0..count).collect();
             if config.shuffle {
@@ -825,17 +820,13 @@ impl RenderState {
             }
         }
 
-        if is_slide {
-            res = LoadResult::Slideshow(self.swap_slideshow_texture(0)?);
-        }
-
         info!(
             "Shade package '{}' loaded successfully ({} textures)",
             pkg.config.meta.name,
             self.textures.len()
         );
         self.active_package = Some(pkg);
-        Ok(res)
+        Ok(())
     }
 
     /// Load a raw WGSL fragment shader string (used for the default shader or testing).
@@ -1293,7 +1284,7 @@ impl RenderState {
                 source, name
             );
         }
-        return None;
+        None
     }
 
     /// Load all textures referenced by a shade package's config.
@@ -1314,9 +1305,8 @@ impl RenderState {
 
         if load_texs {
             for (name, def) in &tex_defs {
-                match self.load_texture(device, queue, name, pkg, def) {
-                    Some(tex) => self.textures.push(tex),
-                    None => (),
+                if let Some(tex) = self.load_texture(device, queue, name, pkg, def) {
+                    self.textures.push(tex)
                 }
             }
         }
@@ -1584,8 +1574,7 @@ impl RenderState {
 
         // [CHANGED] Read from mmap
 
-        let Some(tex) =
-            self.load_texture(device, self.queue.as_ref().unwrap(), &source, &pkg, &def)
+        let Some(tex) = self.load_texture(device, self.queue.as_ref().unwrap(), &source, pkg, &def)
         else {
             return Ok(SlideshowEvent::None);
         };
