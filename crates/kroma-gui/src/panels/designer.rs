@@ -7,6 +7,7 @@
 use iced::widget::space::horizontal;
 use iced::widget::{button, column, container, row, scrollable, slider, text, text_input, Space};
 use iced::{Border, Element, Fill, Padding, Theme};
+use kroma_shared::types::AudioConfig;
 
 use crate::icons;
 use crate::panels::{AppContext, Panel};
@@ -498,11 +499,11 @@ impl DesignerPanel {
                 pause_offscreen: true,
                 pause_fullscreen: true,
             },
-            audio: kroma_shared::types::AudioConfig {
+            audio: Some(AudioConfig {
                 enabled: needs_audio,
                 source: "default".into(),
                 ..Default::default()
-            },
+            }),
             uniforms: Default::default(),
             textures: Default::default(),
             slideshow: Default::default(),

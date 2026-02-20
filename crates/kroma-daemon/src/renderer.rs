@@ -1076,7 +1076,7 @@ impl RenderState {
 
     /// Upload custom uniform data to the GPU (called each frame).
     pub fn upload_custom_uniforms(&self) {
-        if let (Some(ref buf), Some(queue)) = (&self.custom_uniform_buffer, self.queue.as_ref()) {
+        if let (Some(buf), Some(queue)) = (&self.custom_uniform_buffer, self.queue.as_ref()) {
             queue.write_buffer(buf, 0, bytemuck::cast_slice(&self.custom_uniform_data));
         }
     }
@@ -1516,7 +1516,7 @@ impl RenderState {
 
     /// Upload audio spectrum data to the GPU texture.
     pub fn update_audio_spectrum(&mut self, spectrum: &[f32]) {
-        if let (Some(ref audio), Some(queue)) = (&self.audio_spectrum, self.queue.as_ref()) {
+        if let (Some(audio), Some(queue)) = (&self.audio_spectrum, self.queue.as_ref()) {
             // Ensure exactly 512 values
             let mut padded = [0.0f32; SPECTRUM_BANDS];
             let len = spectrum.len().min(SPECTRUM_BANDS);
@@ -1686,7 +1686,7 @@ impl RenderState {
             false
         };
 
-        if let (true, Some(ref slideshow)) = (should_advance, &self.slideshow) {
+        if let (true, Some(slideshow)) = (should_advance, &self.slideshow) {
             let idx = slideshow.current;
             let total = slideshow.defs.len();
             info!("Slideshow: advancing to image {} of {}", idx + 1, total);

@@ -1013,7 +1013,7 @@ impl LowerCtx {
         if name == "texture" || name.starts_with("texture2D") {
             let node_id = self.add_node(NodeKind::TextureSample);
             // Extract channel index from sampler name (iChannel0 → 0, iChannel1 → 1, etc.)
-            if let Some(Expr::Variable(ref ident)) = args.first() {
+            if let Some(Expr::Variable(ident)) = args.first() {
                 if let Some(ch) = ident
                     .0
                     .strip_prefix("iChannel")
@@ -1052,7 +1052,10 @@ impl LowerCtx {
             let node_id = self.add_node(mat_kind);
             // Store the full constructor expression in meta for codegen
             let lowered_args: Vec<PortAddr> = args.iter().map(|arg| self.lower_expr(arg)).collect();
-            let arg_vars: Vec<String> = lowered_args.iter().map(|pa| format!("n{}_{}", pa.node, pa.port)).collect();
+            let arg_vars: Vec<String> = lowered_args
+                .iter()
+                .map(|pa| format!("n{}_{}", pa.node, pa.port))
+                .collect();
             if let Some(node) = self.graph.node_mut(node_id) {
                 node.meta = Some(format!("{}({})", name, arg_vars.join(", ")));
             }
@@ -1297,9 +1300,15 @@ impl LowerCtx {
     /// Extract component width from a GLSL type specifier.
     fn type_spec_width(ts: &TypeSpecifierNonArray) -> usize {
         match ts {
-            TypeSpecifierNonArray::Vec2 | TypeSpecifierNonArray::IVec2 | TypeSpecifierNonArray::BVec2 => 2,
-            TypeSpecifierNonArray::Vec3 | TypeSpecifierNonArray::IVec3 | TypeSpecifierNonArray::BVec3 => 3,
-            TypeSpecifierNonArray::Vec4 | TypeSpecifierNonArray::IVec4 | TypeSpecifierNonArray::BVec4 => 4,
+            TypeSpecifierNonArray::Vec2
+            | TypeSpecifierNonArray::IVec2
+            | TypeSpecifierNonArray::BVec2 => 2,
+            TypeSpecifierNonArray::Vec3
+            | TypeSpecifierNonArray::IVec3
+            | TypeSpecifierNonArray::BVec3 => 3,
+            TypeSpecifierNonArray::Vec4
+            | TypeSpecifierNonArray::IVec4
+            | TypeSpecifierNonArray::BVec4 => 4,
             TypeSpecifierNonArray::Mat2 => 4,
             TypeSpecifierNonArray::Mat3 => 9,
             TypeSpecifierNonArray::Mat4 => 16,
@@ -1315,9 +1324,7 @@ impl LowerCtx {
             Expr::IntConst(i) => Some(*i as f32),
             Expr::UIntConst(u) => Some(*u as f32),
             Expr::BoolConst(b) => Some(if *b { 1.0 } else { 0.0 }),
-            Expr::Unary(UnaryOp::Minus, inner) => {
-                Self::try_as_float_literal(inner).map(|v| -v)
-            }
+            Expr::Unary(UnaryOp::Minus, inner) => Self::try_as_float_literal(inner).map(|v| -v),
             _ => None,
         }
     }
@@ -1737,8 +1744,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         let graph = parse_glsl_to_graph(src);
         let glsl = graph.compile_glsl().unwrap();
         // Original variable names should be preserved
-        assert!(glsl.contains("uv") || glsl.contains("n0"),
-            "Expected variable name 'uv' or 'n0' in output: {}", glsl);
+        assert!(
+            glsl.contains("uv") || glsl.contains("n0"),
+            "Expected variable name 'uv' or 'n0' in output: {}",
+            glsl
+        );
         assert!(glsl.contains("mainImage"), "Missing mainImage: {}", glsl);
         assert!(glsl.contains("fragColor"), "Missing fragColor: {}", glsl);
     }
@@ -1776,8 +1786,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         let graph = parse_glsl_to_graph(src);
         let glsl = graph.compile_glsl().unwrap();
         // Helper function should be preserved verbatim
-        assert!(glsl.contains("circle"), "Helper function 'circle' not preserved: {}", glsl);
-        assert!(glsl.contains("smoothstep"), "smoothstep not in output: {}", glsl);
+        assert!(
+            glsl.contains("circle"),
+            "Helper function 'circle' not preserved: {}",
+            glsl
+        );
+        assert!(
+            glsl.contains("smoothstep"),
+            "smoothstep not in output: {}",
+            glsl
+        );
     }
 
     // ===================================================================
@@ -1790,10 +1808,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fn assert_roundtrip(label: &str, src: &str, must_contain: &[&str]) {
         let graph = parse_glsl_to_graph(src);
         let node_count = graph.nodes().count();
-        assert!(
-            node_count > 0,
-            "[{label}] parse produced 0 nodes"
-        );
+        assert!(node_count > 0, "[{label}] parse produced 0 nodes");
         match graph.compile_glsl() {
             Ok(glsl) => {
                 assert!(
@@ -1848,11 +1863,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = vec4(col, 1.0);
 }
 "#;
-        assert_roundtrip(
-            "sun_grid",
-            src,
-            &["sun", "grid", "smoothstep", "mainImage"],
-        );
+        assert_roundtrip("sun_grid", src, &["sun", "grid", "smoothstep", "mainImage"]);
     }
 
     #[test]
@@ -1969,11 +1980,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = vec4(col, 1.0);
 }
 "#;
-        assert_roundtrip(
-            "mix_chains",
-            src,
-            &["mix", "smoothstep", "sin"],
-        );
+        assert_roundtrip("mix_chains", src, &["mix", "smoothstep", "sin"]);
     }
 
     #[test]
@@ -1991,16 +1998,28 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 }
 "#;
         let graph = parse_glsl_to_graph(src);
-        assert!(graph.nodes().count() > 3, "for_loop_accum: expected >3 nodes, got {}", graph.nodes().count());
+        assert!(
+            graph.nodes().count() > 3,
+            "for_loop_accum: expected >3 nodes, got {}",
+            graph.nodes().count()
+        );
         // Verify ForLoop node was created
         assert!(
             graph.nodes().any(|n| n.kind == NodeKind::ForLoop),
             "for_loop_accum: expected at least one ForLoop node"
         );
         // Compilation should succeed (cycle-tolerant for ForLoop nodes)
-        let glsl = graph.compile_glsl().expect("for_loop_accum: compile failed");
-        assert!(glsl.contains("mainImage"), "for_loop_accum: missing mainImage");
-        assert!(glsl.contains("fragColor"), "for_loop_accum: missing fragColor");
+        let glsl = graph
+            .compile_glsl()
+            .expect("for_loop_accum: compile failed");
+        assert!(
+            glsl.contains("mainImage"),
+            "for_loop_accum: missing mainImage"
+        );
+        assert!(
+            glsl.contains("fragColor"),
+            "for_loop_accum: missing fragColor"
+        );
     }
 
     #[test]
@@ -2023,9 +2042,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 }
 "#;
         let graph = parse_glsl_to_graph(src);
-        assert!(graph.nodes().count() > 0, "nested_if_else: produced 0 nodes");
+        assert!(
+            graph.nodes().count() > 0,
+            "nested_if_else: produced 0 nodes"
+        );
         let result = graph.compile_glsl();
-        assert!(result.is_ok(), "nested_if_else: compile failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "nested_if_else: compile failed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2040,11 +2066,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = mix(tex, tex2, 0.5);
 }
 "#;
-        assert_roundtrip(
-            "texture_sampling",
-            src,
-            &["iChannel", "mix"],
-        );
+        assert_roundtrip("texture_sampling", src, &["iChannel", "mix"]);
     }
 
     #[test]
@@ -2071,11 +2093,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = vec4(col, 1.0);
 }
 "#;
-        assert_roundtrip(
-            "plasma",
-            src,
-            &["sin", "cos", "sqrt"],
-        );
+        assert_roundtrip("plasma", src, &["sin", "cos", "sqrt"]);
     }
 
     #[test]
@@ -2099,11 +2117,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = vec4(col, 1.0);
 }
 "#;
-        assert_roundtrip(
-            "audio_viz",
-            src,
-            &["sin", "clamp"],
-        );
+        assert_roundtrip("audio_viz", src, &["sin", "clamp"]);
     }
 
     #[test]
@@ -2120,11 +2134,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = vec4(col, 1.0);
 }
 "#;
-        assert_roundtrip(
-            "mouse_interaction",
-            src,
-            &["distance", "clamp"],
-        );
+        assert_roundtrip("mouse_interaction", src, &["distance", "clamp"]);
     }
 
     #[test]
@@ -2164,11 +2174,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = vec4(col, 1.0);
 }
 "#;
-        assert_roundtrip(
-            "multi_function",
-            src,
-            &["hash", "noise", "fbm", "mix"],
-        );
+        assert_roundtrip("multi_function", src, &["hash", "noise", "fbm", "mix"]);
     }
 
     #[test]
@@ -2213,11 +2219,7 @@ void main() {
     kroma_main();
 }
 "#;
-        assert_roundtrip(
-            "kroma_format",
-            src,
-            &["sdf_circle", "smoothstep", "sin"],
-        );
+        assert_roundtrip("kroma_format", src, &["sdf_circle", "smoothstep", "sin"]);
     }
 
     #[test]
@@ -2237,7 +2239,11 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         let graph = parse_glsl_to_graph(src);
         assert!(graph.nodes().count() > 0, "swizzle_heavy: produced 0 nodes");
         let result = graph.compile_glsl();
-        assert!(result.is_ok(), "swizzle_heavy: compile failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "swizzle_heavy: compile failed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2254,11 +2260,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     fragColor = vec4(col, 1.0);
 }
 "#;
-        assert_roundtrip(
-            "complex_expressions",
-            src,
-            &["sin", "cos"],
-        );
+        assert_roundtrip("complex_expressions", src, &["sin", "cos"]);
     }
 
     #[test]
@@ -2276,9 +2278,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 }
 "#;
         let graph = parse_glsl_to_graph(src);
-        assert!(graph.nodes().count() > 0, "assignment_ops: produced 0 nodes");
+        assert!(
+            graph.nodes().count() > 0,
+            "assignment_ops: produced 0 nodes"
+        );
         let result = graph.compile_glsl();
-        assert!(result.is_ok(), "assignment_ops: compile failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "assignment_ops: compile failed: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -2353,8 +2362,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             "full_retrowave",
             src,
             &[
-                "sun", "grid", "dot2", "sdTrapezoid", "sdLine", "sdBox",
-                "opSmoothUnion", "smoothstep", "mix", "clamp",
+                "sun",
+                "grid",
+                "dot2",
+                "sdTrapezoid",
+                "sdLine",
+                "sdBox",
+                "opSmoothUnion",
+                "smoothstep",
+                "mix",
+                "clamp",
             ],
         );
     }
@@ -2391,9 +2408,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         let graph2 = parse_glsl_to_graph(&glsl1);
         let glsl2 = graph2.compile_glsl().expect("second compile failed");
 
-        assert!(glsl2.contains("mainImage"), "double_compile: second pass missing mainImage");
-        assert!(glsl2.contains("fragColor"), "double_compile: second pass missing fragColor");
-        assert!(glsl2.contains("sin"), "double_compile: second pass missing sin");
+        assert!(
+            glsl2.contains("mainImage"),
+            "double_compile: second pass missing mainImage"
+        );
+        assert!(
+            glsl2.contains("fragColor"),
+            "double_compile: second pass missing fragColor"
+        );
+        assert!(
+            glsl2.contains("sin"),
+            "double_compile: second pass missing sin"
+        );
     }
 
     // ===================================================================
@@ -2412,7 +2438,12 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     /// Helper: count nodes by kind
     fn assert_count(graph: &ShaderGraph, kind: NodeKind, expected: usize, shader: &str) {
         let actual = count_kind(graph, kind.clone());
-        assert_eq!(actual, expected, "{shader}: expected {expected} {k:?}, got {actual}", k = kind);
+        assert_eq!(
+            actual,
+            expected,
+            "{shader}: expected {expected} {k:?}, got {actual}",
+            k = kind
+        );
     }
 
     /// Helper: validate every connection in the graph
@@ -2420,18 +2451,36 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         for conn in graph.connections() {
             let from_node = graph.node(conn.from.node);
             let to_node = graph.node(conn.to.node);
-            assert!(from_node.is_some(), "{shader}: conn {id:?} invalid source {src:?}",
-                id = conn.id, src = conn.from.node);
-            assert!(to_node.is_some(), "{shader}: conn {id:?} invalid target {dst:?}",
-                id = conn.id, dst = conn.to.node);
+            assert!(
+                from_node.is_some(),
+                "{shader}: conn {id:?} invalid source {src:?}",
+                id = conn.id,
+                src = conn.from.node
+            );
+            assert!(
+                to_node.is_some(),
+                "{shader}: conn {id:?} invalid target {dst:?}",
+                id = conn.id,
+                dst = conn.to.node
+            );
             let from_n = from_node.unwrap();
             let to_n = to_node.unwrap();
-            assert!(conn.from.port < from_n.outputs().len(),
+            assert!(
+                conn.from.port < from_n.outputs().len(),
                 "{shader}: conn {id:?} src port {p} >= outputs {o} on {k:?}",
-                id = conn.id, p = conn.from.port, o = from_n.outputs().len(), k = from_n.kind);
-            assert!(conn.to.port < to_n.inputs().len(),
+                id = conn.id,
+                p = conn.from.port,
+                o = from_n.outputs().len(),
+                k = from_n.kind
+            );
+            assert!(
+                conn.to.port < to_n.inputs().len(),
                 "{shader}: conn {id:?} dst port {p} >= inputs {i} on {k:?}",
-                id = conn.id, p = conn.to.port, i = to_n.inputs().len(), k = to_n.kind);
+                id = conn.id,
+                p = conn.to.port,
+                i = to_n.inputs().len(),
+                k = to_n.kind
+            );
         }
     }
 
@@ -2444,9 +2493,27 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         assert_count(&graph, NodeKind::GlslExpr, 0, "a.glsl");
 
         // Helper functions preserved
-        let helper_names: Vec<&str> = graph.helper_functions.iter().map(|(n, _)| n.as_str()).collect();
-        for f in &["sun", "grid", "dot2", "sdTrapezoid", "sdLine", "sdBox", "opSmoothUnion", "sdCloud"] {
-            assert!(helper_names.contains(f), "a.glsl missing helper \'{}\'. Found: {:?}", f, helper_names);
+        let helper_names: Vec<&str> = graph
+            .helper_functions
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        for f in &[
+            "sun",
+            "grid",
+            "dot2",
+            "sdTrapezoid",
+            "sdLine",
+            "sdBox",
+            "opSmoothUnion",
+            "sdCloud",
+        ] {
+            assert!(
+                helper_names.contains(f),
+                "a.glsl missing helper \'{}\'. Found: {:?}",
+                f,
+                helper_names
+            );
         }
 
         // Exact node counts
@@ -2488,8 +2555,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
         // Compiles back to GLSL
         let glsl = graph.compile_glsl().expect("a.glsl failed to compile");
-        assert!(glsl.contains("mainImage"), "a.glsl output missing mainImage");
-        assert!(glsl.contains("fragColor"), "a.glsl output missing fragColor");
+        assert!(
+            glsl.contains("mainImage"),
+            "a.glsl output missing mainImage"
+        );
+        assert!(
+            glsl.contains("fragColor"),
+            "a.glsl output missing fragColor"
+        );
         assert!(glsl.contains("float sun("), "a.glsl output missing sun()");
         assert!(glsl.contains("float grid("), "a.glsl output missing grid()");
         assert!(glsl.contains("mix("), "a.glsl output missing mix()");
@@ -2502,9 +2575,24 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
         assert_count(&graph, NodeKind::GlslExpr, 0, "b.glsl");
 
-        let helper_names: Vec<&str> = graph.helper_functions.iter().map(|(n, _)| n.as_str()).collect();
-        for f in &["catmullRom", "distanceToLineSeg", "debugDistanceField", "PointArray", "getUV"] {
-            assert!(helper_names.contains(f), "b.glsl missing \'{}\'. Found: {:?}", f, helper_names);
+        let helper_names: Vec<&str> = graph
+            .helper_functions
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        for f in &[
+            "catmullRom",
+            "distanceToLineSeg",
+            "debugDistanceField",
+            "PointArray",
+            "getUV",
+        ] {
+            assert!(
+                helper_names.contains(f),
+                "b.glsl missing \'{}\'. Found: {:?}",
+                f,
+                helper_names
+            );
         }
 
         // Exact node counts
@@ -2587,9 +2675,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
         assert_count(&graph, NodeKind::GlslExpr, 0, "d.glsl");
 
-        let helper_names: Vec<&str> = graph.helper_functions.iter().map(|(n, _)| n.as_str()).collect();
+        let helper_names: Vec<&str> = graph
+            .helper_functions
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
         for f in &["udBox", "sdHexPrism", "getModel", "trace"] {
-            assert!(helper_names.contains(f), "d.glsl missing \'{}\'. Found: {:?}", f, helper_names);
+            assert!(
+                helper_names.contains(f),
+                "d.glsl missing \'{}\'. Found: {:?}",
+                f,
+                helper_names
+            );
         }
 
         assert_count(&graph, NodeKind::Output, 1, "d.glsl");
@@ -2641,12 +2738,23 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             include_str!("../../../examples/shadertoy/test_mouse.glsl"),
             include_str!("../../../examples/shadertoy/test_audio.glsl"),
         ];
-        let names = &["plasma", "test_time", "test_resolution", "test_mouse", "test_audio"];
+        let names = &[
+            "plasma",
+            "test_time",
+            "test_resolution",
+            "test_mouse",
+            "test_audio",
+        ];
         for (src, name) in example_shaders.iter().zip(names.iter()) {
             let graph = parse_glsl_to_graph(src);
             assert_count(&graph, NodeKind::GlslExpr, 0, name);
             let result = graph.compile_glsl();
-            assert!(result.is_ok(), "{}.glsl failed to compile: {:?}", name, result.err());
+            assert!(
+                result.is_ok(),
+                "{}.glsl failed to compile: {:?}",
+                name,
+                result.err()
+            );
             validate_connections(&graph, name);
         }
     }
@@ -2694,9 +2802,21 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 "#;
         let graph = parse_glsl_to_graph(src);
         let labels: Vec<String> = graph.nodes().filter_map(|n| n.label.clone()).collect();
-        assert!(labels.iter().any(|l| l == "uv"), "label uv missing. Labels: {:?}", labels);
-        assert!(labels.iter().any(|l| l == "brightness"), "label brightness missing. Labels: {:?}", labels);
-        assert!(labels.iter().any(|l| l == "skyColor"), "label skyColor missing. Labels: {:?}", labels);
+        assert!(
+            labels.iter().any(|l| l == "uv"),
+            "label uv missing. Labels: {:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l == "brightness"),
+            "label brightness missing. Labels: {:?}",
+            labels
+        );
+        assert!(
+            labels.iter().any(|l| l == "skyColor"),
+            "label skyColor missing. Labels: {:?}",
+            labels
+        );
         validate_connections(&graph, "label_test");
     }
 
@@ -2708,12 +2828,17 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             ("d.glsl", include_str!("../../../d.glsl")),
         ] {
             let graph = parse_glsl_to_graph(src);
-            let mut kind_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            let mut kind_counts: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
             for n in graph.nodes() {
                 *kind_counts.entry(format!("{:?}", n.kind)).or_insert(0) += 1;
             }
             eprintln!("{name} dist: {kind_counts:?}");
-            eprintln!("{name} total: {} nodes, {} conns", graph.nodes().count(), graph.connections().len());
+            eprintln!(
+                "{name} total: {} nodes, {} conns",
+                graph.nodes().count(),
+                graph.connections().len()
+            );
             validate_connections(&graph, name);
             eprintln!("{name}: all {} conns validated", graph.connections().len());
         }

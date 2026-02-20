@@ -137,8 +137,8 @@ impl KromaApp {
             }
             Message::ShadePauseOffscreen(b) => self.shade_config.rendering.pause_offscreen = b,
             Message::ShadePauseFullscreen(b) => self.shade_config.rendering.pause_fullscreen = b,
-            Message::ShadeAudioEnabled(b) => self.shade_config.audio.enabled = b,
-            Message::ShadeAudioSource(s) => self.shade_config.audio.source = s,
+            Message::ShadeAudioEnabled(b) => self.shade_config.audio.as_mut().unwrap().enabled = b,
+            Message::ShadeAudioSource(s) => self.shade_config.audio.as_mut().unwrap().source = s,
             Message::ShadeConfigToml(action) => self.shade_config_toml.perform(action),
             Message::ShadeAddUniform => {
                 if !self.shade_new_uniform_name.is_empty() {

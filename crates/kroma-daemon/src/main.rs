@@ -338,12 +338,19 @@ fn init_render_backend() -> Result<Backend> {
 fn load_shade(
     path: &str,
     render_state: &mut RenderState,
+    audio_provider: &mut CpalAudioProvider,
     tx: Option<mpsc::Sender<DaemonEvent>>,
 ) -> Result<(Vec<(usize, DefaultVideoDecoder)>, Vec<f64>)> {
     let mut video_decoders = vec![];
     let mut video_frame_accums = vec![];
     match LiveShadePackage::load(std::path::Path::new(path)) {
         Ok(pkg) => {
+            if let Some(audio_conf) = pkg.config.audio.as_ref() && audio_conf.enabled{
+                audio_provider.switch(&audio_conf.source)?;
+            }else {
+                audio_provider.close();
+            }
+
             if pkg.config.slideshow.is_none() {
                 video_decoders = try_create_video_decoders(&pkg);
             }
@@ -414,7 +421,7 @@ fn main() -> Result<()> {
 
     let mut backend = init_render_backend()?;
     let data_provider = SystemDataProvider::new()?;
-    let audio_provider: Box<dyn AudioProvider> = Box::new(CpalAudioProvider::new()?);
+    let mut audio_provider = CpalAudioProvider::new();
 
     // ---------------------------------------------------------------
     // 3. Start the IPC server (async, background)
@@ -504,7 +511,7 @@ fn main() -> Result<()> {
     let mut video_frame_accums: Vec<f64> = vec![]; // Time accumulator for video frame pacing
     if let Some(ref shade_path) = daemon_config.current_shade {
         info!("Loading initial shade: {}", shade_path);
-        (video_decoders, video_frame_accums) = load_shade(shade_path, &mut render_state, None)?;
+        (video_decoders, video_frame_accums) = load_shade(shade_path, &mut render_state, &mut audio_provider, None)?;
     }
 
     // ---------------------------------------------------------------
@@ -605,13 +612,13 @@ fn main() -> Result<()> {
                 DaemonCommand::LoadShade { path } => {
                     info!("Loading shade package: {}", path);
                     (video_decoders, video_frame_accums) =
-                        load_shade(&path, &mut render_state, response_tx)?;
+                        load_shade(&path, &mut render_state, &mut audio_provider, response_tx)?;
                 }
                 DaemonCommand::Reload => {
                     if let Some(ref path) = current_shade_path {
                         info!("Reloading shade: {}", path);
                         (video_decoders, video_frame_accums) =
-                            load_shade(path, &mut render_state, response_tx)?;
+                            load_shade(path, &mut render_state, &mut audio_provider, response_tx)?;
                     } else {
                         log::warn!("No shade loaded to reload");
                         maybe_send(

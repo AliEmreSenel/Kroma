@@ -145,8 +145,7 @@ pub struct ShadeConfig {
     pub mode: WallpaperMode,
     #[serde(default)]
     pub rendering: RenderingConfig,
-    #[serde(default)]
-    pub audio: AudioConfig,
+    pub audio: Option<AudioConfig>,
     #[serde(default)]
     pub uniforms: HashMap<String, UniformDef>,
     #[serde(default)]

@@ -70,14 +70,20 @@ impl Panel for PropertiesPanel {
         let audio = card(
             "Audio",
             column![
-                checkbox(cfg.audio.enabled)
+                checkbox(cfg.audio.as_ref().map(|a| a.enabled).unwrap_or_default())
                     .label("Enable audio")
                     .on_toggle(Message::ShadeAudioEnabled)
                     .size(t.font_size_md)
                     .text_size(t.font_size_sm),
-                text_input("Source: desktop / mic / device", &cfg.audio.source)
-                    .on_input(Message::ShadeAudioSource)
-                    .size(t.font_size_sm),
+                text_input(
+                    "Source: desktop / mic / device",
+                    &cfg.audio
+                        .as_ref()
+                        .map(|a| a.source.clone())
+                        .unwrap_or_default()
+                )
+                .on_input(Message::ShadeAudioSource)
+                .size(t.font_size_sm),
             ]
             .spacing(t.spacing_sm),
             t,

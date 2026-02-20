@@ -659,13 +659,20 @@ impl KromaApp {
             self.card(
                 "Audio",
                 column![
-                checkbox(self.shade_config.audio.enabled).label("Enable audio capture")
-                    .on_toggle(Message::ShadeAudioEnabled),
+                checkbox(
+                    self.shade_config
+                        .audio
+                        .as_ref()
+                        .map_or_else(|| false, |a| a.enabled)
+                )
+                .label("Enable audio capture")
+                .on_toggle(Message::ShadeAudioEnabled),
                 row![
                     text("Source:").size(13).width(80),
                     iced::widget::pick_list(
                         &self.available_audio_sources[..],
-                        Some(self.shade_config.audio.source.clone()),
+                        Some(self.shade_config.audio.as_ref()
+                        .map_or_else(|| "".to_string(), |a| a.source.clone())),
                         Message::ShadeAudioSource,
                     )
                     .width(280)
@@ -673,8 +680,10 @@ impl KromaApp {
                 ]
                 .spacing(8)
                 .align_y(iced::Alignment::Center),
-                text("Select an audio source from the system, or 'default' for the default device.")
-                    .size(11),
+                text(
+                    "Select an audio source from the system, or 'default' for the default device."
+                )
+                .size(11),
             ]
                 .spacing(8),
             );
@@ -936,14 +945,18 @@ pub fn view_shade_settings_inline<'a>(ctx: crate::panels::AppContext<'a>) -> Ele
     let audio = card(
         "Audio",
         column![
-            checkbox(cfg.audio.enabled)
+            checkbox(cfg.audio.as_ref().map_or_else(|| false, |a| a.enabled))
                 .label("Enable audio")
                 .on_toggle(Message::ShadeAudioEnabled),
             row![
                 text("Source:").size(13).width(80),
                 iced::widget::pick_list(
                     available_sources,
-                    Some(cfg.audio.source.clone()),
+                    Some(
+                        cfg.audio
+                            .as_ref()
+                            .map_or_else(|| "".to_string(), |a| a.source.clone())
+                    ),
                     Message::ShadeAudioSource,
                 )
                 .width(200)
