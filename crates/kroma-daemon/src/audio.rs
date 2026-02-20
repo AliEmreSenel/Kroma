@@ -9,10 +9,14 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
+    thread::{self, Builder},
 };
 
-use anyhow::{anyhow, Context};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use anyhow::{anyhow, Context, Result};
+use cpal::{
+    traits::{DeviceTrait, HostTrait, StreamTrait},
+    Device, Stream,
+};
 use rustfft::{num_complex::Complex, FftPlanner};
 
 /// Number of frequency bands in the spectrum.
@@ -63,6 +67,105 @@ impl AudioProvider for SharedAudioState {
     }
 }
 
+fn get_source_by_name(source: &str) -> Result<Device> {
+    let host = cpal::default_host();
+    match source {
+        "microphone" | "mic" => {
+            log::info!("Audio: using microphone (default input device)");
+            host.default_input_device()
+                .ok_or_else(|| anyhow::anyhow!("No microphone available"))
+        }
+        "desktop" | "" => {
+            #[cfg(target_os = "windows")]
+            {
+                // Windows: Loopback is captured via the render (output) device.
+                // CPAL detects this usage and enables WASAPI loopback automatically.
+                log::info!("Audio (Windows): Selecting default output for Loopback");
+                host.default_output_device()
+                    .context("No default output device available")
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                // Linux: We need to find the "Monitor" source.
+                // 1. Try to find a device explicitly named "monitor"
+                // 2. Fallback to "pulse" or "pipewire" which often default to the monitor in desktop environments.
+
+                log::info!("Audio (Linux): Searching for monitor device...");
+
+                let mut devices = host
+                    .input_devices()
+                    .context("Failed to list input devices")?;
+
+                // Priority 1: Explicit Monitor Device
+                // Some ALSA setups expose 'hw:0,0' and 'hw:0,1' where one is a monitor.
+                // We look for 'monitor' in the name if CPAL exposes it.
+                if let Some(dev) = devices.find(|d| {
+                    d.description()
+                        .map(|desc| desc.name().to_lowercase().contains("monitor"))
+                        .unwrap_or(false)
+                }) {
+                    log::info!(
+                        "Audio: Found explicit monitor device: {}",
+                        dev.description()
+                            .map(|desc| desc.name().to_string())
+                            .unwrap_or_default()
+                    );
+                    Ok(dev)
+                } else {
+                    // Priority 2: PulseAudio / PipeWire Server
+                    // If we can't find a hardware monitor, we connect to the sound server.
+                    // The *default* input on a desktop Linux setup is usually the mic,
+                    // BUT the "PulseAudio Sound Server" device is often the bridge we need.
+                    // We try to find the specific bridge device rather than the default input.
+                    let bridge = host.input_devices()?.find(|d| {
+                        let name = d
+                            .description()
+                            .map(|desc| desc.name().to_lowercase())
+                            .unwrap_or_default();
+                        name == "pulseaudio sound server" || name == "pipewire sound server"
+                    });
+
+                    if let Some(dev) = bridge {
+                        log::info!(
+                            "Audio: Using Sound Server Bridge: {}",
+                            dev.description()
+                                .map(|desc| desc.name().to_string())
+                                .unwrap_or_default()
+                        );
+                        Ok(dev)
+                    } else {
+                        Err(anyhow!("Audio: No monitor or bridge found."))
+                    }
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            {
+                return Err(anyhow!("MacOS doesnt support monitoring desktop output by default. Select the exact output to monitor."));
+            }
+        }
+        device_name => host
+            .input_devices()
+            .ok()
+            .and_then(|devices| {
+                devices
+                    .filter_map(|d| {
+                        match d
+                            .description()
+                            .map(|desc| desc.name().to_string().contains(device_name))
+                            .unwrap_or(false)
+                        {
+                            true => Some(d),
+                            false => None,
+                        }
+                    })
+                    .next()
+            })
+            .ok_or_else(|| anyhow::anyhow!("Audio device '{}' not found", device_name)),
+    }
+}
+
 /// Real audio capture provider using cpal.
 ///
 /// Captures audio from the default input device, runs FFT on the samples,
@@ -71,110 +174,28 @@ impl AudioProvider for SharedAudioState {
 /// The cpal stream is intentionally leaked (lives for program duration)
 /// because `cpal::Stream` is not Send+Sync.
 pub struct CpalAudioProvider {
+    source: String,
     state: SharedAudioState,
+    stream: Option<Stream>,
 }
 
 impl CpalAudioProvider {
     /// Create a new cpal audio provider.
     pub fn new_with_source(source: &str) -> anyhow::Result<Self> {
-        let host = cpal::default_host();
+        let mut provider = Self::new();
+        provider.switch(source)?;
+        Ok(provider)
+    }
 
-        // --- Device Selection Logic ---
-        let device = match source {
-            "microphone" | "mic" => {
-                log::info!("Audio: using microphone (default input device)");
-                host.default_input_device()
-                    .ok_or_else(|| anyhow::anyhow!("No microphone available"))?
-            }
-            "desktop" | "" => {
-                #[cfg(target_os = "windows")]
-                {
-                    // Windows: Loopback is captured via the render (output) device.
-                    // CPAL detects this usage and enables WASAPI loopback automatically.
-                    log::info!("Audio (Windows): Selecting default output for Loopback");
-                    host.default_output_device()
-                        .context("No default output device available")
-                }
+    pub fn close(&mut self) {
+        self.source = "none".to_string();
+        self.stream = None;
+        self.state = SharedAudioState::new();
+    }
 
-                #[cfg(target_os = "linux")]
-                {
-                    // Linux: We need to find the "Monitor" source.
-                    // 1. Try to find a device explicitly named "monitor"
-                    // 2. Fallback to "pulse" or "pipewire" which often default to the monitor in desktop environments.
-
-                    log::info!("Audio (Linux): Searching for monitor device...");
-
-                    let mut devices = host
-                        .input_devices()
-                        .context("Failed to list input devices")?;
-
-                    // Priority 1: Explicit Monitor Device
-                    // Some ALSA setups expose 'hw:0,0' and 'hw:0,1' where one is a monitor.
-                    // We look for 'monitor' in the name if CPAL exposes it.
-                    if let Some(dev) = devices.find(|d| {
-                        d.description()
-                            .map(|desc| desc.name().to_lowercase().contains("monitor"))
-                            .unwrap_or(false)
-                    }) {
-                        log::info!(
-                            "Audio: Found explicit monitor device: {}",
-                            dev.description()
-                                .map(|desc| desc.name().to_string())
-                                .unwrap_or_default()
-                        );
-                        dev
-                    } else {
-                        // Priority 2: PulseAudio / PipeWire Server
-                        // If we can't find a hardware monitor, we connect to the sound server.
-                        // The *default* input on a desktop Linux setup is usually the mic,
-                        // BUT the "PulseAudio Sound Server" device is often the bridge we need.
-                        // We try to find the specific bridge device rather than the default input.
-                        let bridge = host.input_devices()?.find(|d| {
-                            let name = d
-                                .description()
-                                .map(|desc| desc.name().to_lowercase())
-                                .unwrap_or_default();
-                            name == "pulseaudio sound server" || name == "pipewire sound server"
-                        });
-
-                        if let Some(dev) = bridge {
-                            log::info!(
-                                "Audio: Using Sound Server Bridge: {}",
-                                dev.description()
-                                    .map(|desc| desc.name().to_string())
-                                    .unwrap_or_default()
-                            );
-                            dev
-                        } else {
-                            return Err(anyhow!("Audio: No monitor or bridge found."));
-                        }
-                    }
-                }
-
-                #[cfg(target_os = "macos")]
-                {
-                    return Err(anyhow!("MacOS doesnt support monitoring desktop output by default. Select the exact output to monitor."));
-                }
-            }
-            device_name => host
-                .input_devices()
-                .ok()
-                .and_then(|devices| {
-                    devices
-                        .filter_map(|d| {
-                            match d
-                                .description()
-                                .map(|desc| desc.name().to_string().contains(device_name))
-                                .unwrap_or(false)
-                            {
-                                true => Some(d),
-                                false => None,
-                            }
-                        })
-                        .next()
-                })
-                .ok_or_else(|| anyhow::anyhow!("Audio device '{}' not found", device_name))?,
-        };
+    pub fn switch(&mut self, source: &str) -> Result<()> {
+        self.source = source.to_string();
+        let device = get_source_by_name(source)?;
 
         let config = device.default_input_config()?;
         log::info!(
@@ -185,8 +206,8 @@ impl CpalAudioProvider {
         );
 
         // --- Shared State Setup ---
-        let state = SharedAudioState::new();
-        let (spectrum_writer, level_writer) = state.writer_handles();
+        self.state = SharedAudioState::new();
+        let (spectrum_writer, level_writer) = self.state.writer_handles();
 
         // Shared Ring Buffer: Audio Thread writes to back, FFT Thread reads snapshot
         let sample_buffer: Arc<Mutex<VecDeque<f32>>> =
@@ -200,7 +221,7 @@ impl CpalAudioProvider {
         let mut planner = FftPlanner::new();
         let fft = Arc::new(planner.plan_fft_forward(FFT_SIZE));
 
-        std::thread::Builder::new()
+        thread::Builder::new()
             .name("kroma-audio-fft".into())
             .spawn(move || {
                 let mut input = vec![Complex::new(0.0, 0.0); FFT_SIZE];
@@ -300,15 +321,16 @@ impl CpalAudioProvider {
         }?;
 
         stream.play()?;
-
-        // Leak the stream to keep it alive
-        Box::leak(Box::new(stream));
-
-        Ok(Self { state })
+        self.stream = Some(stream);
+        Ok(())
     }
 
-    pub fn new() -> anyhow::Result<Self> {
-        Self::new_with_source("desktop")
+    pub fn new() -> Self {
+        Self {
+            source: "none".to_string(),
+            state: SharedAudioState::new(),
+            stream: None,
+        }
     }
 }
 
