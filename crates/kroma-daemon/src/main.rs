@@ -15,8 +15,11 @@ mod surface_x11;
 mod video;
 
 use std::{
+    fs,
     hash::{DefaultHasher, Hash, Hasher},
-    path::Path,
+    sync::mpsc,
+    thread::JoinHandle,
+    time::Instant,
 };
 
 use anyhow::Result;
@@ -24,15 +27,48 @@ use glam::Vec2;
 use log::info;
 
 use kroma_shared::{
+    ipc::{maybe_send, CompileError, DaemonCommand, DaemonEvent},
     shade::LiveShadePackage,
     traits::{DataProvider, SurfaceProvider, VideoDecoder},
 };
 
 use crate::{
-    audio::{AudioProvider, CpalAudioProvider, SilentAudioProvider},
-    renderer::{LoadResult, SlideshowEvent},
+    audio::{AudioProvider, CpalAudioProvider},
+    data::SystemDataProvider,
+    hyprland::HyprlandEvent,
+    renderer::{RenderState, SlideshowEvent},
+    surface::WaylandSurfaceProvider,
     video::DefaultVideoDecoder,
 };
+
+enum WaylandBackend {
+    Hyprland {
+        _handle: JoinHandle<()>,
+        rx: mpsc::Receiver<HyprlandEvent>,
+    },
+    Generic,
+}
+
+enum Backend {
+    Wayland {
+        display_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
+        surface_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
+        logical_w: u32,
+        logical_h: u32,
+        scale: f64,
+        surface: WaylandSurfaceProvider,
+        _monitors: Vec<kroma_shared::types::MonitorConfig>,
+        backend: WaylandBackend,
+    },
+    X11 {
+        window_id: u32,
+        screen_num: i32,
+        width: u32,
+        height: u32,
+        _monitors: Vec<kroma_shared::types::MonitorConfig>,
+    },
+    Headless,
+}
 
 fn video_decoder_for_source(
     pkg: &LiveShadePackage,
@@ -43,17 +79,15 @@ fn video_decoder_for_source(
     if let Some(video_data) = pkg.read_asset(source) {
         match extract_video_to_temp(source, &video_data) {
             Ok(temp_path) => match DefaultVideoDecoder::load(&temp_path) {
-                Ok(decoder) => {
-                    return Some(decoder);
-                }
+                Ok(decoder) => Some(decoder),
                 Err(e) => {
                     log::warn!("Decoder error: {}", e);
-                    return None;
+                    None
                 }
             },
             Err(e) => {
                 log::warn!("Extract error: {}", e);
-                return None;
+                None
             }
         }
     }
@@ -63,11 +97,11 @@ fn video_decoder_for_source(
         match DefaultVideoDecoder::load(video_path) {
             Ok(decoder) => {
                 log::info!("Video decoder created for texture ({})", source);
-                return Some(decoder);
+                Some(decoder)
             }
             Err(e) => {
                 log::warn!("Failed to create video decoder for '{}': {}", source, e);
-                return None;
+                None
             }
         }
     }
@@ -96,9 +130,8 @@ fn try_create_video_decoders(pkg: &LiveShadePackage) -> Vec<(usize, DefaultVideo
         if def.ty == "video" {
             if let Some(ref source) = def.source {
                 // 1. Try loading from embedded assets (ZIP package)
-                match video_decoder_for_source(pkg, source) {
-                    Some(d) => decoders.push((i, d)),
-                    None => (),
+                if let Some(d) = video_decoder_for_source(pkg, source) {
+                    decoders.push((i, d))
                 }
             }
         }
@@ -129,51 +162,12 @@ fn extract_video_to_temp(source: &str, data: &[u8]) -> Result<std::path::PathBuf
     Ok(temp_path)
 }
 
-fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
-    info!("Kroma Daemon v{}", env!("CARGO_PKG_VERSION"));
-    info!("Initializing...");
-
-    // ---------------------------------------------------------------
-    // 0. Load daemon configuration
-    // ---------------------------------------------------------------
-    let daemon_config = config::DaemonConfig::load()?;
-    info!(
-        "Target FPS: {}, GPU power: {:?}",
-        daemon_config.target_fps, daemon_config.gpu_power
-    );
-
-    // ---------------------------------------------------------------
-    // 1. Detect session type and initialize the surface provider
-    // ---------------------------------------------------------------
+fn init_render_backend() -> Result<Backend> {
     let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
     let desktop_env = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     info!("Session: type={}, desktop={}", session_type, desktop_env);
 
-    // Persisted Wayland surface provider for dispatch in the render loop.
-    let mut wayland_surface: Option<surface::WaylandSurfaceProvider> = None;
-
-    enum Backend {
-        Wayland {
-            display_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
-            surface_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
-            logical_w: u32,
-            logical_h: u32,
-            scale: f64,
-            _monitors: Vec<kroma_shared::types::MonitorConfig>,
-        },
-        X11 {
-            window_id: u32,
-            screen_num: i32,
-            width: u32,
-            height: u32,
-            _monitors: Vec<kroma_shared::types::MonitorConfig>,
-        },
-        Headless,
-    }
-
-    let backend = if session_type == "wayland" || std::env::var("WAYLAND_DISPLAY").is_ok() {
+    if session_type == "wayland" || std::env::var("WAYLAND_DISPLAY").is_ok() {
         info!("Detected Wayland session — using layer shell backend");
         let mut surface_provider = surface::WaylandSurfaceProvider::new();
         match surface_provider
@@ -207,16 +201,37 @@ fn main() -> Result<()> {
                     .unwrap_or((primary.width, primary.height));
                 let scale = primary.scale.max(1.0);
 
-                wayland_surface = Some(surface_provider);
+                // ---------------------------------------------------------------
+                // 3b. Start Hyprland event listener (optional)
+                // ---------------------------------------------------------------
+                let (hypr_tx, hypr_rx) = mpsc::channel();
+                let backend = match hyprland::start_listener(hypr_tx) {
+                    Ok(h) => {
+                        info!("Hyprland event listener started");
+                        WaylandBackend::Hyprland {
+                            _handle: h,
+                            rx: hypr_rx,
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                "Hyprland events unavailable: {} — running without compositor awareness",
+                e
+            );
+                        WaylandBackend::Generic
+                    }
+                };
 
-                Backend::Wayland {
+                Ok(Backend::Wayland {
                     display_ptr,
                     surface_ptr,
                     logical_w,
                     logical_h,
                     scale,
                     _monitors: monitors,
-                }
+                    surface: surface_provider,
+                    backend,
+                })
             }
             Err(e) => {
                 log::warn!(
@@ -254,17 +269,17 @@ fn main() -> Result<()> {
                             }
                         });
                         let window_id = x11_provider.get_window_id(primary.id.0).unwrap_or(0);
-                        Backend::X11 {
+                        Ok(Backend::X11 {
                             window_id,
                             screen_num: x11_provider.screen_num(),
                             width: primary.width,
                             height: primary.height,
                             _monitors: monitors,
-                        }
+                        })
                     }
                     Err(e2) => {
                         log::warn!("X11 fallback also failed: {} — going headless", e2);
-                        Backend::Headless
+                        Ok(Backend::Headless)
                     }
                 }
             }
@@ -298,76 +313,120 @@ fn main() -> Result<()> {
                     }
                 });
                 let window_id = x11_provider.get_window_id(primary.id.0).unwrap_or(0);
-                Backend::X11 {
+                Ok(Backend::X11 {
                     window_id,
                     screen_num: x11_provider.screen_num(),
                     width: primary.width,
                     height: primary.height,
                     _monitors: monitors,
-                }
+                })
             }
             Err(e) => {
                 log::warn!(
                     "X11 surface creation failed: {} — falling back to headless",
                     e
                 );
-                Backend::Headless
+                Ok(Backend::Headless)
             }
         }
     } else {
         log::warn!("No display server detected — running headless");
-        Backend::Headless
-    };
+        Ok(Backend::Headless)
+    }
+}
 
-    // ---------------------------------------------------------------
-    // 2. Start the data provider
-    // ---------------------------------------------------------------
-    let data_provider = data::SystemDataProvider::new()?;
-    info!("Data provider initialized");
-
-    // ---------------------------------------------------------------
-    // 2b. Start audio provider
-    // ---------------------------------------------------------------
-    let audio_provider: Box<dyn AudioProvider> = match CpalAudioProvider::new() {
-        Ok(provider) => {
-            info!("Using cpal audio provider (real audio capture)");
-            Box::new(provider)
+fn load_shade(
+    path: &str,
+    render_state: &mut RenderState,
+    tx: Option<mpsc::Sender<DaemonEvent>>,
+) -> Result<(Vec<(usize, DefaultVideoDecoder)>, Vec<f64>)> {
+    let mut video_decoders = vec![];
+    let mut video_frame_accums = vec![];
+    match LiveShadePackage::load(std::path::Path::new(path)) {
+        Ok(pkg) => {
+            if pkg.config.slideshow.is_none() {
+                video_decoders = try_create_video_decoders(&pkg);
+            }
+            video_frame_accums = [0.0].repeat(video_decoders.len());
+            let pkg_name = pkg.config.meta.name.clone();
+            match render_state.load_shade(pkg) {
+                Ok(_) => {
+                    info!("Loaded: {}", pkg_name);
+                    maybe_send(
+                        tx,
+                        DaemonEvent::CompileResult {
+                            success: true,
+                            errors: vec![],
+                            warnings: vec![],
+                        },
+                    )?;
+                }
+                Err(e) => {
+                    log::error!("Failed to compile shader: {}", e);
+                    maybe_send(
+                        tx,
+                        DaemonEvent::CompileResult {
+                            success: false,
+                            errors: vec![CompileError {
+                                message: e.to_string(),
+                                line: None,
+                                column: None,
+                            }],
+                            warnings: vec![],
+                        },
+                    )?;
+                }
+            }
         }
         Err(e) => {
-            info!("cpal audio unavailable ({}), using silent provider", e);
-            Box::new(SilentAudioProvider)
+            log::error!("Failed to load shade: {}", e);
+            maybe_send(
+                tx,
+                DaemonEvent::CompileResult {
+                    success: false,
+                    errors: vec![CompileError {
+                        message: format!("Package load error: {}", e),
+                        line: None,
+                        column: None,
+                    }],
+                    warnings: vec![],
+                },
+            )?;
         }
-    };
+    }
+    Ok((video_decoders, video_frame_accums))
+}
+
+fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    info!("Kroma Daemon v{}", env!("CARGO_PKG_VERSION"));
+    info!("Initializing...");
+
+    // ---------------------------------------------------------------
+    // 0. Load daemon configuration
+    // ---------------------------------------------------------------
+    let daemon_config = config::DaemonConfig::load()?;
+    info!(
+        "Target FPS: {}, GPU power: {:?}",
+        daemon_config.target_fps, daemon_config.gpu_power
+    );
+
+    let mut backend = init_render_backend()?;
+    let data_provider = SystemDataProvider::new()?;
+    let audio_provider: Box<dyn AudioProvider> = Box::new(CpalAudioProvider::new()?);
 
     // ---------------------------------------------------------------
     // 3. Start the IPC server (async, background)
     // ---------------------------------------------------------------
-    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+    let (cmd_tx, cmd_rx) = mpsc::channel();
     let (_ipc_handle, ipc_status, preview_stream) = ipc_server::start(cmd_tx)?;
     info!("IPC server listening");
 
     // ---------------------------------------------------------------
-    // 3b. Start Hyprland event listener (optional)
-    // ---------------------------------------------------------------
-    let (hypr_tx, hypr_rx) = std::sync::mpsc::channel();
-    let _hypr_handle = match hyprland::start_listener(hypr_tx) {
-        Ok(h) => {
-            info!("Hyprland event listener started");
-            Some(h)
-        }
-        Err(e) => {
-            log::warn!(
-                "Hyprland events unavailable: {} — running without compositor awareness",
-                e
-            );
-            None
-        }
-    };
-
-    // ---------------------------------------------------------------
     // 4. Initialize the renderer
     // ---------------------------------------------------------------
-    let mut render_state = renderer::RenderState::new()?;
+    let mut render_state = RenderState::new()?;
     let (surf_w, surf_h): (u32, u32);
 
     match &backend {
@@ -445,42 +504,7 @@ fn main() -> Result<()> {
     let mut video_frame_accums: Vec<f64> = vec![]; // Time accumulator for video frame pacing
     if let Some(ref shade_path) = daemon_config.current_shade {
         info!("Loading initial shade: {}", shade_path);
-        match LiveShadePackage::load(Path::new(shade_path)) {
-            Ok(pkg) => {
-                if !(pkg.config.slideshow.interval > 0.0) {
-                    video_decoders = try_create_video_decoders(&pkg);
-                } else {
-                    video_decoders = vec![];
-                }
-                video_frame_accums = vec![0.0].repeat(video_decoders.len());
-
-                let pkg_name = pkg.config.meta.name.clone();
-                match render_state.load_shade(pkg) {
-                    Ok(res) => {
-                        match res {
-                            LoadResult::Slideshow(event) => match event {
-                                SlideshowEvent::SwappedToVideo { source } => {
-                                    video_decoders.push((
-                                        0,
-                                        video_decoder_for_source(
-                                            render_state.active_package.as_ref().unwrap(),
-                                            &source,
-                                        )
-                                        .unwrap(),
-                                    ));
-                                }
-                                SlideshowEvent::SwappedToImage | SlideshowEvent::None => (),
-                            },
-                            LoadResult::Other => (),
-                        }
-                        current_shade_path = Some(shade_path.clone());
-                        info!("Initial shade loaded: {}", pkg_name);
-                    }
-                    Err(e) => log::warn!("Failed to compile initial shade shader: {}", e),
-                }
-            }
-            Err(e) => log::warn!("Failed to load initial shade: {}", e),
-        }
+        (video_decoders, video_frame_accums) = load_shade(shade_path, &mut render_state, None)?;
     }
 
     // ---------------------------------------------------------------
@@ -490,81 +514,76 @@ fn main() -> Result<()> {
         "Entering render loop ({}x{} @ {} FPS target)",
         surf_w, surf_h, daemon_config.target_fps
     );
-    let start_time = std::time::Instant::now();
+    let start_time = Instant::now();
     let mut frame: u32 = 0;
     let mut paused = false;
     let mut active_workspace_id: i64 = 1;
-    let mut last_frame_time = std::time::Instant::now();
+    let mut last_frame_time = Instant::now();
     let frame_budget = daemon_config.frame_budget();
 
     // FPS tracking
     let mut fps_counter: u32 = 0;
-    let mut fps_timer = std::time::Instant::now();
+    let mut fps_timer = Instant::now();
     let mut current_fps: f32;
 
     loop {
         // Process Hyprland compositor events (non-blocking)
-        while let Ok(event) = hypr_rx.try_recv() {
-            match event {
-                hyprland::HyprlandEvent::Fullscreen { fullscreen }
-                    if daemon_config.pause_on_fullscreen =>
-                {
-                    if fullscreen {
-                        paused = true;
-                        info!("Fullscreen detected — pausing render");
-                    } else {
-                        paused = false;
-                        info!("Fullscreen exited — resuming render");
-                    }
-                }
-                hyprland::HyprlandEvent::WorkspaceChanged { id } => {
-                    info!("Workspace changed to {} (was {})", id, active_workspace_id);
-                    active_workspace_id = id;
-                    // Pause when workspace changes away (wallpaper is always on all workspaces,
-                    // but we can save GPU cycles when the user isn't looking at it).
-                    if daemon_config.pause_on_inactive {
-                        // On Hyprland the wallpaper layer is visible on every workspace,
-                        // so we interpret "inactive" as special workspaces (negative IDs)
-                        // which are overlaid and hide the desktop.
-                        if id < 0 {
-                            if !paused {
-                                paused = true;
-                                info!("Special workspace active — pausing render");
-                            }
-                        } else if paused {
-                            // Only resume if fullscreen doesn't keep us paused
+        if let Backend::Wayland {
+            backend: WaylandBackend::Hyprland { rx: hypr_rx, .. },
+            ..
+        } = &mut backend
+        {
+            while let Ok(event) = hypr_rx.try_recv() {
+                match event {
+                    hyprland::HyprlandEvent::Fullscreen { fullscreen }
+                        if daemon_config.pause_on_fullscreen =>
+                    {
+                        if fullscreen {
+                            paused = true;
+                            info!("Fullscreen detected — pausing render");
+                        } else {
                             paused = false;
-                            info!("Normal workspace active — resuming render");
+                            info!("Fullscreen exited — resuming render");
                         }
                     }
+                    hyprland::HyprlandEvent::WorkspaceChanged { id } => {
+                        info!("Workspace changed to {} (was {})", id, active_workspace_id);
+                        active_workspace_id = id;
+                        // Pause when workspace changes away (wallpaper is always on all workspaces,
+                        // but we can save GPU cycles when the user isn't looking at it).
+                        if daemon_config.pause_on_inactive {
+                            // On Hyprland the wallpaper layer is visible on every workspace,
+                            // so we interpret "inactive" as special workspaces (negative IDs)
+                            // which are overlaid and hide the desktop.
+                            if id < 0 {
+                                if !paused {
+                                    paused = true;
+                                    info!("Special workspace active — pausing render");
+                                }
+                            } else if paused {
+                                // Only resume if fullscreen doesn't keep us paused
+                                paused = false;
+                                info!("Normal workspace active — resuming render");
+                            }
+                        }
+                    }
+                    hyprland::HyprlandEvent::MonitorChanged { ref name } => {
+                        info!("Active monitor: {}", name);
+                    }
+                    hyprland::HyprlandEvent::Disconnected => {
+                        log::warn!("Hyprland event socket disconnected");
+                    }
+                    _ => {}
                 }
-                hyprland::HyprlandEvent::MonitorChanged { ref name } => {
-                    info!("Active monitor: {}", name);
-                }
-                hyprland::HyprlandEvent::Disconnected => {
-                    log::warn!("Hyprland event socket disconnected");
-                }
-                _ => {}
             }
-        }
+        };
 
         // Process IPC commands (non-blocking)
         while let Ok(internal) = cmd_rx.try_recv() {
-            use kroma_shared::ipc::{CompileError, DaemonCommand, DaemonEvent};
             let ipc_server::InternalCommand {
                 command,
                 response_tx,
             } = internal;
-
-            /// Helper: send a compile result event through the response channel.
-            fn send_response(
-                tx: &Option<std::sync::mpsc::Sender<DaemonEvent>>,
-                event: DaemonEvent,
-            ) {
-                if let Some(ref tx) = tx {
-                    let _ = tx.send(event);
-                }
-            }
 
             match command {
                 DaemonCommand::Pause => {
@@ -579,172 +598,28 @@ fn main() -> Result<()> {
                     info!("Shutdown requested — cleaning up");
                     let sock = kroma_shared::ipc::socket_path();
                     if sock.exists() {
-                        let _ = std::fs::remove_file(&sock);
+                        let _ = fs::remove_file(&sock);
                     }
                     return Ok(());
                 }
                 DaemonCommand::LoadShade { path } => {
                     info!("Loading shade package: {}", path);
-                    match LiveShadePackage::load(std::path::Path::new(&path)) {
-                        Ok(pkg) => {
-                            if !(pkg.config.slideshow.interval > 0.0) {
-                                video_decoders = try_create_video_decoders(&pkg);
-                            } else {
-                                video_decoders = vec![];
-                            }
-                            video_frame_accums = vec![0.0].repeat(video_decoders.len());
-                            let pkg_name = pkg.config.meta.name.clone();
-                            match render_state.load_shade(pkg) {
-                                Ok(res) => {
-                                    match res {
-                                        LoadResult::Slideshow(event) => match event {
-                                            SlideshowEvent::SwappedToVideo { source } => {
-                                                video_decoders.push((
-                                                    0,
-                                                    video_decoder_for_source(
-                                                        render_state
-                                                            .active_package
-                                                            .as_ref()
-                                                            .unwrap(),
-                                                        &source,
-                                                    )
-                                                    .unwrap(),
-                                                ));
-                                            }
-                                            SlideshowEvent::SwappedToImage
-                                            | SlideshowEvent::None => (),
-                                        },
-                                        LoadResult::Other => (),
-                                    }
-                                    info!("Reloaded: {}", pkg_name);
-                                    send_response(
-                                        &response_tx,
-                                        DaemonEvent::CompileResult {
-                                            success: true,
-                                            errors: vec![],
-                                            warnings: vec![],
-                                        },
-                                    );
-                                }
-                                Err(e) => {
-                                    log::error!("Failed to compile shade shader: {}", e);
-                                    send_response(
-                                        &response_tx,
-                                        DaemonEvent::CompileResult {
-                                            success: false,
-                                            errors: vec![CompileError {
-                                                message: e.to_string(),
-                                                line: None,
-                                                column: None,
-                                            }],
-                                            warnings: vec![],
-                                        },
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::error!("Failed to load shade: {}", e);
-                            send_response(
-                                &response_tx,
-                                DaemonEvent::CompileResult {
-                                    success: false,
-                                    errors: vec![CompileError {
-                                        message: format!("Package load error: {}", e),
-                                        line: None,
-                                        column: None,
-                                    }],
-                                    warnings: vec![],
-                                },
-                            );
-                        }
-                    }
+                    (video_decoders, video_frame_accums) =
+                        load_shade(&path, &mut render_state, response_tx)?;
                 }
                 DaemonCommand::Reload => {
                     if let Some(ref path) = current_shade_path {
                         info!("Reloading shade: {}", path);
-                        match LiveShadePackage::load(std::path::Path::new(path)) {
-                            Ok(pkg) => {
-                                if !(pkg.config.slideshow.interval > 0.0) {
-                                    video_decoders = try_create_video_decoders(&pkg);
-                                } else {
-                                    video_decoders = vec![];
-                                }
-                                video_frame_accums = vec![0.0].repeat(video_decoders.len());
-                                let pkg_name = pkg.config.meta.name.clone();
-                                match render_state.load_shade(pkg) {
-                                    Ok(res) => {
-                                        match res {
-                                            LoadResult::Slideshow(event) => match event {
-                                                SlideshowEvent::SwappedToVideo { source } => {
-                                                    video_decoders.push((
-                                                        0,
-                                                        video_decoder_for_source(
-                                                            render_state
-                                                                .active_package
-                                                                .as_ref()
-                                                                .unwrap(),
-                                                            &source,
-                                                        )
-                                                        .unwrap(),
-                                                    ));
-                                                }
-                                                SlideshowEvent::SwappedToImage
-                                                | SlideshowEvent::None => (),
-                                            },
-                                            LoadResult::Other => (),
-                                        }
-                                        info!("Reloaded: {}", pkg_name);
-                                        send_response(
-                                            &response_tx,
-                                            DaemonEvent::CompileResult {
-                                                success: true,
-                                                errors: vec![],
-                                                warnings: vec![],
-                                            },
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::error!("Failed to compile reloaded shader: {}", e);
-                                        send_response(
-                                            &response_tx,
-                                            DaemonEvent::CompileResult {
-                                                success: false,
-                                                errors: vec![CompileError {
-                                                    message: e.to_string(),
-                                                    line: None,
-                                                    column: None,
-                                                }],
-                                                warnings: vec![],
-                                            },
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("Failed to reload shade: {}", e);
-                                send_response(
-                                    &response_tx,
-                                    DaemonEvent::CompileResult {
-                                        success: false,
-                                        errors: vec![CompileError {
-                                            message: format!("Package load error: {}", e),
-                                            line: None,
-                                            column: None,
-                                        }],
-                                        warnings: vec![],
-                                    },
-                                );
-                            }
-                        }
+                        (video_decoders, video_frame_accums) =
+                            load_shade(path, &mut render_state, response_tx)?;
                     } else {
                         log::warn!("No shade loaded to reload");
-                        send_response(
-                            &response_tx,
+                        maybe_send(
+                            response_tx,
                             DaemonEvent::Error {
                                 message: "No shade loaded to reload".into(),
                             },
-                        );
+                        )?;
                     }
                 }
                 DaemonCommand::SetUniform { name, value } => {
@@ -760,25 +635,23 @@ fn main() -> Result<()> {
                 DaemonCommand::RequestPreviewFrame { width, height } => {
                     match render_state.capture_preview_frame(width, height) {
                         Ok(jpeg_bytes) => {
-                            use base64::Engine;
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
-                            send_response(
-                                &response_tx,
+                            maybe_send(
+                                response_tx,
                                 DaemonEvent::PreviewFrame {
-                                    jpeg_base64: b64,
+                                    jpeg: jpeg_bytes,
                                     width,
                                     height,
                                 },
-                            );
+                            )?;
                         }
                         Err(e) => {
                             log::warn!("Preview capture failed: {}", e);
-                            send_response(
-                                &response_tx,
+                            maybe_send(
+                                response_tx,
                                 DaemonEvent::Error {
                                     message: format!("Preview capture failed: {}", e),
                                 },
-                            );
+                            )?;
                         }
                     }
                 }
@@ -800,27 +673,27 @@ fn main() -> Result<()> {
                     match render_state.load_glsl_source(&result.shader_source) {
                         Ok(()) => {
                             current_shade_path = Some("live-preview".to_string());
-                            send_response(
-                                &response_tx,
+                            maybe_send(
+                                response_tx,
                                 DaemonEvent::CompileResult {
                                     success: true,
                                     errors: vec![],
                                     warnings,
                                 },
-                            );
+                            )?;
                         }
                         Err(e) => {
                             log::error!("Live reload failed: {}", e);
                             // Try to extract line numbers from error message
-                            let compile_error = parse_compile_error(&e.to_string());
-                            send_response(
-                                &response_tx,
+                            let compile_error = CompileError::from(e.to_string());
+                            maybe_send(
+                                response_tx,
                                 DaemonEvent::CompileResult {
                                     success: false,
                                     errors: vec![compile_error],
                                     warnings,
                                 },
-                            );
+                            )?;
                         }
                     }
                 }
@@ -833,14 +706,14 @@ fn main() -> Result<()> {
         }
 
         // Dispatch Wayland events
-        if let Some(ref mut sp) = wayland_surface {
-            if let Err(e) = sp.dispatch() {
+        if let Backend::Wayland { surface, .. } = &mut backend {
+            if let Err(e) = surface.dispatch() {
                 log::warn!("Wayland dispatch error: {}", e);
             }
         }
 
         // Update timing uniforms
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         let dt = now.duration_since(last_frame_time).as_secs_f32();
         last_frame_time = now;
 
@@ -869,16 +742,15 @@ fn main() -> Result<()> {
         match render_state.update_slideshow(dt as f64) {
             Ok(res) => match res {
                 SlideshowEvent::SwappedToVideo { source } => {
-                    video_decoders = vec![];
-                    video_decoders.push((
+                    video_decoders = vec![(
                         0,
                         video_decoder_for_source(
                             render_state.active_package.as_ref().unwrap(),
                             &source,
                         )
                         .unwrap(),
-                    ));
-                    video_frame_accums = vec![0.0].repeat(video_decoders.len());
+                    )];
+                    video_frame_accums = [0.0].repeat(video_decoders.len());
                 }
                 SlideshowEvent::SwappedToImage => {
                     video_decoders = vec![];
@@ -927,10 +799,8 @@ fn main() -> Result<()> {
                     let ph = ps.height;
                     match render_state.capture_preview_frame(pw, ph) {
                         Ok(jpeg_bytes) => {
-                            use base64::Engine;
-                            let b64 = base64::engine::general_purpose::STANDARD.encode(&jpeg_bytes);
-                            let event = kroma_shared::ipc::DaemonEvent::PreviewFrame {
-                                jpeg_base64: b64,
+                            let event = DaemonEvent::PreviewFrame {
+                                jpeg: jpeg_bytes,
                                 width: pw,
                                 height: ph,
                             };
@@ -995,72 +865,4 @@ fn main() -> Result<()> {
             std::thread::sleep(frame_budget - elapsed);
         }
     }
-}
-
-/// Parse a shader compile error message and extract line/column numbers.
-///
-/// Handles patterns like:
-/// - `error: 5:23: 'foo' : ...` (shaderc format: `source:line`)
-/// - `error at line 42` (generic)
-fn parse_compile_error(msg: &str) -> kroma_shared::ipc::CompileError {
-    // shaderc pattern: "N:LINE:" where N is the source id
-    // Look for two consecutive numbers separated by colon followed by colon
-    if let Some(line_num) = extract_shaderc_line(msg) {
-        return kroma_shared::ipc::CompileError {
-            message: msg.to_string(),
-            line: Some(line_num),
-            column: None,
-        };
-    }
-
-    // Generic "line N" pattern (case-insensitive manual search)
-    let lower = msg.to_lowercase();
-    if let Some(idx) = lower.find("line ") {
-        let after = &msg[idx + 5..];
-        let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(n) = num_str.parse::<u32>() {
-            return kroma_shared::ipc::CompileError {
-                message: msg.to_string(),
-                line: Some(n),
-                column: None,
-            };
-        }
-    }
-
-    kroma_shared::ipc::CompileError {
-        message: msg.to_string(),
-        line: None,
-        column: None,
-    }
-}
-
-/// Extract line number from shaderc-style error messages (e.g., "0:42: error").
-fn extract_shaderc_line(msg: &str) -> Option<u32> {
-    // Find patterns like "N:LINE:" where both are digits
-    let bytes = msg.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        // Look for a digit followed by ':'
-        if bytes[i].is_ascii_digit() {
-            // Skip the source ID digits
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i < bytes.len() && bytes[i] == b':' {
-                i += 1;
-                // Now try to parse the line number
-                let start = i;
-                while i < bytes.len() && bytes[i].is_ascii_digit() {
-                    i += 1;
-                }
-                if i > start && i < bytes.len() && bytes[i] == b':' {
-                    if let Ok(line) = msg[start..i].parse::<u32>() {
-                        return Some(line);
-                    }
-                }
-            }
-        }
-        i += 1;
-    }
-    None
 }

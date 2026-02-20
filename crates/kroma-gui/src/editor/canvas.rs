@@ -421,9 +421,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
         bounds: Rectangle,
         cursor: mouse::Cursor,
     ) -> Option<Action<GraphMessage>> {
-        let Some(cursor_pos) = cursor.position_in(bounds) else {
-            return None;
-        };
+        let cursor_pos = cursor.position_in(bounds)?;
 
         let offset = self.canvas_state.offset;
         let zoom = self.canvas_state.zoom;
@@ -498,7 +496,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
 
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
                 // --- Double-click detection for value pill editing ---
-                let is_double_click = state.last_value_click.as_ref().map_or(false, |(t, p)| {
+                let is_double_click = state.last_value_click.as_ref().is_some_and(|(t, p)| {
                     t.elapsed().as_millis() < 300
                         && (cursor_pos.x - p.x).abs() < 5.0
                         && (cursor_pos.y - p.y).abs() < 5.0
@@ -542,9 +540,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
 
                 // Check if clicking on a node
                 if let Some(node_id) = self.hit_test_node(cursor_pos, offset, zoom) {
-                    let Some(node) = self.graph.node(node_id) else {
-                        return None;
-                    };
+                    let node = self.graph.node(node_id)?;
 
                     // Double-click detection for sub-graph nodes
                     let is_subgraph_node = matches!(
@@ -695,7 +691,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 };
                 state.interaction = Interaction::None;
                 Some(
-                    msg.map(|m| Action::publish(m))
+                    msg.map(Action::publish)
                         .unwrap_or(Action::capture())
                         .and_capture(),
                 )

@@ -3,13 +3,24 @@
 //! Uses a Unix domain socket at `$XDG_RUNTIME_DIR/kroma.sock`.
 //! Messages are newline-delimited JSON.
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::mpsc};
 
 /// Returns the path to the IPC socket.
 pub fn socket_path() -> PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(runtime_dir).join("kroma.sock")
+}
+
+pub fn maybe_send<T: Send + Sync + 'static>(
+    maybe_tx: Option<mpsc::Sender<T>>,
+    event: T,
+) -> Result<()> {
+    if let Some(tx) = maybe_tx {
+        tx.send(event)?
+    };
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -126,10 +137,10 @@ pub enum DaemonEvent {
     },
 
     /// A single preview frame rendered by the daemon.
-    /// The image data is base64-encoded JPEG.
+    /// The image data is JPEG.
     PreviewFrame {
-        /// Base64-encoded JPEG image data.
-        jpeg_base64: String,
+        /// JPEG image data.
+        jpeg: Vec<u8>,
         /// Width of the rendered frame.
         width: u32,
         /// Height of the rendered frame.
@@ -143,4 +154,69 @@ pub struct CompileError {
     pub message: String,
     pub line: Option<u32>,
     pub column: Option<u32>,
+}
+
+impl From<String> for CompileError {
+    fn from(value: String) -> Self {
+        // shaderc pattern: "N:LINE:" where N is the source id
+        // Look for two consecutive numbers separated by colon followed by colon
+        if let Some(line_num) = extract_shaderc_line(&value) {
+            return CompileError {
+                message: value,
+                line: Some(line_num),
+                column: None,
+            };
+        }
+
+        // Generic "line N" pattern (case-insensitive manual search)
+        let lower = value.to_lowercase();
+        if let Some(idx) = lower.find("line ") {
+            let after = &value[idx + 5..];
+            let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = num_str.parse::<u32>() {
+                return CompileError {
+                    message: value,
+                    line: Some(n),
+                    column: None,
+                };
+            }
+        }
+
+        CompileError {
+            message: value,
+            line: None,
+            column: None,
+        }
+    }
+}
+
+/// Extract line number from shaderc-style error messages (e.g., "0:42: error").
+fn extract_shaderc_line(msg: &str) -> Option<u32> {
+    // Find patterns like "N:LINE:" where both are digits
+    let bytes = msg.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // Look for a digit followed by ':'
+        if bytes[i].is_ascii_digit() {
+            // Skip the source ID digits
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i < bytes.len() && bytes[i] == b':' {
+                i += 1;
+                // Now try to parse the line number
+                let start = i;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i > start && i < bytes.len() && bytes[i] == b':' {
+                    if let Ok(line) = msg[start..i].parse::<u32>() {
+                        return Some(line);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    None
 }

@@ -59,8 +59,7 @@ impl KromaApp {
         let error_color = self.theme_tokens.error;
         let tree_bg = self.theme_tokens.bg_tertiary;
         let tree_border = self.theme_tokens.border_default;
-        let mut items: Vec<Element<'_, Message>> = Vec::new();
-        items.push(
+        let mut items: Vec<Element<'_, Message>> = vec![
             row![
                 text(icons::PACKAGE).font(icons::ICON_FONT).size(14),
                 text(&self.shade_config.meta.name).size(14),
@@ -68,12 +67,10 @@ impl KromaApp {
             .spacing(4)
             .align_y(iced::Alignment::Center)
             .into(),
-        );
-        items.push(Space::new().height(4).into());
-        items.push(self.shade_tree_btn(icons::FILE, "config.toml", "config.toml"));
-        items.push(self.shade_tree_btn(icons::CODE, "shader.frag", "shader.frag"));
-        items.push(Space::new().height(6).into());
-        items.push(
+            Space::new().height(4).into(),
+            self.shade_tree_btn(icons::FILE, "config.toml", "config.toml"),
+            self.shade_tree_btn(icons::CODE, "shader.frag", "shader.frag"),
+            Space::new().height(6).into(),
             row![
                 text(icons::FOLDER).font(icons::ICON_FONT).size(12),
                 text("assets/").size(12),
@@ -81,7 +78,7 @@ impl KromaApp {
             .spacing(4)
             .align_y(iced::Alignment::Center)
             .into(),
-        );
+        ];
         if let Some(ref pkg) = self.shade_package {
             let mut sorted = pkg.asset_entries();
             sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -427,7 +424,7 @@ impl KromaApp {
                             .map(|(_n, idx)| *idx == ch)
                             .unwrap_or(false);
                         let is_occupied =
-                            self.shade_config.textures.get(&ch_name).is_some() && !is_current;
+                            self.shade_config.textures.contains_key(&ch_name) && !is_current;
                         let label = if is_current {
                             format!("[v] Ch{}", ch)
                         } else if is_occupied {
@@ -841,10 +838,7 @@ impl KromaApp {
             );
         }
         if self.shade_config.buffers.len() < 4 {
-            buffer_items.push(
-                self.btn_secondary("+ Add Buffer", Message::ShadeAddBuffer)
-                    .into(),
-            );
+            buffer_items.push(self.btn_secondary("+ Add Buffer", Message::ShadeAddBuffer));
         }
         buffer_items.push(
             text("Multi-pass buffers (A–D) render to offscreen textures for feedback effects.")

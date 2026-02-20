@@ -40,7 +40,7 @@ pub fn load_icon_font() -> Task<Result<(), iced::font::Error>> {
 }
 
 /// Create a text widget using the Material Icons font.
-pub fn icon<'a, M: 'a>(codepoint: &'a str) -> iced::widget::Text<'a> {
+pub fn icon<'a>(codepoint: &'a str) -> iced::widget::Text<'a> {
     iced::widget::text(codepoint).font(ICON_FONT)
 }
 

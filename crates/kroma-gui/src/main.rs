@@ -721,7 +721,7 @@ impl KromaApp {
         let mut subs = vec![fast_tick, status_tick, keyboard, ipc_sub];
 
         // Video playback tick (~24 fps) — only active when playing
-        if self.video_player.as_ref().map_or(false, |p| p.playing) {
+        if self.video_player.as_ref().is_some_and(|p| p.playing) {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(42)).map(|_| Message::VideoTick),
             );
@@ -1351,26 +1351,20 @@ impl KromaApp {
                                 });
                             }
                             DaemonEvent::PreviewFrame {
-                                jpeg_base64,
+                                jpeg,
                                 width,
                                 height,
                             } => {
-                                // Decode base64 JPEG → RGBA pixels
-                                if let Ok(jpeg_data) = base64::Engine::decode(
-                                    &base64::engine::general_purpose::STANDARD,
-                                    &jpeg_base64,
+                                if let Ok(img) = image::load_from_memory_with_format(
+                                    &jpeg,
+                                    image::ImageFormat::Jpeg,
                                 ) {
-                                    if let Ok(img) = image::load_from_memory_with_format(
-                                        &jpeg_data,
-                                        image::ImageFormat::Jpeg,
-                                    ) {
-                                        let rgba = img.to_rgba8();
-                                        self.preview_frame = Some(PreviewFrameData {
-                                            pixels: rgba.into_raw(),
-                                            width,
-                                            height,
-                                        });
-                                    }
+                                    let rgba = img.to_rgba8();
+                                    self.preview_frame = Some(PreviewFrameData {
+                                        pixels: rgba.into_raw(),
+                                        width,
+                                        height,
+                                    });
                                 }
                             }
                             DaemonEvent::ShadeLoaded { name } => {

@@ -348,7 +348,7 @@ impl ShaderGraph {
                         && self
                             .nodes
                             .get(nid)
-                            .map_or(false, |n| matches!(n.kind, NodeKind::ForLoop))
+                            .is_some_and(|n| matches!(n.kind, NodeKind::ForLoop))
                 });
                 if has_loop_in_stack {
                     // Break the cycle — use the node's label or a generated name

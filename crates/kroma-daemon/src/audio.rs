@@ -30,21 +30,6 @@ pub trait AudioProvider: Send + Sync {
     fn get_level(&self) -> f32;
 }
 
-/// Stub audio provider that returns silence.
-///
-/// Used when no audio backend is available.
-pub struct SilentAudioProvider;
-
-impl AudioProvider for SilentAudioProvider {
-    fn get_spectrum(&self) -> Vec<f32> {
-        vec![0.0; SPECTRUM_BANDS]
-    }
-
-    fn get_level(&self) -> f32 {
-        0.0
-    }
-}
-
 /// Thread-safe shared audio state that can be updated by a background thread.
 pub struct SharedAudioState {
     spectrum: Arc<Mutex<Vec<f32>>>,
@@ -263,23 +248,24 @@ impl CpalAudioProvider {
                     // The shader we wrote handles log mapping on the texture coordinate side.
                     let bins_per_band = half_size as f32 / SPECTRUM_BANDS as f32;
 
-                    for i in 0..SPECTRUM_BANDS {
+                    for (i, spectrum_val) in spectrum.iter_mut().enumerate().take(SPECTRUM_BANDS) {
                         let start_bin = (i as f32 * bins_per_band) as usize;
                         let end_bin = ((i + 1) as f32 * bins_per_band) as usize;
                         let end_bin = end_bin.max(start_bin + 1).min(half_size);
 
-                        let mut mag_sum = 0.0;
-                        for bin in start_bin..end_bin {
-                            mag_sum += input[bin].norm();
-                        }
+                        let mag_sum: f32 = input
+                            .iter()
+                            .take(end_bin)
+                            .skip(start_bin)
+                            .map(|x| x.norm())
+                            .sum();
+
                         let avg_mag = mag_sum / (end_bin - start_bin) as f32;
 
                         // Convert magnitude to normalized dB (roughly)
                         // Log10 of 0.001 (-60dB) to 1.0 (0dB)
                         let db = 20.0 * (avg_mag + 1e-6).log10();
-                        let val = ((db + 60.0) / 60.0).max(0.0);
-
-                        spectrum[i] = val;
+                        *spectrum_val = ((db + 60.0) / 60.0).max(0.0);
                     }
 
                     *spec_write.lock().unwrap() = spectrum;
@@ -287,7 +273,7 @@ impl CpalAudioProvider {
             })?;
 
         // --- Input Stream ---
-        let buf_write = (&sample_buffer).clone();
+        let buf_write = sample_buffer.clone();
         let channels = config.channels() as usize;
 
         let err_fn = |err| log::error!("Audio input stream error: {}", err);

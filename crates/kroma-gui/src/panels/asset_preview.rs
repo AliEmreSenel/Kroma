@@ -22,7 +22,7 @@ impl Panel for AssetPreviewPanel {
 
         match selected {
             None => {
-                return container(
+                container(
                     column![
                         text("Kroma Workspace").size(14).color(t.text_primary),
                         text("Select a file to preview")
@@ -38,10 +38,10 @@ impl Panel for AssetPreviewPanel {
                 .width(Fill)
                 .height(Fill)
                 .padding(8)
-                .into();
+                .into()
             }
             Some("config.toml") => {
-                return self.view_config_editor(ctx);
+                self.view_config_editor(ctx)
             }
             Some(name)
                 if name == "shader.frag"
@@ -49,10 +49,10 @@ impl Panel for AssetPreviewPanel {
                     || name.ends_with(".frag")
                     || name.ends_with(".vert") =>
             {
-                return self.view_shader_editor(ctx, name);
+                self.view_shader_editor(ctx, name)
             }
             Some(name) => {
-                return self.view_asset(ctx, name);
+                self.view_asset(ctx, name)
             }
         }
     }
