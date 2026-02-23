@@ -4,10 +4,10 @@
 //! into the Panel trait. The shader graph state lives in KromaApp and
 //! is accessed through AppContext references.
 
+use crate::Message;
 use crate::editor;
 use crate::panels::{AppContext, Panel};
-use crate::Message;
-use iced::widget::{button, column, container, row, scrollable, text, text_input, Space};
+use iced::widget::{Space, button, column, container, row, scrollable, text, text_input};
 use iced::{Border, Element, Fill, Length, Padding, Theme};
 
 // ---------------------------------------------------------------------------

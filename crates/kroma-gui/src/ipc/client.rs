@@ -1,13 +1,13 @@
 //! Async IPC client with persistent connection and auto-reconnect.
 
-use iced::futures::channel::mpsc::Sender;
-use iced::futures::SinkExt;
 use iced::Subscription;
+use iced::futures::SinkExt;
+use iced::futures::channel::mpsc::Sender;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
-use kroma_shared::ipc::{socket_path, DaemonCommand, DaemonEvent};
+use kroma_shared::ipc::{DaemonCommand, DaemonEvent, socket_path};
 
 // ---------------------------------------------------------------------------
 // Public types

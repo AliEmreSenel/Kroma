@@ -1,12 +1,12 @@
 //! Shade project message handler (extracted from update() in main.rs).
 
+use crate::Message;
 use crate::commands;
 use crate::editor;
 use crate::utils;
-use crate::Message;
 
-use iced::widget::text_editor;
 use iced::Task;
+use iced::widget::text_editor;
 use kroma_shared::shade::LiveShadePackage;
 use kroma_shared::types::ShadeConfig;
 use kroma_shared::types::ShadeMeta;

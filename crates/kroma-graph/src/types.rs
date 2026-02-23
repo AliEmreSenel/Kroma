@@ -196,10 +196,10 @@ pub enum NodeKind {
     Voronoi,
 
     // --- Mixed-type constructors ---
-    Combine4FromVec3Float,       // vec4(vec3, float)
-    Combine4FromVec2Vec2,        // vec4(vec2, vec2)
-    Combine4FromVec2FloatFloat,  // vec4(vec2, float, float)
-    Combine3FromVec2Float,       // vec3(vec2, float)
+    Combine4FromVec3Float,      // vec4(vec3, float)
+    Combine4FromVec2Vec2,       // vec4(vec2, vec2)
+    Combine4FromVec2FloatFloat, // vec4(vec2, float, float)
+    Combine3FromVec2Float,      // vec3(vec2, float)
 
     // --- Vec2 math ---
     AddVec2,
@@ -729,11 +729,7 @@ pub fn palette() -> Vec<(&'static str, Vec<NodeKind>)> {
         ),
         (
             "Matrix",
-            vec![
-                NodeKind::Mat2,
-                NodeKind::Mat3,
-                NodeKind::Mat4,
-            ],
+            vec![NodeKind::Mat2, NodeKind::Mat3, NodeKind::Mat4],
         ),
         (
             "Custom",

@@ -1,6 +1,6 @@
 //! Reusable UI widget helpers (extracted from main.rs).
 
-use iced::widget::{button, column, container, row, text, Space};
+use iced::widget::{Space, button, column, container, row, text};
 use iced::{Border, Element, Fill, Padding, Theme};
 
 use crate::Message;

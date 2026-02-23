@@ -32,7 +32,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use iced::widget::text_editor;
-use iced::{keyboard, Element, Subscription, Task, Theme};
+use iced::{Element, Subscription, Task, Theme, keyboard};
 use log::info;
 
 fn main() -> Result<()> {
@@ -1557,8 +1557,8 @@ impl KromaApp {
 
     /// Fullscreen intro/welcome screen.
     fn view_intro(&self) -> Element<'_, Message> {
-        use iced::widget::{button, column, container, row, rule, text, Space};
-        use iced::{alignment, Border, Color, Fill, Padding};
+        use iced::widget::{Space, button, column, container, row, rule, text};
+        use iced::{Border, Color, Fill, Padding, alignment};
 
         let tokens = &self.theme_tokens;
 

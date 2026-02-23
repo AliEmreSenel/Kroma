@@ -7,10 +7,10 @@ use iced::widget::space::horizontal;
 use iced::widget::{column, container, row, scrollable, text};
 use iced::{Border, Element, Fill, Length, Padding, Theme};
 
+use crate::Message;
 use crate::icons;
 use crate::panels::dashboard::{btn_danger, btn_primary, btn_secondary};
 use crate::panels::{AppContext, Panel};
-use crate::Message;
 
 pub struct CodeEditorPanel;
 

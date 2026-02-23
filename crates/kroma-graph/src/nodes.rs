@@ -222,8 +222,8 @@ pub fn inputs(kind: &NodeKind) -> &'static [PortDef] {
         }
 
         // Comparison / logical binary ops (A op B)
-        LessThan | GreaterThan | LessEqual | GreaterEqual | Equal | NotEqual
-        | LogicalAnd | LogicalOr | BitAnd | BitOr | BitXor | LeftShift | RightShift => {
+        LessThan | GreaterThan | LessEqual | GreaterEqual | Equal | NotEqual | LogicalAnd
+        | LogicalOr | BitAnd | BitOr | BitXor | LeftShift | RightShift => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
             P.get_or_init(|| vec![port!(in "A", Float), port!(in "B", Float)])
                 .as_slice()
@@ -466,11 +466,11 @@ pub fn outputs(kind: &NodeKind) -> &'static [PortDef] {
         }
 
         // Comparison / logical / bitwise → single float result
-        LessThan | GreaterThan | LessEqual | GreaterEqual | Equal | NotEqual
-        | LogicalAnd | LogicalOr | LogicalNot | BitAnd | BitOr | BitXor | BitNot
-        | LeftShift | RightShift => {
+        LessThan | GreaterThan | LessEqual | GreaterEqual | Equal | NotEqual | LogicalAnd
+        | LogicalOr | LogicalNot | BitAnd | BitOr | BitXor | BitNot | LeftShift | RightShift => {
             static P: OnceLock<Vec<PortDef>> = OnceLock::new();
-            P.get_or_init(|| vec![port!(out "Result", Float)]).as_slice()
+            P.get_or_init(|| vec![port!(out "Result", Float)])
+                .as_slice()
         }
 
         // Matrix constructors → Vec4 output (closest available type)
@@ -588,8 +588,8 @@ pub fn default_values(kind: &NodeKind) -> Vec<DefaultValue> {
         ],
 
         // Comparison / logical binary ops
-        LessThan | GreaterThan | LessEqual | GreaterEqual | Equal | NotEqual
-        | LogicalAnd | LogicalOr | BitAnd | BitOr | BitXor | LeftShift | RightShift => {
+        LessThan | GreaterThan | LessEqual | GreaterEqual | Equal | NotEqual | LogicalAnd
+        | LogicalOr | BitAnd | BitOr | BitXor | LeftShift | RightShift => {
             vec![DefaultValue::Float(0.0), DefaultValue::Float(0.0)]
         }
 
@@ -631,14 +631,27 @@ pub fn default_values(kind: &NodeKind) -> Vec<DefaultValue> {
         ],
 
         // --- Mixed-type constructors ---
-        Combine4FromVec3Float => vec![DefaultValue::Vec3([0.0, 0.0, 0.0]), DefaultValue::Float(0.0)],
-        Combine4FromVec2Vec2 => vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Vec2([0.0, 0.0])],
-        Combine4FromVec2FloatFloat => vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Float(0.0), DefaultValue::Float(0.0)],
+        Combine4FromVec3Float => vec![
+            DefaultValue::Vec3([0.0, 0.0, 0.0]),
+            DefaultValue::Float(0.0),
+        ],
+        Combine4FromVec2Vec2 => vec![
+            DefaultValue::Vec2([0.0, 0.0]),
+            DefaultValue::Vec2([0.0, 0.0]),
+        ],
+        Combine4FromVec2FloatFloat => vec![
+            DefaultValue::Vec2([0.0, 0.0]),
+            DefaultValue::Float(0.0),
+            DefaultValue::Float(0.0),
+        ],
         Combine3FromVec2Float => vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Float(0.0)],
 
         // --- Vec2 binary math ---
         AddVec2 | SubtractVec2 | MultiplyVec2 | DivideVec2 => {
-            vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Vec2([0.0, 0.0])]
+            vec![
+                DefaultValue::Vec2([0.0, 0.0]),
+                DefaultValue::Vec2([0.0, 0.0]),
+            ]
         }
         MultiplyVec2Scalar | DivideVec2Scalar => {
             vec![DefaultValue::Vec2([0.0, 0.0]), DefaultValue::Float(1.0)]
@@ -646,18 +659,30 @@ pub fn default_values(kind: &NodeKind) -> Vec<DefaultValue> {
 
         // --- Vec3 binary math ---
         AddVec3 | SubtractVec3 | MultiplyVec3 | DivideVec3 => {
-            vec![DefaultValue::Vec3([0.0, 0.0, 0.0]), DefaultValue::Vec3([0.0, 0.0, 0.0])]
+            vec![
+                DefaultValue::Vec3([0.0, 0.0, 0.0]),
+                DefaultValue::Vec3([0.0, 0.0, 0.0]),
+            ]
         }
         MultiplyVec3Scalar | DivideVec3Scalar => {
-            vec![DefaultValue::Vec3([0.0, 0.0, 0.0]), DefaultValue::Float(1.0)]
+            vec![
+                DefaultValue::Vec3([0.0, 0.0, 0.0]),
+                DefaultValue::Float(1.0),
+            ]
         }
 
         // --- Vec4 binary math ---
         AddVec4 | SubtractVec4 | MultiplyVec4 | DivideVec4 => {
-            vec![DefaultValue::Vec4([0.0, 0.0, 0.0, 0.0]), DefaultValue::Vec4([0.0, 0.0, 0.0, 0.0])]
+            vec![
+                DefaultValue::Vec4([0.0, 0.0, 0.0, 0.0]),
+                DefaultValue::Vec4([0.0, 0.0, 0.0, 0.0]),
+            ]
         }
         MultiplyVec4Scalar | DivideVec4Scalar => {
-            vec![DefaultValue::Vec4([0.0, 0.0, 0.0, 0.0]), DefaultValue::Float(1.0)]
+            vec![
+                DefaultValue::Vec4([0.0, 0.0, 0.0, 0.0]),
+                DefaultValue::Float(1.0),
+            ]
         }
 
         // Uniform nodes have no inputs
@@ -698,19 +723,31 @@ pub fn codegen(
 
         // Constants — use defaults when available
         FloatConst => {
-            let val = defaults.first().map(|d| d.to_glsl()).unwrap_or_else(|| "1.0".into());
+            let val = defaults
+                .first()
+                .map(|d| d.to_glsl())
+                .unwrap_or_else(|| "1.0".into());
             format!("float {} = {};", var, val)
         }
         Vec2Const => {
-            let val = defaults.first().map(|d| d.to_glsl()).unwrap_or_else(|| "vec2(0.0, 0.0)".into());
+            let val = defaults
+                .first()
+                .map(|d| d.to_glsl())
+                .unwrap_or_else(|| "vec2(0.0, 0.0)".into());
             format!("vec2 {} = {};", var, val)
         }
         Vec3Const => {
-            let val = defaults.first().map(|d| d.to_glsl()).unwrap_or_else(|| "vec3(0.0, 0.0, 0.0)".into());
+            let val = defaults
+                .first()
+                .map(|d| d.to_glsl())
+                .unwrap_or_else(|| "vec3(0.0, 0.0, 0.0)".into());
             format!("vec3 {} = {};", var, val)
         }
         ColorConst => {
-            let val = defaults.first().map(|d| d.to_glsl()).unwrap_or_else(|| "vec4(1.0, 0.0, 0.5, 1.0)".into());
+            let val = defaults
+                .first()
+                .map(|d| d.to_glsl())
+                .unwrap_or_else(|| "vec4(1.0, 0.0, 0.5, 1.0)".into());
             format!("vec4 {} = {};", var, val)
         }
 
@@ -727,77 +764,302 @@ pub fn codegen(
         UV => format!("vec2 {} = fragCoord / iResolution.xy;", var),
 
         // Binary math — type inferred from defaults
-        Add => { let t = infer_type(defaults); format!("{t} {var} = {a} + {b};", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
-        Subtract => { let t = infer_type(defaults); format!("{t} {var} = {a} - {b};", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
-        Multiply => { let t = infer_type(defaults); format!("{t} {var} = {a} * {b};", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
-        Divide => { let t = infer_type(defaults); format!("{t} {var} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
+        Add => {
+            let t = infer_type(defaults);
+            format!(
+                "{t} {var} = {a} + {b};",
+                t = t,
+                var = var,
+                a = a(inputs, 0),
+                b = a(inputs, 1)
+            )
+        }
+        Subtract => {
+            let t = infer_type(defaults);
+            format!(
+                "{t} {var} = {a} - {b};",
+                t = t,
+                var = var,
+                a = a(inputs, 0),
+                b = a(inputs, 1)
+            )
+        }
+        Multiply => {
+            let t = infer_type(defaults);
+            format!(
+                "{t} {var} = {a} * {b};",
+                t = t,
+                var = var,
+                a = a(inputs, 0),
+                b = a(inputs, 1)
+            )
+        }
+        Divide => {
+            let t = infer_type(defaults);
+            format!(
+                "{t} {var} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});",
+                t = t,
+                var = var,
+                a = a(inputs, 0),
+                b = a(inputs, 1)
+            )
+        }
         Power => format!("float {} = pow({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Mod => { let t = infer_type(defaults); format!("{t} {var} = mod({a}, {b});", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
-        Min => { let t = infer_type(defaults); format!("{t} {var} = min({a}, {b});", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
-        Max => { let t = infer_type(defaults); format!("{t} {var} = max({a}, {b});", t=t, var=var, a=a(inputs, 0), b=a(inputs, 1)) }
+        Mod => {
+            let t = infer_type(defaults);
+            format!(
+                "{t} {var} = mod({a}, {b});",
+                t = t,
+                var = var,
+                a = a(inputs, 0),
+                b = a(inputs, 1)
+            )
+        }
+        Min => {
+            let t = infer_type(defaults);
+            format!(
+                "{t} {var} = min({a}, {b});",
+                t = t,
+                var = var,
+                a = a(inputs, 0),
+                b = a(inputs, 1)
+            )
+        }
+        Max => {
+            let t = infer_type(defaults);
+            format!(
+                "{t} {var} = max({a}, {b});",
+                t = t,
+                var = var,
+                a = a(inputs, 0),
+                b = a(inputs, 1)
+            )
+        }
 
         // Unary math — type inferred from defaults
-        Sqrt => { let t = infer_type(defaults); format!("{} {} = sqrt(abs({}));", t, var, a(inputs, 0)) }
-        Abs => { let t = infer_type(defaults); format!("{} {} = abs({});", t, var, a(inputs, 0)) }
-        Negate => { let t = infer_type(defaults); format!("{} {} = -{};", t, var, a(inputs, 0)) }
-        Sin => { let t = infer_type(defaults); format!("{} {} = sin({});", t, var, a(inputs, 0)) }
-        Cos => { let t = infer_type(defaults); format!("{} {} = cos({});", t, var, a(inputs, 0)) }
-        Tan => { let t = infer_type(defaults); format!("{} {} = tan({});", t, var, a(inputs, 0)) }
-        Asin => { let t = infer_type(defaults); format!("{} {} = asin(clamp({}, -1.0, 1.0));", t, var, a(inputs, 0)) }
-        Acos => { let t = infer_type(defaults); format!("{} {} = acos(clamp({}, -1.0, 1.0));", t, var, a(inputs, 0)) }
-        Atan => { let t = infer_type(defaults); format!("{} {} = atan({});", t, var, a(inputs, 0)) }
+        Sqrt => {
+            let t = infer_type(defaults);
+            format!("{} {} = sqrt(abs({}));", t, var, a(inputs, 0))
+        }
+        Abs => {
+            let t = infer_type(defaults);
+            format!("{} {} = abs({});", t, var, a(inputs, 0))
+        }
+        Negate => {
+            let t = infer_type(defaults);
+            format!("{} {} = -{};", t, var, a(inputs, 0))
+        }
+        Sin => {
+            let t = infer_type(defaults);
+            format!("{} {} = sin({});", t, var, a(inputs, 0))
+        }
+        Cos => {
+            let t = infer_type(defaults);
+            format!("{} {} = cos({});", t, var, a(inputs, 0))
+        }
+        Tan => {
+            let t = infer_type(defaults);
+            format!("{} {} = tan({});", t, var, a(inputs, 0))
+        }
+        Asin => {
+            let t = infer_type(defaults);
+            format!("{} {} = asin(clamp({}, -1.0, 1.0));", t, var, a(inputs, 0))
+        }
+        Acos => {
+            let t = infer_type(defaults);
+            format!("{} {} = acos(clamp({}, -1.0, 1.0));", t, var, a(inputs, 0))
+        }
+        Atan => {
+            let t = infer_type(defaults);
+            format!("{} {} = atan({});", t, var, a(inputs, 0))
+        }
         Atan2 => format!("float {} = atan({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Exp => { let t = infer_type(defaults); format!("{} {} = exp({});", t, var, a(inputs, 0)) }
-        Exp2 => { let t = infer_type(defaults); format!("{} {} = exp2({});", t, var, a(inputs, 0)) }
-        Log => { let t = infer_type(defaults); format!("{} {} = log(max({}, 0.0001));", t, var, a(inputs, 0)) }
-        Log2 => { let t = infer_type(defaults); format!("{} {} = log2(max({}, 0.0001));", t, var, a(inputs, 0)) }
-        Sign => { let t = infer_type(defaults); format!("{} {} = sign({});", t, var, a(inputs, 0)) }
-        Ceil => { let t = infer_type(defaults); format!("{} {} = ceil({});", t, var, a(inputs, 0)) }
-        Round => { let t = infer_type(defaults); format!("{} {} = floor({} + 0.5);", t, var, a(inputs, 0)) }
-        Fract => { let t = infer_type(defaults); format!("{} {} = fract({});", t, var, a(inputs, 0)) }
-        Floor => { let t = infer_type(defaults); format!("{} {} = floor({});", t, var, a(inputs, 0)) }
-        Saturate => { let t = infer_type(defaults); format!("{} {} = clamp({}, 0.0, 1.0);", t, var, a(inputs, 0)) }
-        OneMinus => { let t = infer_type(defaults); format!("{} {} = 1.0 - {};", t, var, a(inputs, 0)) }
-        InverseSqrt => { let t = infer_type(defaults); format!("{} {} = inversesqrt(max({}, 0.0001));", t, var, a(inputs, 0)) },
+        Exp => {
+            let t = infer_type(defaults);
+            format!("{} {} = exp({});", t, var, a(inputs, 0))
+        }
+        Exp2 => {
+            let t = infer_type(defaults);
+            format!("{} {} = exp2({});", t, var, a(inputs, 0))
+        }
+        Log => {
+            let t = infer_type(defaults);
+            format!("{} {} = log(max({}, 0.0001));", t, var, a(inputs, 0))
+        }
+        Log2 => {
+            let t = infer_type(defaults);
+            format!("{} {} = log2(max({}, 0.0001));", t, var, a(inputs, 0))
+        }
+        Sign => {
+            let t = infer_type(defaults);
+            format!("{} {} = sign({});", t, var, a(inputs, 0))
+        }
+        Ceil => {
+            let t = infer_type(defaults);
+            format!("{} {} = ceil({});", t, var, a(inputs, 0))
+        }
+        Round => {
+            let t = infer_type(defaults);
+            format!("{} {} = floor({} + 0.5);", t, var, a(inputs, 0))
+        }
+        Fract => {
+            let t = infer_type(defaults);
+            format!("{} {} = fract({});", t, var, a(inputs, 0))
+        }
+        Floor => {
+            let t = infer_type(defaults);
+            format!("{} {} = floor({});", t, var, a(inputs, 0))
+        }
+        Saturate => {
+            let t = infer_type(defaults);
+            format!("{} {} = clamp({}, 0.0, 1.0);", t, var, a(inputs, 0))
+        }
+        OneMinus => {
+            let t = infer_type(defaults);
+            format!("{} {} = 1.0 - {};", t, var, a(inputs, 0))
+        }
+        InverseSqrt => {
+            let t = infer_type(defaults);
+            format!(
+                "{} {} = inversesqrt(max({}, 0.0001));",
+                t,
+                var,
+                a(inputs, 0)
+            )
+        }
 
         // Ternary
-        Clamp => { let t = infer_type(defaults); format!("{} {} = clamp({}, {}, {});", t, var, a(inputs, 0), a(inputs, 1), a(inputs, 2)) }
-        Mix => { let t = infer_type(defaults); format!("{} {} = mix({}, {}, {});", t, var, a(inputs, 0), a(inputs, 1), a(inputs, 2)) }
-        Step => { let t = infer_type(defaults); format!("{} {} = step({}, {});", t, var, a(inputs, 0), a(inputs, 1)) }
-        SmoothStep => { let t = infer_type(defaults); format!("{} {} = smoothstep({}, {}, {});", t, var, a(inputs, 0), a(inputs, 1), a(inputs, 2)) }
+        Clamp => {
+            let t = infer_type(defaults);
+            format!(
+                "{} {} = clamp({}, {}, {});",
+                t,
+                var,
+                a(inputs, 0),
+                a(inputs, 1),
+                a(inputs, 2)
+            )
+        }
+        Mix => {
+            let t = infer_type(defaults);
+            format!(
+                "{} {} = mix({}, {}, {});",
+                t,
+                var,
+                a(inputs, 0),
+                a(inputs, 1),
+                a(inputs, 2)
+            )
+        }
+        Step => {
+            let t = infer_type(defaults);
+            format!("{} {} = step({}, {});", t, var, a(inputs, 0), a(inputs, 1))
+        }
+        SmoothStep => {
+            let t = infer_type(defaults);
+            format!(
+                "{} {} = smoothstep({}, {}, {});",
+                t,
+                var,
+                a(inputs, 0),
+                a(inputs, 1),
+                a(inputs, 2)
+            )
+        }
 
         // Combine
         Combine2 => format!("vec2 {} = vec2({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Combine3 => format!("vec3 {} = vec3({}, {}, {});", var, a(inputs, 0), a(inputs, 1), a(inputs, 2)),
-        Combine4 => format!("vec4 {} = vec4({}, {}, {}, {});", var, a(inputs, 0), a(inputs, 1), a(inputs, 2), a(inputs, 3)),
+        Combine3 => format!(
+            "vec3 {} = vec3({}, {}, {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1),
+            a(inputs, 2)
+        ),
+        Combine4 => format!(
+            "vec4 {} = vec4({}, {}, {}, {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1),
+            a(inputs, 2),
+            a(inputs, 3)
+        ),
 
         // Split — multi-output: emit separate variables
-        SplitVec2 => format!("float {}_o0 = {}.x; float {}_o1 = {}.y;", var, a(inputs, 0), var, a(inputs, 0)),
+        SplitVec2 => format!(
+            "float {}_o0 = {}.x; float {}_o1 = {}.y;",
+            var,
+            a(inputs, 0),
+            var,
+            a(inputs, 0)
+        ),
         SplitVec3 => format!(
             "float {v}_o0 = {i}.x; float {v}_o1 = {i}.y; float {v}_o2 = {i}.z;",
-            v = var, i = a(inputs, 0)
+            v = var,
+            i = a(inputs, 0)
         ),
         SplitVec4 => format!(
             "float {v}_o0 = {i}.x; float {v}_o1 = {i}.y; float {v}_o2 = {i}.z; float {v}_o3 = {i}.w;",
-            v = var, i = a(inputs, 0)
+            v = var,
+            i = a(inputs, 0)
         ),
 
         // Vector ops
         Length => format!("float {} = length({});", var, a(inputs, 0)),
-        Normalize => { let t = infer_type(defaults); format!("{} {} = normalize({});", t, var, a(inputs, 0)) }
+        Normalize => {
+            let t = infer_type(defaults);
+            format!("{} {} = normalize({});", t, var, a(inputs, 0))
+        }
         Dot => format!("float {} = dot({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Cross => { let t = infer_type(defaults); format!("{} {} = cross({}, {});", t, var, a(inputs, 0), a(inputs, 1)) }
-        Distance => format!("float {} = distance({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Reflect => { let t = infer_type(defaults); format!("{} {} = reflect({}, {});", t, var, a(inputs, 0), a(inputs, 1)) }
-        Refract => { let t = infer_type(defaults); format!("{} {} = refract({}, {}, {});", t, var, a(inputs, 0), a(inputs, 1), a(inputs, 2)) }
+        Cross => {
+            let t = infer_type(defaults);
+            format!("{} {} = cross({}, {});", t, var, a(inputs, 0), a(inputs, 1))
+        }
+        Distance => format!(
+            "float {} = distance({}, {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
+        Reflect => {
+            let t = infer_type(defaults);
+            format!(
+                "{} {} = reflect({}, {});",
+                t,
+                var,
+                a(inputs, 0),
+                a(inputs, 1)
+            )
+        }
+        Refract => {
+            let t = infer_type(defaults);
+            format!(
+                "{} {} = refract({}, {}, {});",
+                t,
+                var,
+                a(inputs, 0),
+                a(inputs, 1),
+                a(inputs, 2)
+            )
+        }
 
         // Colour
         RgbToHsv => format!("vec3 {} = kroma_rgb2hsv({});", var, a(inputs, 0)),
         HsvToRgb => format!("vec3 {} = kroma_hsv2rgb({});", var, a(inputs, 0)),
 
         // Procedural
-        ValueNoise => format!("float {} = kroma_vnoise({} * {});", var, a(inputs, 0), a(inputs, 1)),
-        Voronoi => format!("float {} = kroma_voronoi({} * {});", var, a(inputs, 0), a(inputs, 1)),
+        ValueNoise => format!(
+            "float {} = kroma_vnoise({} * {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
+        Voronoi => format!(
+            "float {} = kroma_voronoi({} * {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
 
         // Custom GLSL — use stored expression template if available
         GlslExpr => {
@@ -807,8 +1069,11 @@ pub fn codegen(
                     .replace("{A}", a(inputs, 0))
                     .replace("{B}", a(inputs, 1));
                 // Comparison / boolean / bitwise operators produce scalar results
-                let is_scalar_op = ["==", "!=", ">", "<", ">=", "<=", "&&", "||", "!", "~", "&", "|", "^"]
-                    .iter().any(|op| template.contains(op));
+                let is_scalar_op = [
+                    "==", "!=", ">", "<", ">=", "<=", "&&", "||", "!", "~", "&", "|", "^",
+                ]
+                .iter()
+                .any(|op| template.contains(op));
                 if is_scalar_op {
                     format!("float {} = float({});", var, expr)
                 } else {
@@ -817,31 +1082,104 @@ pub fn codegen(
             } else {
                 format!(
                     "vec4 {} = mix({}, {}, vec4(length({}) * sin({}) * 0.5 + 0.5));",
-                    var, a(inputs, 0), a(inputs, 1), a(inputs, 2), a(inputs, 3)
+                    var,
+                    a(inputs, 0),
+                    a(inputs, 1),
+                    a(inputs, 2),
+                    a(inputs, 3)
                 )
             }
         }
 
         // Comparison
-        LessThan => format!("float {} = float({} < {});", var, a(inputs, 0), a(inputs, 1)),
-        GreaterThan => format!("float {} = float({} > {});", var, a(inputs, 0), a(inputs, 1)),
-        LessEqual => format!("float {} = float({} <= {});", var, a(inputs, 0), a(inputs, 1)),
-        GreaterEqual => format!("float {} = float({} >= {});", var, a(inputs, 0), a(inputs, 1)),
-        Equal => format!("float {} = float({} == {});", var, a(inputs, 0), a(inputs, 1)),
-        NotEqual => format!("float {} = float({} != {});", var, a(inputs, 0), a(inputs, 1)),
+        LessThan => format!(
+            "float {} = float({} < {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
+        GreaterThan => format!(
+            "float {} = float({} > {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
+        LessEqual => format!(
+            "float {} = float({} <= {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
+        GreaterEqual => format!(
+            "float {} = float({} >= {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
+        Equal => format!(
+            "float {} = float({} == {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
+        NotEqual => format!(
+            "float {} = float({} != {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
 
         // Logical
-        LogicalAnd => format!("float {} = float({} > 0.0 && {} > 0.0);", var, a(inputs, 0), a(inputs, 1)),
-        LogicalOr => format!("float {} = float({} > 0.0 || {} > 0.0);", var, a(inputs, 0), a(inputs, 1)),
+        LogicalAnd => format!(
+            "float {} = float({} > 0.0 && {} > 0.0);",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
+        LogicalOr => format!(
+            "float {} = float({} > 0.0 || {} > 0.0);",
+            var,
+            a(inputs, 0),
+            a(inputs, 1)
+        ),
         LogicalNot => format!("float {} = float(!({} > 0.0));", var, a(inputs, 0)),
 
         // Bitwise
-        BitAnd => format!("int {v}_i = int({a}) & int({b}); float {v} = float({v}_i);", v = var, a = a(inputs, 0), b = a(inputs, 1)),
-        BitOr => format!("int {v}_i = int({a}) | int({b}); float {v} = float({v}_i);", v = var, a = a(inputs, 0), b = a(inputs, 1)),
-        BitXor => format!("int {v}_i = int({a}) ^ int({b}); float {v} = float({v}_i);", v = var, a = a(inputs, 0), b = a(inputs, 1)),
-        BitNot => format!("int {v}_i = ~int({a}); float {v} = float({v}_i);", v = var, a = a(inputs, 0)),
-        LeftShift => format!("int {v}_i = int({a}) << int({b}); float {v} = float({v}_i);", v = var, a = a(inputs, 0), b = a(inputs, 1)),
-        RightShift => format!("int {v}_i = int({a}) >> int({b}); float {v} = float({v}_i);", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        BitAnd => format!(
+            "int {v}_i = int({a}) & int({b}); float {v} = float({v}_i);",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
+        BitOr => format!(
+            "int {v}_i = int({a}) | int({b}); float {v} = float({v}_i);",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
+        BitXor => format!(
+            "int {v}_i = int({a}) ^ int({b}); float {v} = float({v}_i);",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
+        BitNot => format!(
+            "int {v}_i = ~int({a}); float {v} = float({v}_i);",
+            v = var,
+            a = a(inputs, 0)
+        ),
+        LeftShift => format!(
+            "int {v}_i = int({a}) << int({b}); float {v} = float({v}_i);",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
+        RightShift => format!(
+            "int {v}_i = int({a}) >> int({b}); float {v} = float({v}_i);",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
 
         // Matrix constructors — use meta for the full argument expression
         Mat2 | Mat3 | Mat4 => {
@@ -855,34 +1193,50 @@ pub fn codegen(
                 format!("{} {} = {};", type_name, var, tmpl)
             } else {
                 let args: Vec<&str> = inputs.iter().map(|s| s.as_str()).collect();
-                format!("{} {} = {}({});", type_name, var, type_name, args.join(", "))
+                format!(
+                    "{} {} = {}({});",
+                    type_name,
+                    var,
+                    type_name,
+                    args.join(", ")
+                )
             }
         }
 
         // For loop: iterate count times, accumulating into result
         ForLoop => format!(
             "vec4 {v} = {init}; {{ float _kfl = max({count}, 0.0001); for (int i = 0; i < int({count}); i++) {{ {v} += {body} / _kfl; }} }}",
-            v = var, init = a(inputs, 0), count = a(inputs, 1), body = a(inputs, 2)
+            v = var,
+            init = a(inputs, 0),
+            count = a(inputs, 1),
+            body = a(inputs, 2)
         ),
 
         // Conditional: step-based branch (branchless for GPU)
         Conditional => format!(
             "vec4 {v} = mix({f}, {t}, step({thresh}, {cond}));",
-            v = var, cond = a(inputs, 0), thresh = a(inputs, 1), t = a(inputs, 2), f = a(inputs, 3)
+            v = var,
+            cond = a(inputs, 0),
+            thresh = a(inputs, 1),
+            t = a(inputs, 2),
+            f = a(inputs, 3)
         ),
 
         // Texture sample — channel index is the integer part of the default
         TextureSample => {
-            let ch_idx = defaults.first()
+            let ch_idx = defaults
+                .first()
                 .map(|d| d.to_glsl())
                 .and_then(|s| s.parse::<f32>().ok())
                 .map(|f| f as i32)
                 .unwrap_or(0);
             format!(
                 "vec4 {v} = texture(iChannel{ch}, {uv});",
-                v = var, ch = ch_idx, uv = a(inputs, 1)
+                v = var,
+                ch = ch_idx,
+                uv = a(inputs, 1)
             )
-        },
+        }
 
         // Custom function call — meta format: "funcname" or "funcname:N"
         CustomFunc => {
@@ -892,47 +1246,96 @@ pub fn codegen(
                 } else {
                     (raw_meta.as_str(), inputs.len())
                 };
-                let arg_list: Vec<&str> = inputs.iter().take(arg_count).map(|s| s.as_str()).collect();
+                let arg_list: Vec<&str> =
+                    inputs.iter().take(arg_count).map(|s| s.as_str()).collect();
                 let args_str = arg_list.join(", ");
-                format!("vec4 {v} = {fn_name}({args});",
-                    v = var, fn_name = func_name, args = args_str)
+                format!(
+                    "vec4 {v} = {fn_name}({args});",
+                    v = var,
+                    fn_name = func_name,
+                    args = args_str
+                )
             } else {
                 format!(
                     "vec4 {v} = vec4({a}, {b}, {c}, {d});",
-                    v = var, a = a(inputs, 0), b = a(inputs, 1), c = a(inputs, 2), d = a(inputs, 3)
+                    v = var,
+                    a = a(inputs, 0),
+                    b = a(inputs, 1),
+                    c = a(inputs, 2),
+                    d = a(inputs, 3)
                 )
             }
-        },
+        }
 
         // --- Mixed-type constructors ---
-        Combine4FromVec3Float => format!("vec4 {} = vec4({}, {});", var, a(inputs, 0), a(inputs, 1)),
+        Combine4FromVec3Float => {
+            format!("vec4 {} = vec4({}, {});", var, a(inputs, 0), a(inputs, 1))
+        }
         Combine4FromVec2Vec2 => format!("vec4 {} = vec4({}, {});", var, a(inputs, 0), a(inputs, 1)),
-        Combine4FromVec2FloatFloat => format!("vec4 {} = vec4({}, {}, {});", var, a(inputs, 0), a(inputs, 1), a(inputs, 2)),
-        Combine3FromVec2Float => format!("vec3 {} = vec3({}, {});", var, a(inputs, 0), a(inputs, 1)),
+        Combine4FromVec2FloatFloat => format!(
+            "vec4 {} = vec4({}, {}, {});",
+            var,
+            a(inputs, 0),
+            a(inputs, 1),
+            a(inputs, 2)
+        ),
+        Combine3FromVec2Float => {
+            format!("vec3 {} = vec3({}, {});", var, a(inputs, 0), a(inputs, 1))
+        }
 
         // --- Vec2 math ---
         AddVec2 => format!("vec2 {} = {} + {};", var, a(inputs, 0), a(inputs, 1)),
         SubtractVec2 => format!("vec2 {} = {} - {};", var, a(inputs, 0), a(inputs, 1)),
         MultiplyVec2 => format!("vec2 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
         MultiplyVec2Scalar => format!("vec2 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
-        DivideVec2 => format!("vec2 {v} = {a} / max(abs({b}), vec2(0.0001)) * sign({b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
-        DivideVec2Scalar => format!("vec2 {v} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        DivideVec2 => format!(
+            "vec2 {v} = {a} / max(abs({b}), vec2(0.0001)) * sign({b});",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
+        DivideVec2Scalar => format!(
+            "vec2 {v} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
 
         // --- Vec3 math ---
         AddVec3 => format!("vec3 {} = {} + {};", var, a(inputs, 0), a(inputs, 1)),
         SubtractVec3 => format!("vec3 {} = {} - {};", var, a(inputs, 0), a(inputs, 1)),
         MultiplyVec3 => format!("vec3 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
         MultiplyVec3Scalar => format!("vec3 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
-        DivideVec3 => format!("vec3 {v} = {a} / max(abs({b}), vec3(0.0001)) * sign({b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
-        DivideVec3Scalar => format!("vec3 {v} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        DivideVec3 => format!(
+            "vec3 {v} = {a} / max(abs({b}), vec3(0.0001)) * sign({b});",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
+        DivideVec3Scalar => format!(
+            "vec3 {v} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
 
         // --- Vec4 math ---
         AddVec4 => format!("vec4 {} = {} + {};", var, a(inputs, 0), a(inputs, 1)),
         SubtractVec4 => format!("vec4 {} = {} - {};", var, a(inputs, 0), a(inputs, 1)),
         MultiplyVec4 => format!("vec4 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
         MultiplyVec4Scalar => format!("vec4 {} = {} * {};", var, a(inputs, 0), a(inputs, 1)),
-        DivideVec4 => format!("vec4 {v} = {a} / max(abs({b}), vec4(0.0001)) * sign({b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
-        DivideVec4Scalar => format!("vec4 {v} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});", v = var, a = a(inputs, 0), b = a(inputs, 1)),
+        DivideVec4 => format!(
+            "vec4 {v} = {a} / max(abs({b}), vec4(0.0001)) * sign({b});",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
+        DivideVec4Scalar => format!(
+            "vec4 {v} = {a} / (abs({b}) < 0.0001 ? 0.0001 : {b});",
+            v = var,
+            a = a(inputs, 0),
+            b = a(inputs, 1)
+        ),
     }
 }
 

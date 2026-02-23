@@ -1,14 +1,14 @@
 //! Dock layout rendering — binary split tree views (extracted from main.rs).
 
+use crate::Message;
 use crate::dock;
 use crate::icons;
 use crate::panels;
 use crate::panels::Panel;
-use crate::Message;
 
 use iced::widget::rule;
 use iced::widget::space::horizontal;
-use iced::widget::{button, column, container, row, text, Space};
+use iced::widget::{Space, button, column, container, row, text};
 use iced::{Border, Element, Fill, Length, Padding, Theme};
 
 use super::KromaApp;
@@ -114,10 +114,12 @@ impl KromaApp {
         ]
         .spacing(2);
 
-        let view_menu = row![button(text("Settings").size(12).color(txt))
-            .on_press(Message::ToggleSettings)
-            .style(menu_btn_style)
-            .padding(Padding::from([4, 8])),]
+        let view_menu = row![
+            button(text("Settings").size(12).color(txt))
+                .on_press(Message::ToggleSettings)
+                .style(menu_btn_style)
+                .padding(Padding::from([4, 8])),
+        ]
         .spacing(2);
 
         let separator = text("|").size(12).color(txt_sec);
@@ -261,8 +263,8 @@ impl KromaApp {
 
     /// Render the toast notification overlay (bottom-right corner).
     fn view_toasts(&self) -> Element<'_, Message> {
-        use iced::widget::{column, container, row, text, Space};
-        use iced::{alignment, Border, Color, Fill, Length, Padding};
+        use iced::widget::{Space, column, container, row, text};
+        use iced::{Border, Color, Fill, Length, Padding, alignment};
 
         if self.toasts.is_empty() {
             return Space::new().width(0).height(0).into();

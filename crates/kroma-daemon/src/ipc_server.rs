@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use log::{error, info};
 
-use kroma_shared::ipc::{socket_path, DaemonCommand, DaemonEvent};
+use kroma_shared::ipc::{DaemonCommand, DaemonEvent, socket_path};
 
 /// Return type for [`start`]: join handle, shared status, and preview stream state.
 type IpcStartResult = (

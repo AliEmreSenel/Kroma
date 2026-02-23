@@ -3,9 +3,9 @@
 use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Element, Fill, Length, Padding};
 
+use crate::Message;
 use crate::panels::dashboard::{btn_secondary, card};
 use crate::panels::{AppContext, Panel};
-use crate::Message;
 
 pub struct PropertiesPanel;
 

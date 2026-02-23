@@ -2162,7 +2162,8 @@ fn glsl_to_wgsl(glsl_source: &str) -> Result<String> {
             if first_line.starts_with("#version") {
                 format!(
                     "{}\n\n// Custom uniform storage buffer — access via custom_data[index]\nlayout(set = 0, binding = 1) readonly buffer CustomUniforms {{\n    float custom_data[32];\n}};\n\n{}",
-                    first_line, lines.collect::<Vec<_>>().join("\n")
+                    first_line,
+                    lines.collect::<Vec<_>>().join("\n")
                 )
             } else {
                 // No version directive — just prepend

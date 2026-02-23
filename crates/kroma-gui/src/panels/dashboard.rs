@@ -1,11 +1,11 @@
 //! Dashboard panel — daemon status, FPS, quick actions, event log.
 
-use iced::widget::{button, column, container, progress_bar, row, scrollable, text, Space};
+use iced::widget::{Space, button, column, container, progress_bar, row, scrollable, text};
 use iced::{Border, Element, Fill, Padding, Theme};
 
+use crate::Message;
 use crate::panels::{AppContext, Panel};
 use crate::theme::ThemeTokens;
-use crate::Message;
 
 // ---------------------------------------------------------------------------
 // State

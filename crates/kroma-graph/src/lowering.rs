@@ -40,7 +40,7 @@ pub fn parse_glsl_to_graph(src: &str) -> ShaderGraph {
             #[cfg(debug_assertions)]
             eprintln!(
                 "[kroma-graph] GLSL parsed OK — {} top-level declarations",
-                tu.0 .0.len()
+                tu.0.0.len()
             );
             tu
         }

@@ -3,9 +3,9 @@
 use iced::widget::{column, container, scrollable, slider, text};
 use iced::{Element, Fill};
 
+use crate::Message;
 use crate::icons;
 use crate::panels::{AppContext, Panel};
-use crate::Message;
 
 pub struct AssetPreviewPanel;
 
@@ -21,28 +21,24 @@ impl Panel for AssetPreviewPanel {
         let selected = ctx.shade_selected_file;
 
         match selected {
-            None => {
-                container(
-                    column![
-                        text("Kroma Workspace").size(14).color(t.text_primary),
-                        text("Select a file to preview")
-                            .size(11)
-                            .color(t.text_secondary),
-                        text("Or use New/Open from the menu bar")
-                            .size(10)
-                            .color(t.text_secondary),
-                    ]
-                    .spacing(6),
-                )
-                .center(Fill)
-                .width(Fill)
-                .height(Fill)
-                .padding(8)
-                .into()
-            }
-            Some("config.toml") => {
-                self.view_config_editor(ctx)
-            }
+            None => container(
+                column![
+                    text("Kroma Workspace").size(14).color(t.text_primary),
+                    text("Select a file to preview")
+                        .size(11)
+                        .color(t.text_secondary),
+                    text("Or use New/Open from the menu bar")
+                        .size(10)
+                        .color(t.text_secondary),
+                ]
+                .spacing(6),
+            )
+            .center(Fill)
+            .width(Fill)
+            .height(Fill)
+            .padding(8)
+            .into(),
+            Some("config.toml") => self.view_config_editor(ctx),
             Some(name)
                 if name == "shader.frag"
                     || name.ends_with(".glsl")
@@ -51,9 +47,7 @@ impl Panel for AssetPreviewPanel {
             {
                 self.view_shader_editor(ctx, name)
             }
-            Some(name) => {
-                self.view_asset(ctx, name)
-            }
+            Some(name) => self.view_asset(ctx, name),
         }
     }
 }
@@ -71,9 +65,11 @@ impl AssetPreviewPanel {
         let content: Element<'_, Message> = if edit_mode == "toml" {
             // Raw TOML editor
             use iced::widget::text_editor;
-            column![text_editor(ctx.shade_config_toml)
-                .on_action(Message::ShadeConfigToml)
-                .height(Fill),]
+            column![
+                text_editor(ctx.shade_config_toml)
+                    .on_action(Message::ShadeConfigToml)
+                    .height(Fill),
+            ]
             .width(Fill)
             .height(Fill)
             .into()

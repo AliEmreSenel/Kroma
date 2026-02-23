@@ -3,13 +3,13 @@
 //! Displays a real-time JPEG frame stream from the daemon over IPC.
 //! Shows daemon status, connection info, and preview controls.
 
-use iced::widget::{column, container, row, text, Image};
+use iced::widget::{Image, column, container, row, text};
 use iced::{Element, Fill};
 
+use crate::Message;
 use crate::icons;
 use crate::panels::dashboard::{btn_primary, btn_secondary, card, info_row};
 use crate::panels::{AppContext, Panel};
-use crate::Message;
 
 pub struct LivePreviewPanel;
 
@@ -27,13 +27,20 @@ impl Panel for LivePreviewPanel {
         } else {
             (icons::CLOSE, "Offline")
         };
-        let status_color = if ctx.daemon_connected { t.success } else { t.error };
+        let status_color = if ctx.daemon_connected {
+            t.success
+        } else {
+            t.error
+        };
 
         let status_card = card(
             "Daemon",
             column![
                 row![
-                    text(status_icon).font(icons::ICON_FONT).size(11).color(status_color),
+                    text(status_icon)
+                        .font(icons::ICON_FONT)
+                        .size(11)
+                        .color(status_color),
                     text(status_label).size(11).color(status_color),
                 ]
                 .spacing(4)

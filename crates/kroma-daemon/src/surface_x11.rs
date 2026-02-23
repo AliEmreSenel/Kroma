@@ -7,11 +7,11 @@ use std::ptr::NonNull;
 
 use anyhow::{Context, Result};
 use log::info;
+use x11rb::COPY_DEPTH_FROM_PARENT;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
-use x11rb::COPY_DEPTH_FROM_PARENT;
 
 use kroma_shared::traits::SurfaceProvider;
 use kroma_shared::types::{MonitorConfig, MonitorId};
@@ -225,7 +225,7 @@ impl X11SurfaceProvider {
         while let Ok(event) = conn.wait_for_event() {
             match event {
                 x11rb::protocol::Event::Expose(_) | x11rb::protocol::Event::ConfigureNotify(_) => {
-                    break
+                    break;
                 }
                 _ => {}
             }

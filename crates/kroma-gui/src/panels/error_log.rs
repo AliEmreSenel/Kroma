@@ -4,9 +4,9 @@ use iced::widget::space::horizontal;
 use iced::widget::{button, column, container, row, scrollable, text};
 use iced::{Border, Element, Fill, Padding, Theme};
 
+use crate::Message;
 use crate::icons;
 use crate::panels::{AppContext, Panel};
-use crate::Message;
 
 pub struct ErrorLogPanel;
 

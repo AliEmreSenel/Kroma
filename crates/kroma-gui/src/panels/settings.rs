@@ -3,10 +3,10 @@
 use iced::widget::{button, column, text, text_input};
 use iced::{Border, Element, Fill, Padding, Theme};
 
+use crate::Message;
 use crate::panels::dashboard::{card, info_row};
 use crate::panels::{AppContext, Panel};
 use crate::theme::KromaThemeId;
-use crate::Message;
 
 pub struct SettingsPanel;
 

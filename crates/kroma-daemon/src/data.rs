@@ -43,12 +43,14 @@ impl SystemDataProvider {
         let sys_clone = Arc::clone(&sys);
         std::thread::Builder::new()
             .name("kroma-sysinfo".into())
-            .spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(1));
-                {
-                    let mut s = sys_clone.lock().unwrap_or_else(|e| e.into_inner());
-                    s.refresh_cpu_usage();
-                    s.refresh_memory();
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(Duration::from_secs(1));
+                    {
+                        let mut s = sys_clone.lock().unwrap_or_else(|e| e.into_inner());
+                        s.refresh_cpu_usage();
+                        s.refresh_memory();
+                    }
                 }
             })
             .context("Failed to spawn sysinfo thread")?;

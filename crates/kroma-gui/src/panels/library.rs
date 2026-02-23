@@ -1,12 +1,12 @@
 //! Library panel — grid view of all .shade packages in the output directory.
 
-use iced::widget::{button, column, row, scrollable, text, Space};
+use iced::widget::{Space, button, column, row, scrollable, text};
 use iced::{Border, Element, Fill, Padding, Theme};
 
+use crate::Message;
 use crate::icons;
 use crate::panels::dashboard::{btn_primary, btn_secondary, card};
 use crate::panels::{AppContext, Panel};
-use crate::Message;
 
 pub struct LibraryPanel {
     /// Discovered .shade files from the shader directory.

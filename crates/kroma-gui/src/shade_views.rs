@@ -1,13 +1,13 @@
 //! Shade Package Editor view methods (extracted from main.rs).
 
 use iced::widget::space::horizontal;
-use iced::widget::{button, checkbox, column, container, row, scrollable, text, text_input, Space};
+use iced::widget::{Space, button, checkbox, column, container, row, scrollable, text, text_input};
 use iced::{Border, Element, Fill, Padding, Theme};
 
+use crate::Message;
 use crate::editor;
 use crate::icons;
 use crate::utils;
-use crate::Message;
 
 use super::KromaApp;
 

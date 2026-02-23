@@ -3,9 +3,9 @@
 use iced::widget::{column, row, scrollable, text, text_input};
 use iced::{Element, Fill};
 
+use crate::Message;
 use crate::panels::dashboard::{btn_primary, btn_secondary, card};
 use crate::panels::{AppContext, Panel};
-use crate::Message;
 
 pub struct ImportPanel;
 

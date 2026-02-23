@@ -345,10 +345,7 @@ impl KromaApp {
                         let enl = self.editor_nav_path.last().copied();
                         match enl {
                             Some(id) => match self.editor_subgraphs.get_mut(&id) {
-                                Some((g, c)) => (
-                                    g as &editor::ShaderGraph,
-                                    &mut c.comment_frames,
-                                ),
+                                Some((g, c)) => (g as &editor::ShaderGraph, &mut c.comment_frames),
                                 None => (
                                     &self.shader_graph as &editor::ShaderGraph,
                                     &mut self.graph_canvas.comment_frames,
@@ -364,10 +361,7 @@ impl KromaApp {
                         let snl = self.shade_nav_path.last().copied();
                         match snl {
                             Some(id) => match self.shade_subgraphs.get_mut(&id) {
-                                Some((g, c)) => (
-                                    g as &editor::ShaderGraph,
-                                    &mut c.comment_frames,
-                                ),
+                                Some((g, c)) => (g as &editor::ShaderGraph, &mut c.comment_frames),
                                 None => (
                                     &self.shade_graph as &editor::ShaderGraph,
                                     &mut self.shade_graph_canvas.comment_frames,
@@ -660,10 +654,7 @@ impl KromaApp {
 
 /// Parse a user-entered string back into a `DefaultValue`, using the old value
 /// as a template to determine whether it should be Float, Vec2, Vec3, or Vec4.
-fn parse_default_value_text(
-    text: &str,
-    template: &editor::DefaultValue,
-) -> editor::DefaultValue {
+fn parse_default_value_text(text: &str, template: &editor::DefaultValue) -> editor::DefaultValue {
     let parts: Vec<f32> = text
         .split(',')
         .map(|s| s.trim().parse::<f32>().unwrap_or(0.0))

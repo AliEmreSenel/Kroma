@@ -1,13 +1,13 @@
 //! Editor message handler (extracted from update() in main.rs).
 
+use crate::Message;
 use crate::commands;
 use crate::editor;
 use crate::importer;
 use crate::utils;
-use crate::Message;
 
-use iced::widget::text_editor;
 use iced::Task;
+use iced::widget::text_editor;
 
 use super::KromaApp;
 

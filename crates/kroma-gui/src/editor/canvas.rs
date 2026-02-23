@@ -4,11 +4,11 @@
 //! as smooth Bézier curves.  Supports drag-to-move, drag-to-connect,
 //! and selection.
 
+use iced::widget::Action;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke, Text};
 use iced::widget::text::Alignment;
-use iced::widget::Action;
-use iced::{mouse, Event};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, Vector};
+use iced::{Event, mouse};
 use std::collections::HashSet;
 
 use crate::theme::ThemeTokens;
@@ -1329,8 +1329,8 @@ pub fn graph_canvas<'a>(
     canvas_state: &'a GraphCanvas,
     tokens: &'a ThemeTokens,
 ) -> Element<'a, GraphMessage> {
-    use iced::widget::{column, row, stack, text_input, Space};
     use iced::Padding;
+    use iced::widget::{Space, column, row, stack, text_input};
 
     let canvas_elem: Element<'a, GraphMessage> = Canvas::new(GraphProgram {
         graph,

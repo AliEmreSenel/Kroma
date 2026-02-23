@@ -5,13 +5,13 @@
 //! generates a complete .shade project with GLSL and config.
 
 use iced::widget::space::horizontal;
-use iced::widget::{button, column, container, row, scrollable, slider, text, text_input, Space};
+use iced::widget::{Space, button, column, container, row, scrollable, slider, text, text_input};
 use iced::{Border, Element, Fill, Padding, Theme};
 use kroma_shared::types::AudioConfig;
 
+use crate::Message;
 use crate::icons;
 use crate::panels::{AppContext, Panel};
-use crate::Message;
 
 // ---------------------------------------------------------------------------
 // Component types

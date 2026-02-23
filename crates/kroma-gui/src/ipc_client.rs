@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream;
 
 use anyhow::{Context, Result};
 
-use kroma_shared::ipc::{socket_path, DaemonCommand, DaemonEvent};
+use kroma_shared::ipc::{DaemonCommand, DaemonEvent, socket_path};
 
 /// Send a fire-and-forget command to the daemon.
 /// Reads one ack line and ignores it.

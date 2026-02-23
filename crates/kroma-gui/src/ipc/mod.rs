@@ -9,4 +9,4 @@
 
 mod client;
 
-pub use client::{ipc_subscription, IpcEvent, IpcHandle};
+pub use client::{IpcEvent, IpcHandle, ipc_subscription};

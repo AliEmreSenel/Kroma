@@ -1,13 +1,13 @@
 //! Asset Browser panel — file tree with drag-to-import.
 
-use iced::widget::{button, column, container, row, scrollable, text, Space};
+use iced::widget::{Space, button, column, container, row, scrollable, text};
 use iced::{Border, Element, Fill, Padding, Theme};
 
+use crate::Message;
 use crate::icons;
 use crate::panels::dashboard::btn_secondary;
 use crate::panels::{AppContext, Panel};
 use crate::theme::ThemeTokens;
-use crate::Message;
 
 pub struct AssetBrowserPanel;
 

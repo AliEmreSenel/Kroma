@@ -41,7 +41,10 @@ pub struct VideoPlayerState {
 
 impl VideoPlayerState {
     /// Open a video file and create a persistent player.
-    pub fn open(temp_path: PathBuf, asset_name: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn open(
+        temp_path: PathBuf,
+        asset_name: String,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let _ = ffmpeg_next::init();
 
         let input_ctx = ffmpeg_next::format::input(&temp_path)?;
