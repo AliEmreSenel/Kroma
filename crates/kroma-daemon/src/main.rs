@@ -348,7 +348,7 @@ fn load_shade(
             if let Some(audio_conf) = pkg.config.audio.as_ref()
                 && audio_conf.enabled
             {
-                audio_provider.switch(&audio_conf.source)?;
+                audio_provider.switch(&audio_conf)?;
             } else {
                 audio_provider.close();
             }
@@ -501,11 +501,6 @@ fn main() -> Result<()> {
 
     // Set resolution
     render_state.uniforms.u_resolution = [surf_w as f32, surf_h as f32];
-
-    // Create audio spectrum texture (must happen after GPU init, before shade load)
-    if let Err(e) = render_state.create_audio_spectrum_texture() {
-        log::warn!("Failed to create audio spectrum texture: {}", e);
-    }
 
     // Load initial shade if configured
     let mut current_shade_path: Option<String> = None;

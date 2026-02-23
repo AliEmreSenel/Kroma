@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use log::{info, warn};
 
 use kroma_shared::shade::LiveShadePackage;
-use kroma_shared::types::{ShaderUniforms, TextureDef};
+use kroma_shared::types::{AudioConfig, ShaderUniforms, TextureDef};
 use wgpu::wgt::PollType;
 use wgpu::{FilterMode, MipmapFilterMode};
 
@@ -288,6 +288,7 @@ impl RenderState {
         );
 
         let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::FLOAT32_FILTERABLE,
             label: Some("kroma-device"),
             ..Default::default()
         }))
@@ -501,6 +502,7 @@ impl RenderState {
         );
 
         let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::FLOAT32_FILTERABLE,
             label: Some("kroma-device"),
             ..Default::default()
         }))
@@ -658,6 +660,7 @@ impl RenderState {
         info!("GPU adapter (headless): {}", adapter.get_info().name);
 
         let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::FLOAT32_FILTERABLE,
             label: Some("kroma-device-headless"),
             ..Default::default()
         }))
@@ -1357,7 +1360,7 @@ impl RenderState {
             .iter()
             .any(|tex| tex.1.ty == "audio_spectrum")
         {
-            self.create_audio_spectrum_texture()?;
+            self.create_audio_spectrum_texture(pkg.config.audio.as_ref().unwrap())?;
         }
 
         // 3. Build Bind Group (If we have images OR audio)
@@ -1408,7 +1411,7 @@ impl RenderState {
                 binding: tex_binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
@@ -1417,7 +1420,7 @@ impl RenderState {
             layout_entries.push(wgpu::BindGroupLayoutEntry {
                 binding: samp_binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             });
         }
@@ -1477,13 +1480,14 @@ impl RenderState {
     }
 
     /// Create the audio spectrum texture (512×1 R32Float).
-    pub fn create_audio_spectrum_texture(&mut self) -> Result<()> {
+    pub fn create_audio_spectrum_texture(&mut self, config: &AudioConfig) -> Result<()> {
         let device = self.device.as_ref().context("GPU not initialised")?;
+        let tex_size = config.fft_bands;
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("kroma-audio-spectrum"),
             size: wgpu::Extent3d {
-                width: 512,
+                width: tex_size as u32,
                 height: 1,
                 depth_or_array_layers: 1,
             },
@@ -1498,9 +1502,9 @@ impl RenderState {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("kroma-audio-spectrum-sampler"),
-            mag_filter: FilterMode::Nearest,
-            min_filter: FilterMode::Nearest,
-            mipmap_filter: MipmapFilterMode::Nearest,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mipmap_filter: MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -1517,9 +1521,13 @@ impl RenderState {
     /// Upload audio spectrum data to the GPU texture.
     pub fn update_audio_spectrum(&mut self, spectrum: &[f32]) {
         if let (Some(audio), Some(queue)) = (&self.audio_spectrum, self.queue.as_ref()) {
+            let tex_size = self.active_package.as_ref().map_or_else(
+                || 512,
+                |a| a.config.audio.as_ref().map_or_else(|| 512, |b| b.fft_bands),
+            );
             // Ensure exactly 512 values
-            let mut padded = [0.0f32; SPECTRUM_BANDS];
-            let len = spectrum.len().min(SPECTRUM_BANDS);
+            let mut padded = vec![0.0f32; tex_size];
+            let len = spectrum.len().min(tex_size);
             padded[..len].copy_from_slice(&spectrum[..len]);
 
             queue.write_texture(
@@ -1532,11 +1540,11 @@ impl RenderState {
                 bytemuck::cast_slice(&padded),
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(4 * 512),
+                    bytes_per_row: Some(4 * tex_size as u32),
                     rows_per_image: Some(1),
                 },
                 wgpu::Extent3d {
-                    width: 512,
+                    width: tex_size as u32,
                     height: 1,
                     depth_or_array_layers: 1,
                 },
