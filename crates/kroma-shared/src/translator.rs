@@ -417,31 +417,43 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
         // Should use separate texture2D + sampler, combined via sampler2D()
         assert!(result.shader_source.contains("kroma_tex_0"));
         assert!(result.shader_source.contains("kroma_samp_0"));
-        assert!(result
-            .shader_source
-            .contains("sampler2D(kroma_tex_0, kroma_samp_0)"));
-        assert!(result
-            .shader_source
-            .contains("uniform texture2D kroma_tex_0"));
-        assert!(result
-            .shader_source
-            .contains("uniform sampler kroma_samp_0"));
+        assert!(
+            result
+                .shader_source
+                .contains("sampler2D(kroma_tex_0, kroma_samp_0)")
+        );
+        assert!(
+            result
+                .shader_source
+                .contains("uniform texture2D kroma_tex_0")
+        );
+        assert!(
+            result
+                .shader_source
+                .contains("uniform sampler kroma_samp_0")
+        );
         assert!(result.config.textures.contains_key("channel0"));
     }
 
     #[test]
     fn generates_uniform_header() {
         let result = translate(SIMPLE_SHADERTOY, "Test", "T");
-        assert!(result
-            .shader_source
-            .contains("layout(set = 0, binding = 0) uniform Globals"));
-        assert!(result
-            .shader_source
-            .contains("layout(set = 0, binding = 1) readonly buffer CustomUniforms"));
+        assert!(
+            result
+                .shader_source
+                .contains("layout(set = 0, binding = 0) uniform Globals")
+        );
+        assert!(
+            result
+                .shader_source
+                .contains("layout(set = 0, binding = 1) readonly buffer CustomUniforms")
+        );
         assert!(result.shader_source.contains("float custom_data[32]"));
-        assert!(result
-            .shader_source
-            .contains("layout(location = 0) out vec4 kroma_out_color"));
+        assert!(
+            result
+                .shader_source
+                .contains("layout(location = 0) out vec4 kroma_out_color")
+        );
         assert!(result.shader_source.contains("float u_time;"));
         assert!(result.shader_source.contains("void main()"));
     }

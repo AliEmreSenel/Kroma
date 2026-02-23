@@ -27,7 +27,7 @@ use glam::Vec2;
 use log::info;
 
 use kroma_shared::{
-    ipc::{maybe_send, CompileError, DaemonCommand, DaemonEvent},
+    ipc::{CompileError, DaemonCommand, DaemonEvent, maybe_send},
     shade::LiveShadePackage,
     traits::{DataProvider, SurfaceProvider, VideoDecoder},
 };
@@ -215,9 +215,9 @@ fn init_render_backend() -> Result<Backend> {
                     }
                     Err(e) => {
                         log::warn!(
-                "Hyprland events unavailable: {} — running without compositor awareness",
-                e
-            );
+                            "Hyprland events unavailable: {} — running without compositor awareness",
+                            e
+                        );
                         WaylandBackend::Generic
                     }
                 };
@@ -345,9 +345,11 @@ fn load_shade(
     let mut video_frame_accums = vec![];
     match LiveShadePackage::load(std::path::Path::new(path)) {
         Ok(pkg) => {
-            if let Some(audio_conf) = pkg.config.audio.as_ref() && audio_conf.enabled{
+            if let Some(audio_conf) = pkg.config.audio.as_ref()
+                && audio_conf.enabled
+            {
                 audio_provider.switch(&audio_conf.source)?;
-            }else {
+            } else {
                 audio_provider.close();
             }
 
@@ -511,7 +513,8 @@ fn main() -> Result<()> {
     let mut video_frame_accums: Vec<f64> = vec![]; // Time accumulator for video frame pacing
     if let Some(ref shade_path) = daemon_config.current_shade {
         info!("Loading initial shade: {}", shade_path);
-        (video_decoders, video_frame_accums) = load_shade(shade_path, &mut render_state, &mut audio_provider, None)?;
+        (video_decoders, video_frame_accums) =
+            load_shade(shade_path, &mut render_state, &mut audio_provider, None)?;
     }
 
     // ---------------------------------------------------------------

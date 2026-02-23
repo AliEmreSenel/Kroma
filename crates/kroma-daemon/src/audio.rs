@@ -12,12 +12,12 @@ use std::{
     thread::{self, Builder},
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, Stream,
+    traits::{DeviceTrait, HostTrait, StreamTrait},
 };
-use rustfft::{num_complex::Complex, FftPlanner};
+use rustfft::{FftPlanner, num_complex::Complex};
 
 /// Number of frequency bands in the spectrum.
 pub const SPECTRUM_BANDS: usize = 1024;
@@ -142,7 +142,9 @@ fn get_source_by_name(source: &str) -> Result<Device> {
 
             #[cfg(target_os = "macos")]
             {
-                return Err(anyhow!("MacOS doesnt support monitoring desktop output by default. Select the exact output to monitor."));
+                return Err(anyhow!(
+                    "MacOS doesnt support monitoring desktop output by default. Select the exact output to monitor."
+                ));
             }
         }
         device_name => host
