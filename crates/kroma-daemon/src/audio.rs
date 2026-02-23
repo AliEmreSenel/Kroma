@@ -17,6 +17,7 @@ use cpal::{
     Device, Stream,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
+use kroma_shared::types::AudioConfig;
 use rustfft::{FftPlanner, num_complex::Complex};
 
 /// Number of frequency bands in the spectrum.
@@ -41,9 +42,9 @@ pub struct SharedAudioState {
 }
 
 impl SharedAudioState {
-    pub fn new() -> Self {
+    pub fn new(bands: usize) -> Self {
         Self {
-            spectrum: Arc::new(Mutex::new(vec![0.0; SPECTRUM_BANDS])),
+            spectrum: Arc::new(Mutex::new(vec![0.0; bands])),
             level: Arc::new(Mutex::new(0.0)),
         }
     }
@@ -177,25 +178,29 @@ fn get_source_by_name(source: &str) -> Result<Device> {
 /// because `cpal::Stream` is not Send+Sync.
 pub struct CpalAudioProvider {
     source: String,
+    bands: usize,
     state: SharedAudioState,
     stream: Option<Stream>,
 }
 
 impl CpalAudioProvider {
     /// Create a new cpal audio provider.
-    pub fn new_with_source(source: &str) -> anyhow::Result<Self> {
+    pub fn new_with_source(config: &AudioConfig) -> anyhow::Result<Self> {
         let mut provider = Self::new();
-        provider.switch(source)?;
+        provider.switch(config)?;
         Ok(provider)
     }
 
     pub fn close(&mut self) {
         self.source = "none".to_string();
         self.stream = None;
-        self.state = SharedAudioState::new();
+        self.state = SharedAudioState::new(self.bands);
     }
 
-    pub fn switch(&mut self, source: &str) -> Result<()> {
+    pub fn switch(&mut self, config: &AudioConfig) -> Result<()> {
+        let source = &config.source;
+        self.bands = config.fft_bands;
+        let bands = self.bands;
         self.source = source.to_string();
         let device = get_source_by_name(source)?;
 
@@ -208,7 +213,7 @@ impl CpalAudioProvider {
         );
 
         // --- Shared State Setup ---
-        self.state = SharedAudioState::new();
+        self.state = SharedAudioState::new(self.bands);
         let (spectrum_writer, level_writer) = self.state.writer_handles();
 
         // Shared Ring Buffer: Audio Thread writes to back, FFT Thread reads snapshot
@@ -253,7 +258,8 @@ impl CpalAudioProvider {
                     // 2. Compute RMS Level
                     let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
                     let rms = (sum_sq / samples.len() as f32).sqrt();
-                    *lvl_write.lock().unwrap() = (rms * 4.0).clamp(0.0, 1.0);
+                    // Just max(0.0) here too if you want the level to exceed 1.0
+                    *lvl_write.lock().unwrap() = (rms * 4.0).max(0.0);
 
                     // 3. Prepare FFT Input (Windowing)
                     for (i, &sample) in samples.iter().enumerate() {
@@ -263,38 +269,41 @@ impl CpalAudioProvider {
                     // 4. Execute FFT
                     fft.process_with_scratch(&mut input, &mut scratch);
 
-                    // 5. Compute Magnitude Spectrum (Linear -> Logarithmic Mapping)
-                    let mut spectrum = vec![0.0f32; SPECTRUM_BANDS];
+                    // 5. Compute Magnitude Spectrum (Logarithmic Mapping)
+                    let mut spectrum = vec![0.0f32; bands];
                     let half_size = FFT_SIZE / 2;
 
-                    // Simple linear mapping for now (can be swapped for log mapping if shader expects it)
-                    // The shader we wrote handles log mapping on the texture coordinate side.
-                    let bins_per_band = half_size as f32 / SPECTRUM_BANDS as f32;
+                    let min_bin = 1.0f32;
+                    let max_bin = half_size as f32;
+                    let log_range = max_bin.log2() - min_bin.log2();
 
-                    for (i, spectrum_val) in spectrum.iter_mut().enumerate().take(SPECTRUM_BANDS) {
-                        let start_bin = (i as f32 * bins_per_band) as usize;
-                        let end_bin = ((i + 1) as f32 * bins_per_band) as usize;
-                        let end_bin = end_bin.max(start_bin + 1).min(half_size);
+                    for (i, spectrum_val) in spectrum.iter_mut().enumerate().take(bands) {
+                        let start_log = min_bin.log2() + (i as f32 / bands as f32) * log_range;
+                        let end_log = min_bin.log2() + ((i + 1) as f32 / bands as f32) * log_range;
 
-                        let mag_sum: f32 = input
+                        // Guarantee start_bin is at most half_size - 1 so we always have room for at least 1 bin
+                        let start_bin = (2.0f32.powf(start_log) as usize).min(half_size - 1);
+                        let mut end_bin = (2.0f32.powf(end_log) as usize).min(half_size);
+
+                        // Ensure end_bin is strictly greater than start_bin
+                        end_bin = end_bin.max(start_bin + 1);
+
+                        // Use fold to find the maximum magnitude in this band instead of averaging
+                        let max_mag = input[start_bin..end_bin]
                             .iter()
-                            .take(end_bin)
-                            .skip(start_bin)
                             .map(|x| x.norm())
-                            .sum();
+                            .fold(0.0f32, f32::max);
 
-                        let avg_mag = mag_sum / (end_bin - start_bin) as f32;
+                        // Convert magnitude to normalized dB
+                        let db = 20.0 * (max_mag + 1e-6).log10();
 
-                        // Convert magnitude to normalized dB (roughly)
-                        // Log10 of 0.001 (-60dB) to 1.0 (0dB)
-                        let db = 20.0 * (avg_mag + 1e-6).log10();
+                        // No clamping on the top end, just prevent it from going negative
                         *spectrum_val = ((db + 60.0) / 60.0).max(0.0);
                     }
 
                     *spec_write.lock().unwrap() = spectrum;
                 }
             })?;
-
         // --- Input Stream ---
         let buf_write = sample_buffer.clone();
         let channels = config.channels() as usize;
@@ -330,7 +339,8 @@ impl CpalAudioProvider {
     pub fn new() -> Self {
         Self {
             source: "none".to_string(),
-            state: SharedAudioState::new(),
+            bands: SPECTRUM_BANDS,
+            state: SharedAudioState::new(SPECTRUM_BANDS),
             stream: None,
         }
     }
