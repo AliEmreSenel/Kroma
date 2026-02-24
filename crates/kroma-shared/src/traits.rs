@@ -22,6 +22,10 @@ pub trait SurfaceProvider {
     /// Initialize the connection to the display server.
     fn connect(&mut self) -> Result<()>;
 
+    fn size(&self, monitor: MonitorId) -> Result<(u32, u32)>;
+
+    fn display_handle(&self) -> Result<raw_window_handle::RawDisplayHandle>;
+
     /// Create the drawing surface on the given monitor.
     ///
     /// Returns an opaque handle that can be used with `wgpu` to create a

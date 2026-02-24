@@ -7,24 +7,29 @@ use std::ptr::NonNull;
 
 use anyhow::{Context, Result};
 use log::info;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle, XcbDisplayHandle, XcbWindowHandle};
 use x11rb::COPY_DEPTH_FROM_PARENT;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::*;
-use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
+use x11rb::xcb_ffi::XCBConnection; // Using XCBConnection to get a raw libxcb pointer
 
 use kroma_shared::traits::SurfaceProvider;
 use kroma_shared::types::{MonitorConfig, MonitorId};
 
 /// X11-based surface provider targeting traditional X11 desktops.
 pub struct X11SurfaceProvider {
-    conn: Option<RustConnection>,
+    conn: Option<XCBConnection>,
     screen_num: usize,
     monitors: Vec<MonitorConfig>,
     /// Created windows keyed by monitor id.
     windows: Vec<(u32, u32)>, // (monitor_id, x11_window)
-    /// Raw xcb connection pointer for wgpu.
-    _xcb_connection_ptr: Option<NonNull<std::ffi::c_void>>,
+}
+
+impl Default for X11SurfaceProvider {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl X11SurfaceProvider {
@@ -34,14 +39,13 @@ impl X11SurfaceProvider {
             screen_num: 0,
             monitors: Vec::new(),
             windows: Vec::new(),
-            _xcb_connection_ptr: None,
         }
     }
 
     /// Connect to the X11 display.
     pub fn connect(&mut self) -> Result<()> {
         let (conn, screen_num) =
-            RustConnection::connect(None).context("Failed to connect to X11 display")?;
+            XCBConnection::connect(None).context("Failed to connect to X11 display")?;
         info!("Connected to X11 display (screen {})", screen_num);
         self.screen_num = screen_num;
         self.conn = Some(conn);
@@ -78,7 +82,7 @@ impl X11SurfaceProvider {
     }
 
     /// Query RandR for monitor configuration.
-    fn query_randr_monitors(&self, conn: &RustConnection, root: u32) -> Result<Vec<MonitorConfig>> {
+    fn query_randr_monitors(&self, conn: &XCBConnection, root: u32) -> Result<Vec<MonitorConfig>> {
         use x11rb::protocol::randr::ConnectionExt as _;
 
         let mut monitors = Vec::new();
@@ -221,29 +225,9 @@ impl X11SurfaceProvider {
 
         conn.flush()?;
 
-        // Wait for the first Expose/ConfigureNotify
-        while let Ok(event) = conn.wait_for_event() {
-            match event {
-                x11rb::protocol::Event::Expose(_) | x11rb::protocol::Event::ConfigureNotify(_) => {
-                    break;
-                }
-                _ => {}
-            }
-        }
-
         Ok(())
     }
 
-    /// Get the raw X11 display (xcb_connection_t*) pointer for wgpu.
-    ///
-    /// x11rb's RustConnection is implemented in pure Rust, not libxcb.
-    /// We need to use a different approach — provide the Xlib display pointer
-    /// by opening a parallel Xlib connection. Alternatively, use the screen
-    /// number for wgpu's Xcb backend.
-    ///
-    /// NOTE: wgpu actually supports creating surfaces from X11 window IDs
-    /// using the Xlib backend. We use x11rb for window management but
-    /// convert to wgpu-compatible handles.
     pub fn get_window_id(&self, monitor_id: u32) -> Option<u32> {
         self.windows
             .iter()
@@ -262,23 +246,42 @@ impl X11SurfaceProvider {
 
 impl SurfaceProvider for X11SurfaceProvider {
     fn connect(&mut self) -> Result<()> {
-        self.connect()?;
+        X11SurfaceProvider::connect(self)?;
         self.discover_monitors()?;
         self.create_all_windows()?;
         Ok(())
     }
 
-    fn create_surface(&self, monitor: MonitorId) -> Result<raw_window_handle::RawWindowHandle> {
-        // X11 backend uses window IDs directly via get_window_id().
-        // Return an Xcb handle for wgpu compatibility.
+    fn size(&self, monitor: MonitorId) -> Result<(u32, u32)> {
+        let mon = self
+            .monitors
+            .iter()
+            .find(|m| m.id == monitor)
+            .context("Monitor not found")?;
+        Ok((mon.width, mon.height))
+    }
+
+    fn display_handle(&self) -> Result<RawDisplayHandle> {
+        let conn = self.conn.as_ref().context("Not connected to X11")?;
+
+        // Fetch the raw libxcb pointer securely managed by the crate
+        let raw_conn_ptr = conn.get_raw_xcb_connection();
+        let non_null_conn =
+            NonNull::new(raw_conn_ptr as *mut _).context("Null XCB connection pointer")?;
+
+        let handle = XcbDisplayHandle::new(Some(non_null_conn), self.screen_num as i32);
+        Ok(RawDisplayHandle::Xcb(handle))
+    }
+
+    fn create_surface(&self, monitor: MonitorId) -> Result<RawWindowHandle> {
         let wid = self
             .get_window_id(monitor.0)
-            .ok_or_else(|| anyhow::anyhow!("No X11 window for monitor {}", monitor.0))?;
-        let handle = raw_window_handle::XcbWindowHandle::new(
-            std::num::NonZeroU32::new(wid)
-                .ok_or_else(|| anyhow::anyhow!("X11 window ID is 0 for monitor {}", monitor.0))?,
-        );
-        Ok(raw_window_handle::RawWindowHandle::Xcb(handle))
+            .context(format!("No X11 window for monitor {}", monitor.0))?;
+
+        // raw-window-handle expects a NonZeroU32 for XCB window IDs
+        let window_id = std::num::NonZeroU32::new(wid).context("Window ID must be non-zero")?;
+        let handle = XcbWindowHandle::new(window_id);
+        Ok(RawWindowHandle::Xcb(handle))
     }
 
     fn list_monitors(&self) -> Result<Vec<MonitorConfig>> {
@@ -286,8 +289,14 @@ impl SurfaceProvider for X11SurfaceProvider {
     }
 
     fn dispatch(&mut self) -> Result<()> {
-        // X11 desktop windows are passive; no event dispatch needed for
-        // wallpaper rendering. Events are handled by x11rb internally.
+        let conn = self.conn.as_ref().context("Not connected to X11")?;
+
+        // Pump events non-blockingly to keep the X11 connection healthy
+        while let Some(_event) = conn.poll_for_event()? {
+            // Can be expanded later to handle resize events (ConfigureNotify)
+        }
+
         Ok(())
     }
 }
+
