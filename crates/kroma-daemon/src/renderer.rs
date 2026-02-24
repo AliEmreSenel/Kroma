@@ -4,7 +4,6 @@
 //! rendering. Renders to a real Wayland or X11 surface via wgpu.
 
 use std::collections::HashMap;
-use std::ptr::NonNull;
 
 use anyhow::{Context, Result};
 use kroma_shared::traits::SurfaceProvider;
@@ -14,10 +13,6 @@ use kroma_shared::shade::LiveShadePackage;
 use kroma_shared::types::{AudioConfig, ShaderUniforms, TextureDef};
 use wgpu::wgt::PollType;
 use wgpu::{FilterMode, MipmapFilterMode};
-
-use crate::audio::SPECTRUM_BANDS;
-use crate::surface::WaylandSurfaceProvider;
-use crate::surface_x11::X11SurfaceProvider;
 
 /// Default fullscreen triangle vertex shader (WGSL).
 ///

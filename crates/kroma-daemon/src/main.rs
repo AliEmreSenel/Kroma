@@ -4,21 +4,18 @@
 //! data aggregation threads, and IPC communication with the GUI.
 
 mod audio;
+mod backend;
 mod config;
 mod data;
 mod font;
-mod hyprland;
 mod ipc_server;
 mod renderer;
-mod surface;
-mod surface_x11;
 mod video;
 
 use std::{
     env, fs,
     hash::{DefaultHasher, Hash, Hasher},
     sync::mpsc,
-    thread::JoinHandle,
     time::Instant,
 };
 
@@ -34,45 +31,15 @@ use kroma_shared::{
 
 use crate::{
     audio::{AudioProvider, CpalAudioProvider},
+    backend::{
+        Backend,
+        wayland::{WaylandBackend, hyprland::HyprlandEvent},
+    },
     data::SystemDataProvider,
-    hyprland::HyprlandEvent,
     renderer::{RenderState, SlideshowEvent},
-    surface::WaylandSurfaceProvider,
-    surface_x11::X11SurfaceProvider,
     video::DefaultVideoDecoder,
 };
 
-enum WaylandBackend {
-    Hyprland {
-        _handle: JoinHandle<()>,
-        rx: mpsc::Receiver<HyprlandEvent>,
-    },
-    Generic,
-}
-
-enum Backend {
-    Wayland {
-        surface: WaylandSurfaceProvider,
-        _monitors: Vec<kroma_shared::types::MonitorConfig>,
-        backend: WaylandBackend,
-    },
-    X11 {
-        surface: X11SurfaceProvider,
-        _monitors: Vec<kroma_shared::types::MonitorConfig>,
-    },
-    Headless,
-}
-
-impl Backend {
-    // Helper to get a dynamic reference to the surface
-    fn surface(&self) -> Option<&dyn SurfaceProvider> {
-        match self {
-            Backend::Wayland { surface, .. } => Some(surface),
-            Backend::X11 { surface, .. } => Some(surface),
-            Backend::Headless => None,
-        }
-    }
-}
 fn video_decoder_for_source(
     pkg: &LiveShadePackage,
     source: &String,
@@ -165,97 +132,6 @@ fn extract_video_to_temp(source: &str, data: &[u8]) -> Result<std::path::PathBuf
     Ok(temp_path)
 }
 
-fn init_render_backend(session_type: &str, desktop_env: &str) -> Result<Backend> {
-    info!("Session: type={}, desktop={}", session_type, desktop_env);
-
-    if session_type == "wayland" || std::env::var("WAYLAND_DISPLAY").is_ok() {
-        info!("Detected Wayland session — using layer shell backend");
-        let mut surface_provider = surface::WaylandSurfaceProvider::new();
-        match surface_provider
-            .connect()
-            .and_then(|_| surface_provider.create_all_surfaces())
-        {
-            Ok(()) => {
-                let monitors = surface_provider.list_monitors()?;
-                info!("Active on {} Wayland monitor(s):", monitors.len());
-                for m in &monitors {
-                    info!(
-                        "  - {} ({}x{} @ {},{}, scale {})",
-                        m.name, m.width, m.height, m.x, m.y, m.scale
-                    );
-                }
-
-                // ---------------------------------------------------------------
-                // 3b. Start Hyprland event listener (optional)
-                // ---------------------------------------------------------------
-                let (hypr_tx, hypr_rx) = mpsc::channel();
-                let backend = match hyprland::start_listener(hypr_tx) {
-                    Ok(h) => {
-                        info!("Hyprland event listener started");
-                        WaylandBackend::Hyprland {
-                            _handle: h,
-                            rx: hypr_rx,
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Hyprland events unavailable: {} — running without compositor awareness",
-                            e
-                        );
-                        WaylandBackend::Generic
-                    }
-                };
-
-                Ok(Backend::Wayland {
-                    _monitors: monitors,
-                    surface: surface_provider,
-                    backend,
-                })
-            }
-            Err(e) => {
-                log::warn!(
-                    "Wayland surface creation failed: {} - trying X11 fallback",
-                    e
-                );
-                init_render_backend("x11", desktop_env)
-            }
-        }
-    } else if session_type == "x11" || std::env::var("DISPLAY").is_ok() {
-        info!("Detected X11 session — using desktop window backend");
-        let mut x11_provider = surface_x11::X11SurfaceProvider::new();
-        match x11_provider
-            .connect()
-            .and_then(|_| x11_provider.discover_monitors())
-            .and_then(|_| x11_provider.create_all_windows())
-        {
-            Ok(()) => {
-                let monitors = x11_provider.monitors().to_vec();
-                info!("Active on {} X11 monitor(s):", monitors.len());
-                for m in &monitors {
-                    info!(
-                        "  - {} ({}x{} @ {},{})",
-                        m.name, m.width, m.height, m.x, m.y
-                    );
-                }
-                Ok(Backend::X11 {
-                    surface: x11_provider,
-                    _monitors: monitors,
-                })
-            }
-            Err(e) => {
-                log::warn!(
-                    "X11 surface creation failed: {} — falling back to headless",
-                    e
-                );
-                Ok(Backend::Headless)
-            }
-        }
-    } else {
-        log::warn!("No display server detected — running headless");
-        Ok(Backend::Headless)
-    }
-}
-
 fn load_shade(
     path: &str,
     render_state: &mut RenderState,
@@ -345,7 +221,7 @@ fn main() -> Result<()> {
     let session_type = env::var("XDG_SESSION_TYPE").unwrap_or_default();
     let desktop_env = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
 
-    let mut backend = init_render_backend(&session_type, &desktop_env)?;
+    let mut backend = Backend::new(&session_type, &desktop_env)?;
     let data_provider = SystemDataProvider::new()?;
     let mut audio_provider = CpalAudioProvider::new();
 
@@ -430,7 +306,7 @@ fn main() -> Result<()> {
         {
             while let Ok(event) = hypr_rx.try_recv() {
                 match event {
-                    hyprland::HyprlandEvent::Fullscreen { fullscreen }
+                    HyprlandEvent::Fullscreen { fullscreen }
                         if daemon_config.pause_on_fullscreen =>
                     {
                         if fullscreen {
@@ -441,7 +317,7 @@ fn main() -> Result<()> {
                             info!("Fullscreen exited — resuming render");
                         }
                     }
-                    hyprland::HyprlandEvent::WorkspaceChanged { id } => {
+                    HyprlandEvent::WorkspaceChanged { id } => {
                         info!("Workspace changed to {} (was {})", id, active_workspace_id);
                         active_workspace_id = id;
                         // Pause when workspace changes away (wallpaper is always on all workspaces,
@@ -462,10 +338,10 @@ fn main() -> Result<()> {
                             }
                         }
                     }
-                    hyprland::HyprlandEvent::MonitorChanged { ref name } => {
+                    HyprlandEvent::MonitorChanged { ref name } => {
                         info!("Active monitor: {}", name);
                     }
-                    hyprland::HyprlandEvent::Disconnected => {
+                    HyprlandEvent::Disconnected => {
                         log::warn!("Hyprland event socket disconnected");
                     }
                     _ => {}

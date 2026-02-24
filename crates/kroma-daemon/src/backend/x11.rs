@@ -234,14 +234,6 @@ impl X11SurfaceProvider {
             .find(|(mid, _)| *mid == monitor_id)
             .map(|(_, wid)| *wid)
     }
-
-    pub fn screen_num(&self) -> i32 {
-        self.screen_num as i32
-    }
-
-    pub fn monitors(&self) -> &[MonitorConfig] {
-        &self.monitors
-    }
 }
 
 impl SurfaceProvider for X11SurfaceProvider {
@@ -299,4 +291,3 @@ impl SurfaceProvider for X11SurfaceProvider {
         Ok(())
     }
 }
-
