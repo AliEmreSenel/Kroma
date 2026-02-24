@@ -204,12 +204,13 @@ impl CpalAudioProvider {
         self.source = source.to_string();
         let device = get_source_by_name(source)?;
 
-        let config = device.default_input_config()?;
+        let input_config = device.default_input_config()?;
+        let sample_rate = input_config.sample_rate() as f32; // Capture sample rate for math
         log::info!(
             "Audio config: {}ch, {}Hz, {:?}",
-            config.channels(),
-            config.sample_rate(),
-            config.sample_format()
+            input_config.channels(),
+            sample_rate,
+            input_config.sample_format()
         );
 
         // --- Shared State Setup ---
@@ -273,15 +274,23 @@ impl CpalAudioProvider {
                     let mut spectrum = vec![0.0f32; bands];
                     let half_size = FFT_SIZE / 2;
 
-                    let min_bin = 1.0f32;
-                    let max_bin = half_size as f32;
-                    let log_range = max_bin.log2() - min_bin.log2();
+                    // --- NEW MATH ---
+                    // Restrict mapping from 20 Hz (sub-bass) up to 16 kHz (practical high-end)
+                    let min_freq = 20.0f32;
+                    let max_freq = 18000.0f32;
+
+                    let min_target_bin = (min_freq * FFT_SIZE as f32 / sample_rate).max(1.0);
+                    let max_target_bin =
+                        (max_freq * FFT_SIZE as f32 / sample_rate).min(half_size as f32 - 1.0);
+
+                    let min_log = min_target_bin.log2();
+                    let max_log = max_target_bin.log2();
+                    let log_range = max_log - min_log;
 
                     for (i, spectrum_val) in spectrum.iter_mut().enumerate().take(bands) {
-                        let start_log = min_bin.log2() + (i as f32 / bands as f32) * log_range;
-                        let end_log = min_bin.log2() + ((i + 1) as f32 / bands as f32) * log_range;
+                        let start_log = min_log + (i as f32 / bands as f32) * log_range;
+                        let end_log = min_log + ((i + 1) as f32 / bands as f32) * log_range;
 
-                        // Guarantee start_bin is at most half_size - 1 so we always have room for at least 1 bin
                         let start_bin = (2.0f32.powf(start_log) as usize).min(half_size - 1);
                         let mut end_bin = (2.0f32.powf(end_log) as usize).min(half_size);
 
@@ -306,24 +315,24 @@ impl CpalAudioProvider {
             })?;
         // --- Input Stream ---
         let buf_write = sample_buffer.clone();
-        let channels = config.channels() as usize;
+        let channels = input_config.channels() as usize;
 
         let err_fn = |err| log::error!("Audio input stream error: {}", err);
-        let stream = match config.sample_format() {
+        let stream = match input_config.sample_format() {
             cpal::SampleFormat::F32 => device.build_input_stream(
-                &config.into(),
+                &input_config.into(),
                 move |data: &[f32], _: &_| write_input_data(data, channels, &buf_write),
                 err_fn,
                 None,
             ),
             cpal::SampleFormat::I16 => device.build_input_stream(
-                &config.into(),
+                &input_config.into(),
                 move |data: &[i16], _: &_| write_input_data(data, channels, &buf_write),
                 err_fn,
                 None,
             ),
             cpal::SampleFormat::U16 => device.build_input_stream(
-                &config.into(),
+                &input_config.into(),
                 move |data: &[u16], _: &_| write_input_data(data, channels, &buf_write),
                 err_fn,
                 None,
@@ -349,7 +358,7 @@ impl CpalAudioProvider {
 // Helper to write generic sample data into the f32 Ring Buffer
 fn write_input_data<T>(input: &[T], channels: usize, buffer: &Arc<Mutex<VecDeque<f32>>>)
 where
-    T: cpal::Sample + cpal::FromSample<f32>, // Wait, cpal traits are tricky. Let's use f32 conversion directly.
+    T: cpal::Sample + cpal::FromSample<f32>,
     f32: cpal::FromSample<T>,
 {
     let mut buf = buffer.lock().unwrap();
@@ -369,6 +378,7 @@ where
         buf.pop_front();
     }
 }
+
 impl AudioProvider for CpalAudioProvider {
     fn get_spectrum(&self) -> Vec<f32> {
         self.state.get_spectrum()
@@ -385,7 +395,8 @@ mod tests {
 
     #[test]
     fn shared_audio_state_roundtrip() {
-        let state = SharedAudioState::new();
+        // Fixed: Added the required bands argument
+        let state = SharedAudioState::new(1024);
         let (spectrum_w, level_w) = state.writer_handles();
 
         // Write some data
@@ -403,3 +414,4 @@ mod tests {
         assert_eq!(state.get_level(), 0.42);
     }
 }
+
