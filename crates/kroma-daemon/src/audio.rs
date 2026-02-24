@@ -9,7 +9,7 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    thread::{self, Builder},
+    thread,
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -184,13 +184,6 @@ pub struct CpalAudioProvider {
 }
 
 impl CpalAudioProvider {
-    /// Create a new cpal audio provider.
-    pub fn new_with_source(config: &AudioConfig) -> anyhow::Result<Self> {
-        let mut provider = Self::new();
-        provider.switch(config)?;
-        Ok(provider)
-    }
-
     pub fn close(&mut self) {
         self.source = "none".to_string();
         self.stream = None;

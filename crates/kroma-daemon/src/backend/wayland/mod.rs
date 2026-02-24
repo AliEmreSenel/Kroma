@@ -1,19 +1,8 @@
-//! Wayland Layer Shell surface provider for Hyprland.
-//!
-//! Implements [`kroma_shared::traits::SurfaceProvider`] using
-//! `smithay-client-toolkit` and `wayland-client`. Creates real
-//! `zwlr_layer_shell_v1` surfaces on each monitor for wallpaper rendering.
-//!
-//! ## Pointer access
-//!
-//! wayland-backend 0.3 intentionally hides raw `wl_display*` / `wl_proxy*`
-//! pointers from its public API.  wgpu however requires these raw pointers
-//! to create a Vulkan/EGL surface.  We obtain them by reading the known
-//! memory layout of the internal `InnerObjectId` struct.  A runtime size
-//! assertion guards against layout changes in future wayland-backend versions.
+pub mod hyprland;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
 use log::{info, warn};
@@ -39,6 +28,15 @@ use wayland_client::{
 use kroma_shared::traits::SurfaceProvider;
 use kroma_shared::types::{MonitorConfig, MonitorId};
 
+use crate::backend::wayland::hyprland::HyprlandEvent;
+
+pub enum WaylandBackend {
+    Hyprland {
+        _handle: JoinHandle<()>,
+        rx: mpsc::Receiver<HyprlandEvent>,
+    },
+    Generic,
+}
 // ---------------------------------------------------------------------------
 // Raw pointer extraction from wayland-backend's opaque types
 // ---------------------------------------------------------------------------
