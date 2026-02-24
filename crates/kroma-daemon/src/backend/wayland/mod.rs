@@ -37,119 +37,6 @@ pub enum WaylandBackend {
     },
     Generic,
 }
-// ---------------------------------------------------------------------------
-// Raw pointer extraction from wayland-backend's opaque types
-// ---------------------------------------------------------------------------
-
-/// Determine the byte offset of the `ptr` field within an `ObjectId` struct.
-///
-/// wayland-backend 0.3.x's `ObjectId` wraps `InnerObjectId { id: u32, ptr: *mut
-/// wl_proxy, alive: Option<Arc<…>>, interface: &'static Interface }`.  Because
-/// the struct has no `#[repr(C)]`, the Rust compiler is free to reorder fields.
-///
-/// We exploit properties of the **display** ObjectId to locate `ptr`:
-/// - `id` = 1  (≤ 0xffff — way below any plausible pointer value)
-/// - `alive` = `None` = 0  (display proxy is never tracked with an Arc)
-/// - `interface` = known pointer (returned by `ObjectId::interface()`)
-/// - `ptr` = the remaining non-null pointer — this is what we want.
-///
-/// # Safety
-///
-/// Relies on reading the raw memory of an opaque struct.  A runtime size
-/// assertion guards against unreasonable layouts.
-unsafe fn find_ptr_offset(conn: &Connection) -> Option<usize> {
-    let display_id = conn.backend().display_id();
-    let interface_val = display_id.interface() as *const _ as usize;
-    let proto_id = display_id.protocol_id();
-    let size = std::mem::size_of_val(&display_id);
-
-    info!(
-        "ObjectId diagnostics: size={}, protocol_id={}, interface_addr=0x{:x}",
-        size, proto_id, interface_val
-    );
-
-    if size < 16 {
-        warn!("ObjectId size {} — too small for expected layout", size);
-        return None;
-    }
-
-    let base = &display_id as *const _ as *const u8;
-
-    // Dump the full struct memory for analysis
-    let mut hex = String::new();
-    for i in 0..size {
-        if i > 0 && i % 8 == 0 {
-            hex.push(' ');
-        }
-        let byte = std::ptr::read(base.add(i));
-        hex.push_str(&format!("{:02x}", byte));
-    }
-    info!("ObjectId raw bytes: {}", hex);
-
-    // Print each 8-byte slot
-    for off in (0..size).step_by(8) {
-        let val = std::ptr::read(base.add(off) as *const usize);
-        info!("  offset {:2}: 0x{:016x}", off, val);
-    }
-
-    // Strategy: find the non-null, non-interface, non-id pointer.
-    // The display ObjectId has alive=None (0), id=1, interface=known, ptr=unknown.
-    for off in (0..size).step_by(8) {
-        let val = std::ptr::read(base.add(off) as *const usize);
-        if val == 0 {
-            continue; // None/null  (alive = None, or padding)
-        }
-        if val == interface_val {
-            continue; // the `interface` field
-        }
-        if val < 0x10000 {
-            continue; // the `id` field (u32 in an 8-byte aligned slot)
-        }
-        // Validate: a real pointer should be page-aligned or at least 8-byte aligned
-        // (malloc returns 16-byte aligned on modern glibc)
-        if !val.is_multiple_of(8) {
-            warn!(
-                "  offset {:2}: 0x{:x} — NOT 8-byte aligned, skipping",
-                off, val
-            );
-            continue;
-        }
-        info!(
-            "ObjectId ptr field at offset {} (display ptr = 0x{:x})",
-            off, val
-        );
-        return Some(off);
-    }
-
-    // Fallback: try accepting non-aligned pointers
-    for off in (0..size).step_by(8) {
-        let val = std::ptr::read(base.add(off) as *const usize);
-        if val == 0 || val == interface_val || val < 0x10000 {
-            continue;
-        }
-        warn!(
-            "Fallback: using offset {} (0x{:x}) — might not be a real pointer",
-            off, val
-        );
-        return Some(off);
-    }
-
-    warn!("Could not locate ptr field in ObjectId (size = {})", size);
-    None
-}
-
-/// Extract the raw `wl_proxy*` from an `ObjectId` at a pre-determined offset.
-///
-/// # Safety
-/// `offset` must be the value returned by [`find_ptr_offset`].
-unsafe fn extract_proxy_ptr_at(
-    obj_id: &wayland_client::backend::ObjectId,
-    offset: usize,
-) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
-    let base = obj_id as *const _ as *const u8;
-    let ptr = std::ptr::read(base.add(offset) as *const *mut std::ffi::c_void);
-    std::ptr::NonNull::new(ptr)
-}
 
 // ---------------------------------------------------------------------------
 // Surface types
@@ -174,10 +61,6 @@ pub struct WaylandSurfaceProvider {
     monitors: Vec<MonitorConfig>,
     /// Created surfaces keyed by monitor id.
     surfaces: HashMap<u32, CreatedSurface>,
-    /// The raw display pointer for wgpu surface creation.
-    display_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
-    /// Byte offset of the `ptr` field inside `ObjectId` (detected once).
-    ptr_offset: Option<usize>,
 }
 
 impl WaylandSurfaceProvider {
@@ -186,8 +69,6 @@ impl WaylandSurfaceProvider {
             connection: None,
             monitors: Vec::new(),
             surfaces: HashMap::new(),
-            display_ptr: None,
-            ptr_offset: None,
         }
     }
 
@@ -380,24 +261,7 @@ impl SurfaceProvider for WaylandSurfaceProvider {
         let conn = Connection::connect_to_env()
             .context("Failed to connect to Wayland display. Is a compositor running?")?;
 
-        // Detect the ObjectId layout and extract the raw display pointer
-        let ptr_offset = unsafe { find_ptr_offset(&conn) };
-        self.ptr_offset = ptr_offset;
-
-        if let Some(offset) = ptr_offset {
-            let display_id = conn.backend().display_id();
-            self.display_ptr = unsafe { extract_proxy_ptr_at(&display_id, offset) };
-        }
-
-        if self.display_ptr.is_none() {
-            warn!("Could not extract raw wl_display pointer — GPU surface rendering unavailable");
-        } else {
-            info!(
-                "Wayland connection established (display ptr: {:?})",
-                self.display_ptr
-            );
-        }
-
+        info!("Wayland connection established");
         self.connection = Some(conn);
         Ok(())
     }
@@ -410,9 +274,16 @@ impl SurfaceProvider for WaylandSurfaceProvider {
 
     /// Get the raw display pointer (wl_display*) for wgpu.
     fn display_handle(&self) -> Result<RawDisplayHandle> {
+        let conn = self
+            .connection
+            .as_ref()
+            .context("Wayland connection not initialized")?;
+
+        let ptr = conn.backend().display_ptr() as *mut std::ffi::c_void;
+        let non_null = std::ptr::NonNull::new(ptr).context("Wayland display pointer is null")?;
+
         Ok(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
-            self.display_ptr
-                .context("Wayland Display Pointer is None")?,
+            non_null,
         )))
     }
 
@@ -422,16 +293,11 @@ impl SurfaceProvider for WaylandSurfaceProvider {
             .get(&monitor.0)
             .context(format!("No surface created for monitor {:?}", monitor))?;
 
-        let offset = self
-            .ptr_offset
-            .context("ObjectId layout not detected — call connect() first")?;
-
-        let obj_id = surface.wl_surface.id();
-        let ptr = unsafe { extract_proxy_ptr_at(&obj_id, offset) }
-            .context("Failed to extract raw wl_surface pointer")?;
+        let ptr = surface.wl_surface.id().as_ptr() as *mut std::ffi::c_void;
+        let non_null = std::ptr::NonNull::new(ptr).context("Wayland surface pointer is null")?;
 
         Ok(raw_window_handle::RawWindowHandle::Wayland(
-            raw_window_handle::WaylandWindowHandle::new(ptr),
+            raw_window_handle::WaylandWindowHandle::new(non_null),
         ))
     }
 
