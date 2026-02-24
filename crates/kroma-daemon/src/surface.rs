@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use log::{info, warn};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry,
@@ -190,20 +191,6 @@ impl WaylandSurfaceProvider {
             display_ptr: None,
             ptr_offset: None,
         }
-    }
-
-    /// Get the raw display pointer (wl_display*) for wgpu.
-    pub fn display_ptr(&self) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
-        self.display_ptr
-    }
-
-    /// Get the raw surface pointer (wl_surface*) for a given monitor.
-    pub fn surface_ptr(&self, monitor_id: u32) -> Option<std::ptr::NonNull<std::ffi::c_void>> {
-        let offset = self.ptr_offset?;
-        self.surfaces.get(&monitor_id).and_then(|s| {
-            let obj_id = s.wl_surface.id();
-            unsafe { extract_proxy_ptr_at(&obj_id, offset) }
-        })
     }
 
     /// Get the configured dimensions for a monitor's surface.
@@ -417,7 +404,21 @@ impl SurfaceProvider for WaylandSurfaceProvider {
         Ok(())
     }
 
-    fn create_surface(&self, monitor: MonitorId) -> Result<raw_window_handle::RawWindowHandle> {
+    fn size(&self, monitor: MonitorId) -> Result<(u32, u32)> {
+        Ok(self
+            .surface_size(monitor.0)
+            .expect("Error getting surface size"))
+    }
+
+    /// Get the raw display pointer (wl_display*) for wgpu.
+    fn display_handle(&self) -> Result<RawDisplayHandle> {
+        Ok(RawDisplayHandle::Wayland(WaylandDisplayHandle::new(
+            self.display_ptr
+                .context("Wayland Display Pointer is None")?,
+        )))
+    }
+
+    fn create_surface(&self, monitor: MonitorId) -> Result<RawWindowHandle> {
         let surface = self
             .surfaces
             .get(&monitor.0)

@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::ptr::NonNull;
 
 use anyhow::{Context, Result};
+use kroma_shared::traits::SurfaceProvider;
 use log::{info, warn};
 
 use kroma_shared::shade::LiveShadePackage;
@@ -15,6 +16,8 @@ use wgpu::wgt::PollType;
 use wgpu::{FilterMode, MipmapFilterMode};
 
 use crate::audio::SPECTRUM_BANDS;
+use crate::surface::WaylandSurfaceProvider;
+use crate::surface_x11::X11SurfaceProvider;
 
 /// Default fullscreen triangle vertex shader (WGSL).
 ///
@@ -239,16 +242,24 @@ impl RenderState {
     ///
     /// # Safety
     /// The display and surface pointers must be valid Wayland objects.
-    pub unsafe fn init_gpu_with_surface(
-        &mut self,
-        display_ptr: std::ptr::NonNull<std::ffi::c_void>,
-        surface_ptr: std::ptr::NonNull<std::ffi::c_void>,
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
+    pub fn init_gpu_with_surface(&mut self, surface: &dyn SurfaceProvider) -> Result<()> {
+        let primary = surface
+            .list_monitors()?
+            .first()
+            .cloned()
+            .unwrap_or_else(|| kroma_shared::types::MonitorConfig {
+                id: kroma_shared::types::MonitorId(0),
+                name: "default".into(),
+                width: 1920,
+                height: 1080,
+                x: 0,
+                y: 0,
+                scale: 1.0,
+            });
+        let (width, height) = surface
+            .size(primary.id)
+            .unwrap_or((primary.width, primary.height));
         info!("Creating wgpu instance (Vulkan backend)...");
-        info!("  display_ptr = {:?}", display_ptr);
-        info!("  surface_ptr = {:?}", surface_ptr);
         info!("  dimensions  = {}x{}", width, height);
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
@@ -257,21 +268,16 @@ impl RenderState {
         });
 
         // Create a wgpu surface from the raw Wayland handles
-        let raw_display = raw_window_handle::RawDisplayHandle::Wayland(
-            raw_window_handle::WaylandDisplayHandle::new(display_ptr),
-        );
-        let raw_window = raw_window_handle::RawWindowHandle::Wayland(
-            raw_window_handle::WaylandWindowHandle::new(surface_ptr),
-        );
+        let raw_display = surface.display_handle()?;
+        let raw_window = surface.create_surface(primary.id)?;
 
         let surface_target = wgpu::SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: raw_display,
             raw_window_handle: raw_window,
         };
 
-        let surface = instance
-            .create_surface_unsafe(surface_target)
-            .context("Failed to create wgpu surface from Wayland handles")?;
+        let surface = unsafe { instance.create_surface_unsafe(surface_target) }
+            .context("Failed to create wgpu surface from handles")?;
 
         // Request adapter compatible with the surface
         let adapter = pollster_block(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -279,7 +285,7 @@ impl RenderState {
             compatible_surface: Some(&surface),
             ..Default::default()
         }))
-        .context("No GPU adapter compatible with the Wayland surface")?;
+        .context("No GPU adapter compatible with the surface")?;
 
         let adapter_info = adapter.get_info();
         info!(
@@ -428,215 +434,6 @@ impl RenderState {
 
         info!(
             "GPU pipeline initialised with real surface ({}x{})",
-            width, height
-        );
-        Ok(())
-    }
-
-    /// Initialise the wgpu device with an X11 window (for KDE X11, XFCE, etc.).
-    ///
-    /// Uses the Xlib display handle obtained by opening a parallel Xlib
-    /// connection (x11rb is pure-Rust XCB, but wgpu's Vulkan backend needs
-    /// either Xlib or Xcb display pointers).
-    pub unsafe fn init_gpu_with_x11(
-        &mut self,
-        window_id: u32,
-        screen_num: i32,
-        width: u32,
-        height: u32,
-    ) -> Result<()> {
-        info!("Creating wgpu instance for X11...");
-        info!("  window_id   = 0x{:x}", window_id);
-        info!("  screen_num  = {}", screen_num);
-        info!("  dimensions  = {}x{}", width, height);
-
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..Default::default()
-        });
-
-        // Open a parallel Xlib connection for wgpu
-        // We use dlopen to avoid a hard link dependency on libX11
-        let libx11 = unsafe { libloading::Library::new("libX11.so.6") }
-            .or_else(|_| unsafe { libloading::Library::new("libX11.so") })
-            .context("Failed to load libX11 — is X11 installed?")?;
-        let x_open_display: libloading::Symbol<
-            unsafe extern "C" fn(*const std::ffi::c_char) -> *mut std::ffi::c_void,
-        > = unsafe { libx11.get(b"XOpenDisplay") }.context("XOpenDisplay not found in libX11")?;
-        let display_ptr = x_open_display(std::ptr::null());
-        if display_ptr.is_null() {
-            anyhow::bail!("Failed to open X11 display via Xlib");
-        }
-        let display_nn = NonNull::new(display_ptr).context("Xlib display pointer is null")?;
-        // Keep libx11 alive for the lifetime of the process (leak it)
-        std::mem::forget(libx11);
-
-        let raw_display = raw_window_handle::RawDisplayHandle::Xlib(
-            raw_window_handle::XlibDisplayHandle::new(Some(display_nn), screen_num),
-        );
-        let raw_window = raw_window_handle::RawWindowHandle::Xlib(
-            raw_window_handle::XlibWindowHandle::new(window_id as std::ffi::c_ulong),
-        );
-
-        let surface_target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: raw_display,
-            raw_window_handle: raw_window,
-        };
-
-        let surface = instance
-            .create_surface_unsafe(surface_target)
-            .context("Failed to create wgpu surface from X11 handles")?;
-
-        // The rest mirrors the Wayland init
-        let adapter = pollster_block(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .context("No GPU adapter compatible with the X11 surface")?;
-
-        let adapter_info = adapter.get_info();
-        info!(
-            "GPU adapter (X11): {} ({:?})",
-            adapter_info.name, adapter_info.backend
-        );
-
-        let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: wgpu::Features::FLOAT32_FILTERABLE,
-            label: Some("kroma-device"),
-            ..Default::default()
-        }))
-        .context("Failed to create GPU device")?;
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(
-                *surface_caps
-                    .formats
-                    .first()
-                    .context("No supported surface formats found (X11)")?,
-            );
-
-        info!("Surface format (X11): {:?}", format);
-
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: width.max(1),
-            height: height.max(1),
-            present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: surface_caps
-                .alpha_modes
-                .iter()
-                .find(|m| **m == wgpu::CompositeAlphaMode::Opaque)
-                .copied()
-                .unwrap_or_else(|| {
-                    surface_caps
-                        .alpha_modes
-                        .first()
-                        .copied()
-                        .unwrap_or(wgpu::CompositeAlphaMode::Auto)
-                }),
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-
-        surface.configure(&device, &surface_config);
-
-        // Create uniform buffer + bind group + pipeline (shared code)
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("kroma-uniforms"),
-            size: std::mem::size_of::<ShaderUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("kroma-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("kroma-bg"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("kroma-pl"),
-            bind_group_layouts: &[&bind_group_layout],
-            immediate_size: 0,
-        });
-
-        let vert_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("kroma-vert"),
-            source: wgpu::ShaderSource::Wgsl(FULLSCREEN_VERT_WGSL.into()),
-        });
-
-        let frag_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("kroma-frag"),
-            source: wgpu::ShaderSource::Wgsl(self.current_frag_wgsl.clone().into()),
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("kroma-pipeline-x11"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vert_module,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &frag_module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        self.instance = Some(instance);
-        self.surface = Some(surface);
-        self.device = Some(device);
-        self.queue = Some(queue);
-        self.pipeline = Some(pipeline);
-        self.uniform_buffer = Some(uniform_buffer);
-        self.bind_group = Some(bind_group);
-        self.bind_group_layout = Some(bind_group_layout);
-        self.pipeline_layout = Some(pipeline_layout);
-        self.vert_module = Some(vert_module);
-        self.surface_config = Some(surface_config);
-
-        info!(
-            "GPU pipeline initialised with X11 surface ({}x{})",
             width, height
         );
         Ok(())

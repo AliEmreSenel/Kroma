@@ -277,7 +277,7 @@ impl CpalAudioProvider {
                     // --- NEW MATH ---
                     // Restrict mapping from 20 Hz (sub-bass) up to 16 kHz (practical high-end)
                     let min_freq = 20.0f32;
-                    let max_freq = 18000.0f32;
+                    let max_freq = 16000.0f32;
 
                     let min_target_bin = (min_freq * FFT_SIZE as f32 / sample_rate).max(1.0);
                     let max_target_bin =
@@ -414,4 +414,3 @@ mod tests {
         assert_eq!(state.get_level(), 0.42);
     }
 }
-

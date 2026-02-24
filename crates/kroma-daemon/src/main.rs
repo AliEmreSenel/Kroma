@@ -15,7 +15,7 @@ mod surface_x11;
 mod video;
 
 use std::{
-    fs,
+    env, fs,
     hash::{DefaultHasher, Hash, Hasher},
     sync::mpsc,
     thread::JoinHandle,
@@ -38,6 +38,7 @@ use crate::{
     hyprland::HyprlandEvent,
     renderer::{RenderState, SlideshowEvent},
     surface::WaylandSurfaceProvider,
+    surface_x11::X11SurfaceProvider,
     video::DefaultVideoDecoder,
 };
 
@@ -51,25 +52,27 @@ enum WaylandBackend {
 
 enum Backend {
     Wayland {
-        display_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
-        surface_ptr: Option<std::ptr::NonNull<std::ffi::c_void>>,
-        logical_w: u32,
-        logical_h: u32,
-        scale: f64,
         surface: WaylandSurfaceProvider,
         _monitors: Vec<kroma_shared::types::MonitorConfig>,
         backend: WaylandBackend,
     },
     X11 {
-        window_id: u32,
-        screen_num: i32,
-        width: u32,
-        height: u32,
+        surface: X11SurfaceProvider,
         _monitors: Vec<kroma_shared::types::MonitorConfig>,
     },
     Headless,
 }
 
+impl Backend {
+    // Helper to get a dynamic reference to the surface
+    fn surface(&self) -> Option<&dyn SurfaceProvider> {
+        match self {
+            Backend::Wayland { surface, .. } => Some(surface),
+            Backend::X11 { surface, .. } => Some(surface),
+            Backend::Headless => None,
+        }
+    }
+}
 fn video_decoder_for_source(
     pkg: &LiveShadePackage,
     source: &String,
@@ -162,9 +165,7 @@ fn extract_video_to_temp(source: &str, data: &[u8]) -> Result<std::path::PathBuf
     Ok(temp_path)
 }
 
-fn init_render_backend() -> Result<Backend> {
-    let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-    let desktop_env = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+fn init_render_backend(session_type: &str, desktop_env: &str) -> Result<Backend> {
     info!("Session: type={}, desktop={}", session_type, desktop_env);
 
     if session_type == "wayland" || std::env::var("WAYLAND_DISPLAY").is_ok() {
@@ -183,23 +184,6 @@ fn init_render_backend() -> Result<Backend> {
                         m.name, m.width, m.height, m.x, m.y, m.scale
                     );
                 }
-                let primary = monitors.first().cloned().unwrap_or_else(|| {
-                    kroma_shared::types::MonitorConfig {
-                        id: kroma_shared::types::MonitorId(0),
-                        name: "default".into(),
-                        width: 1920,
-                        height: 1080,
-                        x: 0,
-                        y: 0,
-                        scale: 1.0,
-                    }
-                });
-                let display_ptr = surface_provider.display_ptr();
-                let surface_ptr = surface_provider.surface_ptr(primary.id.0);
-                let (logical_w, logical_h) = surface_provider
-                    .surface_size(primary.id.0)
-                    .unwrap_or((primary.width, primary.height));
-                let scale = primary.scale.max(1.0);
 
                 // ---------------------------------------------------------------
                 // 3b. Start Hyprland event listener (optional)
@@ -223,11 +207,6 @@ fn init_render_backend() -> Result<Backend> {
                 };
 
                 Ok(Backend::Wayland {
-                    display_ptr,
-                    surface_ptr,
-                    logical_w,
-                    logical_h,
-                    scale,
                     _monitors: monitors,
                     surface: surface_provider,
                     backend,
@@ -235,53 +214,10 @@ fn init_render_backend() -> Result<Backend> {
             }
             Err(e) => {
                 log::warn!(
-                    "Wayland surface creation failed: {} — trying X11 fallback",
+                    "Wayland surface creation failed: {} - trying X11 fallback",
                     e
                 );
-                // Try X11 as fallback before going headless
-                let mut x11_provider = surface_x11::X11SurfaceProvider::new();
-                match x11_provider
-                    .connect()
-                    .and_then(|_| x11_provider.discover_monitors())
-                    .and_then(|_| x11_provider.create_all_windows())
-                {
-                    Ok(()) => {
-                        let monitors = x11_provider.monitors().to_vec();
-                        info!(
-                            "Wayland failed, fell back to X11 on {} monitor(s):",
-                            monitors.len()
-                        );
-                        for m in &monitors {
-                            info!(
-                                "  - {} ({}x{} @ {},{})",
-                                m.name, m.width, m.height, m.x, m.y
-                            );
-                        }
-                        let primary = monitors.first().cloned().unwrap_or_else(|| {
-                            kroma_shared::types::MonitorConfig {
-                                id: kroma_shared::types::MonitorId(0),
-                                name: "default".into(),
-                                width: 1920,
-                                height: 1080,
-                                x: 0,
-                                y: 0,
-                                scale: 1.0,
-                            }
-                        });
-                        let window_id = x11_provider.get_window_id(primary.id.0).unwrap_or(0);
-                        Ok(Backend::X11 {
-                            window_id,
-                            screen_num: x11_provider.screen_num(),
-                            width: primary.width,
-                            height: primary.height,
-                            _monitors: monitors,
-                        })
-                    }
-                    Err(e2) => {
-                        log::warn!("X11 fallback also failed: {} — going headless", e2);
-                        Ok(Backend::Headless)
-                    }
-                }
+                init_render_backend("x11", desktop_env)
             }
         }
     } else if session_type == "x11" || std::env::var("DISPLAY").is_ok() {
@@ -301,23 +237,8 @@ fn init_render_backend() -> Result<Backend> {
                         m.name, m.width, m.height, m.x, m.y
                     );
                 }
-                let primary = monitors.first().cloned().unwrap_or_else(|| {
-                    kroma_shared::types::MonitorConfig {
-                        id: kroma_shared::types::MonitorId(0),
-                        name: "default".into(),
-                        width: 1920,
-                        height: 1080,
-                        x: 0,
-                        y: 0,
-                        scale: 1.0,
-                    }
-                });
-                let window_id = x11_provider.get_window_id(primary.id.0).unwrap_or(0);
                 Ok(Backend::X11 {
-                    window_id,
-                    screen_num: x11_provider.screen_num(),
-                    width: primary.width,
-                    height: primary.height,
+                    surface: x11_provider,
                     _monitors: monitors,
                 })
             }
@@ -421,7 +342,10 @@ fn main() -> Result<()> {
         daemon_config.target_fps, daemon_config.gpu_power
     );
 
-    let mut backend = init_render_backend()?;
+    let session_type = env::var("XDG_SESSION_TYPE").unwrap_or_default();
+    let desktop_env = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+
+    let mut backend = init_render_backend(&session_type, &desktop_env)?;
     let data_provider = SystemDataProvider::new()?;
     let mut audio_provider = CpalAudioProvider::new();
 
@@ -438,61 +362,27 @@ fn main() -> Result<()> {
     let mut render_state = RenderState::new()?;
     let (surf_w, surf_h): (u32, u32);
 
-    match &backend {
-        Backend::Wayland {
-            display_ptr,
-            surface_ptr,
-            logical_w,
-            logical_h,
-            scale,
-            ..
-        } => {
-            let s = scale.max(1.0);
-            surf_w = (*logical_w as f64 * s) as u32;
-            surf_h = (*logical_h as f64 * s) as u32;
-            if let (Some(dp), Some(sp)) = (*display_ptr, *surface_ptr) {
-                info!(
-                    "Initializing GPU with Wayland surface ({}x{} physical, scale {:.1})...",
-                    surf_w, surf_h, s
-                );
-                match unsafe { render_state.init_gpu_with_surface(dp, sp, surf_w, surf_h) } {
-                    Ok(()) => info!("GPU initialized with Wayland surface"),
-                    Err(e) => {
-                        log::error!(
-                            "GPU init with Wayland surface failed: {} — trying headless",
-                            e
-                        );
-                        render_state.init_gpu_headless()?;
-                    }
-                }
+    match backend.surface() {
+        Some(surface) => {
+            // Rust's or-pattern (|) works here because 'surface' is
+            // the same type or satisfies the trait in both variants.
+            info!("Initializing GPU with surface...");
+
+            if let Err(e) = render_state.init_gpu_with_surface(surface) {
+                log::error!("GPU init with surface failed: {}", e);
             } else {
-                log::warn!("No Wayland surface pointers available — trying headless");
-                render_state.init_gpu_headless()?;
+                info!("GPU initialized with surface");
             }
+
+            (surf_w, surf_h) = surface.size(
+                surface
+                    .list_monitors()?
+                    .first()
+                    .expect("At least one monitor should exist")
+                    .id,
+            )?
         }
-        Backend::X11 {
-            window_id,
-            screen_num,
-            width,
-            height,
-            ..
-        } => {
-            surf_w = *width;
-            surf_h = *height;
-            info!(
-                "Initializing GPU with X11 surface ({}x{})...",
-                surf_w, surf_h
-            );
-            match unsafe { render_state.init_gpu_with_x11(*window_id, *screen_num, surf_w, surf_h) }
-            {
-                Ok(()) => info!("GPU initialized with X11 surface"),
-                Err(e) => {
-                    log::error!("GPU init with X11 failed: {} — trying headless", e);
-                    render_state.init_gpu_headless()?;
-                }
-            }
-        }
-        Backend::Headless => {
+        None => {
             surf_w = 1920;
             surf_h = 1080;
             render_state.init_gpu_headless()?;
