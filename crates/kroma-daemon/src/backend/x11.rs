@@ -96,8 +96,8 @@ impl X11SurfaceProvider {
         };
 
         for (idx, &crtc) in reply.crtcs.iter().enumerate() {
-            if let Ok(cookie) = conn.randr_get_crtc_info(crtc, 0) {
-                if let Ok(crtc_info) = cookie.reply() {
+            if let Ok(cookie) = conn.randr_get_crtc_info(crtc, 0)
+                && let Ok(crtc_info) = cookie.reply() {
                     if crtc_info.width == 0 || crtc_info.height == 0 {
                         continue; // Disabled CRTC
                     }
@@ -122,7 +122,6 @@ impl X11SurfaceProvider {
                         scale: 1.0,
                     });
                 }
-            }
         }
 
         Ok(monitors)

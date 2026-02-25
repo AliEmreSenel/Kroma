@@ -434,73 +434,6 @@ impl RenderState {
         Ok(())
     }
 
-    /// Initialise the wgpu device in headless mode (no surface).
-    ///
-    /// Used for testing or when no display is available.
-    pub fn init_gpu_headless(&mut self) -> Result<()> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..Default::default()
-        });
-
-        let adapter = pollster_block(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            ..Default::default()
-        }))
-        .context("No suitable GPU adapter found")?;
-
-        info!("GPU adapter (headless): {}", adapter.get_info().name);
-
-        let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: wgpu::Features::FLOAT32_FILTERABLE,
-            label: Some("kroma-device-headless"),
-            ..Default::default()
-        }))
-        .context("Failed to create GPU device")?;
-
-        // Create uniform buffer
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("kroma-uniforms"),
-            size: std::mem::size_of::<ShaderUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Bind group layout
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("kroma-bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("kroma-bg"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        self.instance = Some(instance);
-        self.device = Some(device);
-        self.queue = Some(queue);
-        self.uniform_buffer = Some(uniform_buffer);
-        self.bind_group_layout = Some(bind_group_layout);
-        self.bind_group = Some(bind_group);
-
-        info!("GPU pipeline initialised (headless mode)");
-        Ok(())
-    }
-
     /// Load a shade package into the pipeline.
     ///
     /// If the package has a GLSL shader, translates it to WGSL and builds the
@@ -624,14 +557,6 @@ impl RenderState {
         Ok(())
     }
 
-    /// Load a raw WGSL fragment shader string (used for the default shader or testing).
-    #[allow(dead_code)]
-    pub fn load_wgsl_fragment(&mut self, wgsl: &str) -> Result<()> {
-        self.rebuild_pipeline_with_frag(wgsl)?;
-        self.current_frag_wgsl = wgsl.to_string();
-        Ok(())
-    }
-
     /// Hot-reload: takes raw Shadertoy-compatible GLSL, translates and loads it.
     pub fn load_glsl_source(&mut self, glsl_source: &str) -> Result<()> {
         info!(
@@ -728,8 +653,8 @@ impl RenderState {
         self.custom_uniforms.insert(name.to_string(), value.clone());
 
         // Update the CPU-side data buffer at the mapped index
-        if let Some(&idx) = self.custom_uniform_indices.get(name) {
-            if idx < MAX_CUSTOM_UNIFORMS {
+        if let Some(&idx) = self.custom_uniform_indices.get(name)
+            && idx < MAX_CUSTOM_UNIFORMS {
                 self.custom_uniform_data[idx] = match value {
                     UniformValue::Float(v) => *v as f32,
                     UniformValue::Bool(b) => {
@@ -742,7 +667,6 @@ impl RenderState {
                     UniformValue::Int(i) => *i as f32,
                 };
             }
-        }
         log::debug!("Custom uniform '{}' set to {:?}", name, value);
     }
 
@@ -1568,12 +1492,11 @@ impl RenderState {
             || self.textures[index].width != width
             || self.textures[index].height != height;
 
-        if needs_resize {
-            if let Err(e) = self.create_video_texture(width, height, index) {
+        if needs_resize
+            && let Err(e) = self.create_video_texture(width, height, index) {
                 warn!("Failed to create/resize video texture: {}", e);
                 return;
             }
-        }
 
         if let Some(queue) = self.queue.as_ref() {
             queue.write_texture(
@@ -1628,22 +1551,6 @@ impl RenderState {
         }
 
         Ok(())
-    }
-
-    /// Resize the render surface (e.g., after monitor reconfiguration).
-    #[allow(dead_code)]
-    pub fn resize(&mut self, width: u32, height: u32) {
-        if let (Some(surface), Some(device), Some(config)) = (
-            self.surface.as_ref(),
-            self.device.as_ref(),
-            self.surface_config.as_mut(),
-        ) {
-            config.width = width.max(1);
-            config.height = height.max(1);
-            surface.configure(device, config);
-            self.uniforms.u_resolution = [width as f32, height as f32];
-            info!("Surface resized to {}x{}", width, height);
-        }
     }
 
     /// Render a single frame to the surface.
@@ -1924,12 +1831,6 @@ impl RenderState {
             .context("JPEG encode failed")?;
 
         Ok(jpeg_bytes)
-    }
-
-    /// Check if the GPU has been initialised with a real surface.
-    #[allow(dead_code)]
-    pub fn has_surface(&self) -> bool {
-        self.surface.is_some()
     }
 }
 

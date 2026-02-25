@@ -10,6 +10,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use glam::Vec2;
 use log::{debug, error, info, warn};
 
 /// Events produced by the Hyprland IPC listener.
@@ -97,11 +98,11 @@ fn process_events(stream: &UnixStream, tx: &Sender<HyprlandEvent>) {
 
                 debug!("Hyprland event: {}", line);
 
-                if let Some(event) = parse_event(&line) {
-                    if tx.send(event).is_err() {
-                        // Receiver dropped — daemon shutting down
-                        return;
-                    }
+                if let Some(event) = parse_event(&line)
+                    && tx.send(event).is_err()
+                {
+                    // Receiver dropped — daemon shutting down
+                    return;
                 }
             }
             Err(e) => {
@@ -144,6 +145,43 @@ fn parse_event(line: &str) -> Option<HyprlandEvent> {
             // Ignore other events (activewindow, openwindow, etc.)
             None
         }
+    }
+}
+
+/// Query cursor position via Hyprland IPC socket directly (no process spawning).
+///
+/// Connects to `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`,
+/// sends `cursorpos`, reads the response.
+pub fn query_hyprland_cursor() -> anyhow::Result<Vec2> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let instance_sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        .map_err(|_| anyhow::anyhow!("HYPRLAND_INSTANCE_SIGNATURE not set"))?;
+
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+
+    let socket_path = format!("{}/hypr/{}/.socket.sock", runtime_dir, instance_sig);
+    let mut stream = UnixStream::connect(&socket_path)?;
+    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(100)))?;
+
+    stream.write_all(b"cursorpos")?;
+    // Shutdown write side so server knows command is complete
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut buf = [0u8; 128];
+    let n = stream.read(&mut buf)?;
+    let response = std::str::from_utf8(&buf[..n]).unwrap_or("");
+
+    // Response format: "960, 540" or "960, 540\n"
+    let parts: Vec<&str> = response.trim().split(',').collect();
+    if parts.len() == 2 {
+        let x: f32 = parts[0].trim().parse().unwrap_or(0.0);
+        let y: f32 = parts[1].trim().parse().unwrap_or(0.0);
+        Ok(Vec2::new(x, y))
+    } else {
+        Err(anyhow::anyhow!("Unexpected cursor response: {}", response))
     }
 }
 
