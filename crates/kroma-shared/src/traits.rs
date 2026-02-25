@@ -58,7 +58,7 @@ pub trait DataProvider: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Decodes video files frame-by-frame for use as shader textures.
-pub trait VideoDecoder: Send {
+pub trait VideoDecoder {
     /// Open a video file and prepare the decoding pipeline.
     fn load(path: &Path) -> Result<Self>
     where

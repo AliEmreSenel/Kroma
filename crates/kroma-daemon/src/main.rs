@@ -19,7 +19,7 @@ use std::{
     time::Instant,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use glam::Vec2;
 use log::info;
 
@@ -97,14 +97,13 @@ fn try_create_video_decoders(pkg: &LiveShadePackage) -> Vec<(usize, DefaultVideo
 
     // Iterate through sorted textures to match RenderState's internal `self.textures` vector
     for (i, (_name, def)) in tex_defs.iter().enumerate() {
-        if def.ty == "video" {
-            if let Some(ref source) = def.source {
+        if def.ty == "video"
+            && let Some(ref source) = def.source {
                 // 1. Try loading from embedded assets (ZIP package)
                 if let Some(d) = video_decoder_for_source(pkg, source) {
                     decoders.push((i, d))
                 }
             }
-        }
     }
 
     decoders
@@ -145,7 +144,7 @@ fn load_shade(
             if let Some(audio_conf) = pkg.config.audio.as_ref()
                 && audio_conf.enabled
             {
-                audio_provider.switch(&audio_conf)?;
+                audio_provider.switch(audio_conf)?;
             } else {
                 audio_provider.close();
             }
@@ -236,34 +235,23 @@ fn main() -> Result<()> {
     // 4. Initialize the renderer
     // ---------------------------------------------------------------
     let mut render_state = RenderState::new()?;
-    let (surf_w, surf_h): (u32, u32);
 
-    match backend.surface() {
-        Some(surface) => {
-            // Rust's or-pattern (|) works here because 'surface' is
-            // the same type or satisfies the trait in both variants.
-            info!("Initializing GPU with surface...");
+    let surface = backend.surface().context("A surface must exist")?;
+    info!("Initializing GPU with surface...");
 
-            if let Err(e) = render_state.init_gpu_with_surface(surface) {
-                log::error!("GPU init with surface failed: {}", e);
-            } else {
-                info!("GPU initialized with surface");
-            }
-
-            (surf_w, surf_h) = surface.size(
-                surface
-                    .list_monitors()?
-                    .first()
-                    .expect("At least one monitor should exist")
-                    .id,
-            )?
-        }
-        None => {
-            surf_w = 1920;
-            surf_h = 1080;
-            render_state.init_gpu_headless()?;
-        }
+    if let Err(e) = render_state.init_gpu_with_surface(surface) {
+        log::error!("GPU init with surface failed: {}", e);
+    } else {
+        info!("GPU initialized with surface");
     }
+
+    let (surf_w, surf_h) = surface.size(
+        surface
+            .list_monitors()?
+            .first()
+            .expect("At least one monitor should exist")
+            .id,
+    )?;
 
     // Set resolution
     render_state.uniforms.u_resolution = [surf_w as f32, surf_h as f32];
@@ -477,11 +465,10 @@ fn main() -> Result<()> {
         }
 
         // Dispatch Wayland events
-        if let Backend::Wayland { surface, .. } = &mut backend {
-            if let Err(e) = surface.dispatch() {
+        if let Backend::Wayland { surface, .. } = &mut backend
+            && let Err(e) = surface.dispatch() {
                 log::warn!("Wayland dispatch error: {}", e);
             }
-        }
 
         // Update timing uniforms
         let now = Instant::now();
@@ -561,8 +548,8 @@ fn main() -> Result<()> {
         frame = frame.wrapping_add(1);
 
         // Send preview frame if streaming is active
-        if let Ok(mut ps) = preview_stream.try_lock() {
-            if ps.active {
+        if let Ok(mut ps) = preview_stream.try_lock()
+            && ps.active {
                 let interval =
                     std::time::Duration::from_secs_f64(1.0 / ps.target_fps.max(1) as f64);
                 if ps.last_frame_time.elapsed() >= interval {
@@ -575,8 +562,8 @@ fn main() -> Result<()> {
                                 width: pw,
                                 height: ph,
                             };
-                            if let Ok(json) = serde_json::to_string(&event) {
-                                if let Some(ref mut w) = ps.writer {
+                            if let Ok(json) = serde_json::to_string(&event)
+                                && let Some(ref mut w) = ps.writer {
                                     use std::io::Write;
                                     if writeln!(w, "{}", json).is_err() || w.flush().is_err() {
                                         // Writer broken — stop streaming
@@ -585,7 +572,6 @@ fn main() -> Result<()> {
                                         log::info!("Preview stream client disconnected");
                                     }
                                 }
-                            }
                             ps.last_frame_time = std::time::Instant::now();
                         }
                         Err(e) => {
@@ -594,7 +580,6 @@ fn main() -> Result<()> {
                     }
                 }
             }
-        }
 
         // FPS tracking
         fps_counter += 1;

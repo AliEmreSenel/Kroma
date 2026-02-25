@@ -28,10 +28,6 @@ pub struct FfmpegVideoDecoder {
     avg_frame_interval: f64, // Fallback: calculated from stream average FPS
 }
 
-// SAFETY: FfmpegVideoDecoder is only used on the main render thread.
-// The raw pointers in ffmpeg types are not shared across threads.
-unsafe impl Send for FfmpegVideoDecoder {}
-
 impl FfmpegVideoDecoder {
     /// Try to decode one video frame from the input stream.
     fn decode_next_packet(&mut self) -> Option<()> {
