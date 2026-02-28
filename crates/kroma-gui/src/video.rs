@@ -97,12 +97,12 @@ impl VideoPlayerState {
 
         // Build format info string from container format and codec
         let container = {
-            let ext = temp_path
+            
+            temp_path
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("?")
-                .to_uppercase();
-            ext
+                .to_uppercase()
         };
         let codec_name = decoder
             .codec()

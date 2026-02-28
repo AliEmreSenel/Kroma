@@ -486,20 +486,18 @@ impl ChangeDefaultCmd {
 
 impl UndoableCommand for ChangeDefaultCmd {
     fn execute(&mut self, graph: &mut ShaderGraph) -> anyhow::Result<()> {
-        if let Some(node) = graph.node_mut(self.node_id) {
-            if self.port_index < node.defaults.len() {
+        if let Some(node) = graph.node_mut(self.node_id)
+            && self.port_index < node.defaults.len() {
                 node.defaults[self.port_index] = self.new_value.clone();
             }
-        }
         Ok(())
     }
 
     fn undo(&mut self, graph: &mut ShaderGraph) -> anyhow::Result<()> {
-        if let Some(node) = graph.node_mut(self.node_id) {
-            if self.port_index < node.defaults.len() {
+        if let Some(node) = graph.node_mut(self.node_id)
+            && self.port_index < node.defaults.len() {
                 node.defaults[self.port_index] = self.old_value.clone();
             }
-        }
         Ok(())
     }
 

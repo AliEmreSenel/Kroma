@@ -318,8 +318,8 @@ fn draw_node(
         frame.fill_text(port_label);
 
         // Show editable default value for unconnected Float inputs
-        if !is_connected {
-            if let Some(def) = node.defaults.get(i) {
+        if !is_connected
+            && let Some(def) = node.defaults.get(i) {
                 let val_str = match def {
                     DefaultValue::Float(v) => format!("{:.2}", v),
                     DefaultValue::Vec2(v) => format!("{:.1}, {:.1}", v[0], v[1]),
@@ -348,7 +348,6 @@ fn draw_node(
                 };
                 frame.fill_text(value_text);
             }
-        }
     }
 
     // Output ports
@@ -437,17 +436,16 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 // Check if hovering over an input port — adjust default value
                 if let Some((node_id, dir, port_idx, _)) =
                     self.hit_test_port(cursor_pos, offset, zoom)
-                {
-                    if dir == PortDirection::Input {
+                    && dir == PortDirection::Input {
                         // Check if this port is unconnected
                         let is_connected = self
                             .graph
                             .connections()
                             .iter()
                             .any(|c| c.to.node == node_id && c.to.port == port_idx);
-                        if !is_connected {
-                            if let Some(node) = self.graph.node(node_id) {
-                                if let Some(def) = node.defaults.get(port_idx) {
+                        if !is_connected
+                            && let Some(node) = self.graph.node(node_id)
+                                && let Some(def) = node.defaults.get(port_idx) {
                                     let step = 0.1 * scroll_y;
                                     let clamp = |x: f32| x.clamp(-1000.0, 1000.0);
                                     let new_def = match def {
@@ -477,10 +475,7 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                                         .and_capture(),
                                     );
                                 }
-                            }
-                        }
                     }
-                }
 
                 // Otherwise: zoom
                 let factor = if *scroll_y > 0.0 { 1.1 } else { 1.0 / 1.1 };
@@ -503,8 +498,8 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 });
                 state.last_value_click = Some((std::time::Instant::now(), cursor_pos));
 
-                if is_double_click {
-                    if let Some((node_id, port_idx)) =
+                if is_double_click
+                    && let Some((node_id, port_idx)) =
                         self.hit_test_value_pill(cursor_pos, offset, zoom)
                     {
                         return Some(
@@ -512,13 +507,11 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                                 .and_capture(),
                         );
                     }
-                }
 
                 // Check if clicking on a port first
                 if let Some((node_id, dir, port_idx, port_pos)) =
                     self.hit_test_port(cursor_pos, offset, zoom)
-                {
-                    if dir == PortDirection::Output {
+                    && dir == PortDirection::Output {
                         state.interaction = Interaction::DraggingWire {
                             from: PortAddr {
                                 node: node_id,
@@ -529,7 +522,6 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                         };
                         return Some(Action::capture());
                     }
-                }
 
                 // Check if clicking on a wire (connection)
                 if let Some(conn_id) = self.hit_test_wire(cursor_pos, offset, zoom) {
@@ -548,15 +540,14 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                         NodeKind::ForLoop | NodeKind::Conditional | NodeKind::CustomFunc
                     );
                     if is_subgraph_node {
-                        if let Some((last_time, last_id)) = state.last_click {
-                            if last_id == node_id && last_time.elapsed().as_millis() < 400 {
+                        if let Some((last_time, last_id)) = state.last_click
+                            && last_id == node_id && last_time.elapsed().as_millis() < 400 {
                                 state.last_click = None;
                                 return Some(
                                     Action::publish(GraphMessage::EnterSubGraph(node_id))
                                         .and_capture(),
                                 );
                             }
-                        }
                         state.last_click = Some((std::time::Instant::now(), node_id));
                     } else {
                         state.last_click = None;
@@ -848,8 +839,8 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 if let (Some(from_port), Some(to_port)) = (
                     from_node.outputs().get(conn.from.port),
                     to_node.inputs().get(conn.to.port),
-                ) {
-                    if from_port.data_type == DataType::Float
+                )
+                    && from_port.data_type == DataType::Float
                         && from_port.data_type != to_port.data_type
                     {
                         let to_color = data_type_color(to_port.data_type, self.tokens);
@@ -881,7 +872,6 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                         };
                         frame.fill_text(type_label);
                     }
-                }
             }
         }
 

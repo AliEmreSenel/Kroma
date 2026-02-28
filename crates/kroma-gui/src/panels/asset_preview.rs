@@ -269,8 +269,8 @@ impl AssetPreviewPanel {
         let short = asset_name.rsplit('/').next().unwrap_or(asset_name);
         let ext = short.rsplit('.').next().unwrap_or("").to_lowercase();
 
-        if let Some(pkg) = ctx.shade_package {
-            if let Some(data) = pkg.read_asset(asset_name) {
+        if let Some(pkg) = ctx.shade_package
+            && let Some(data) = pkg.read_asset(asset_name) {
                 let size = data.len();
                 let size_str = if size > 1_048_576 {
                     format!("{:.1} MB", size as f64 / 1_048_576.0)
@@ -359,7 +359,6 @@ impl AssetPreviewPanel {
                     .padding(8)
                     .into();
             }
-        }
 
         container(
             text(format!("Asset not found: {}", asset_name))
@@ -533,9 +532,9 @@ fn build_video_preview<'a>(
     use iced::widget::{button, image as img, row};
 
     // If we have an active player for this asset, show playback UI
-    if let Some(player) = video_player {
-        if player.asset_name == asset_name {
-            if let Some((w, h, ref rgba)) = player.current_frame {
+    if let Some(player) = video_player
+        && player.asset_name == asset_name
+            && let Some((w, h, ref rgba)) = player.current_frame {
                 let handle = img::Handle::from_rgba(w, h, rgba.clone());
                 let pos_str = format!("{:.1}s / {:.1}s", player.position, player.duration);
                 let progress = if player.duration > 0.0 {
@@ -584,8 +583,6 @@ fn build_video_preview<'a>(
                 .height(Fill)
                 .into();
             }
-        }
-    }
 
     // Fast-path: empty data can't be a video
     if data.is_empty() {

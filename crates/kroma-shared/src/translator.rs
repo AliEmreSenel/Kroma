@@ -240,8 +240,8 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
 
                 // Append output assignment before the closing brace of kroma_main.
                 // Find the matching closing brace by counting depth from the opening brace.
-                if let Some(main_pos) = output.find("void kroma_main()") {
-                    if let Some(open_rel) = output[main_pos..].find('{') {
+                if let Some(main_pos) = output.find("void kroma_main()")
+                    && let Some(open_rel) = output[main_pos..].find('{') {
                         let open_abs = main_pos + open_rel;
                         let mut depth = 0;
                         let mut close_pos = None;
@@ -263,7 +263,6 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
                             output.insert_str(pos, &writeback);
                         }
                     }
-                }
             }
         } else {
             warnings.push("Found mainImage but could not parse its signature.".into());

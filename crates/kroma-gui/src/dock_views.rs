@@ -871,7 +871,9 @@ impl KromaApp {
             let top_zone = drop_zone("^", dock::tree::DropZone::Top, path_owned.clone());
             let bottom_zone = drop_zone("v", dock::tree::DropZone::Bottom, path_owned);
 
-            let overlay = container(
+            
+
+            container(
                 column![
                     container(top_zone)
                         .height(Length::FillPortion(1))
@@ -899,9 +901,7 @@ impl KromaApp {
             .width(Fill)
             .height(Fill)
             .padding(4)
-            .into();
-
-            overlay
+            .into()
         } else {
             let panel_bg = self.theme_tokens.bg_secondary;
             let panel_border = self.theme_tokens.border_default;

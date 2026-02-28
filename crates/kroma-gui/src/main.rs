@@ -803,11 +803,10 @@ impl KromaApp {
                     // Clear selection if removed
                     if self.panel_designer.selected == Some(idx) {
                         self.panel_designer.selected = None;
-                    } else if let Some(sel) = self.panel_designer.selected {
-                        if sel > idx {
+                    } else if let Some(sel) = self.panel_designer.selected
+                        && sel > idx {
                             self.panel_designer.selected = Some(sel - 1);
                         }
-                    }
                 } else {
                     self.panel_designer
                         .components
@@ -820,11 +819,10 @@ impl KromaApp {
                     // Clear selection if removed
                     if self.panel_designer.selected == Some(idx) {
                         self.panel_designer.selected = None;
-                    } else if let Some(sel) = self.panel_designer.selected {
-                        if sel > idx {
+                    } else if let Some(sel) = self.panel_designer.selected
+                        && sel > idx {
                             self.panel_designer.selected = Some(sel - 1);
                         }
-                    }
                 }
             }
             Message::DesignerGenerate => {
@@ -871,40 +869,36 @@ impl KromaApp {
                 }
             }
             Message::DesignerSetComponentX(idx, val) => {
-                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
-                    if let Ok(v) = val.parse::<f32>() {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx)
+                    && let Ok(v) = val.parse::<f32>() {
                         comp.x = v.clamp(0.0, 1.0);
                     }
-                }
             }
             Message::DesignerSetComponentY(idx, val) => {
-                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
-                    if let Ok(v) = val.parse::<f32>() {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx)
+                    && let Ok(v) = val.parse::<f32>() {
                         comp.y = v.clamp(0.0, 1.0);
                     }
-                }
             }
             Message::DesignerSetComponentW(idx, val) => {
-                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
-                    if let Ok(v) = val.parse::<f32>() {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx)
+                    && let Ok(v) = val.parse::<f32>() {
                         comp.width = v.clamp(0.01, 1.0);
                     }
-                }
             }
             Message::DesignerSetComponentH(idx, val) => {
-                if let Some(comp) = self.panel_designer.components.get_mut(idx) {
-                    if let Ok(v) = val.parse::<f32>() {
+                if let Some(comp) = self.panel_designer.components.get_mut(idx)
+                    && let Ok(v) = val.parse::<f32>() {
                         comp.height = v.clamp(0.01, 1.0);
                     }
-                }
             }
 
             // ---------------------------------------------------------------
             // Video playback (persistent decoder)
             // ---------------------------------------------------------------
             Message::VideoPlay(name) => {
-                if let Some(ref pkg) = self.shade_package {
-                    if let Some(data) = pkg.read_asset(&name) {
+                if let Some(ref pkg) = self.shade_package
+                    && let Some(data) = pkg.read_asset(&name) {
                         let safe_name = name.replace('/', "_");
                         let base = if std::path::Path::new("/dev/shm").is_dir() {
                             std::path::PathBuf::from("/dev/shm")
@@ -928,7 +922,6 @@ impl KromaApp {
                             }
                         }
                     }
-                }
             }
             Message::VideoTogglePlay => {
                 if let Some(ref mut player) = self.video_player {
@@ -941,11 +934,10 @@ impl KromaApp {
                 }
             }
             Message::VideoTick => {
-                if let Some(ref mut player) = self.video_player {
-                    if player.playing {
+                if let Some(ref mut player) = self.video_player
+                    && player.playing {
                         player.advance_frame();
                     }
-                }
             }
             Message::VideoStop => {
                 if let Some(ref player) = self.video_player {

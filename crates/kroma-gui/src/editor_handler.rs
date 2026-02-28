@@ -91,11 +91,10 @@ impl KromaApp {
             Message::EditorToggleTextMode => {
                 self.editor_text_mode = !self.editor_text_mode;
                 if self.editor_text_mode {
-                    if self.editor_glsl_content.text().trim().is_empty() {
-                        if let Ok(glsl) = self.shader_graph.compile_glsl() {
+                    if self.editor_glsl_content.text().trim().is_empty()
+                        && let Ok(glsl) = self.shader_graph.compile_glsl() {
                             self.editor_glsl_content = text_editor::Content::with_text(&glsl);
                         }
-                    }
                 } else {
                     let glsl = self.editor_glsl_content.text();
                     if !glsl.trim().is_empty() {

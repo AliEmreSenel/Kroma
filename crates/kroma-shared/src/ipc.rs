@@ -209,11 +209,10 @@ fn extract_shaderc_line(msg: &str) -> Option<u32> {
                 while i < bytes.len() && bytes[i].is_ascii_digit() {
                     i += 1;
                 }
-                if i > start && i < bytes.len() && bytes[i] == b':' {
-                    if let Ok(line) = msg[start..i].parse::<u32>() {
+                if i > start && i < bytes.len() && bytes[i] == b':'
+                    && let Ok(line) = msg[start..i].parse::<u32>() {
                         return Some(line);
                     }
-                }
             }
         }
         i += 1;

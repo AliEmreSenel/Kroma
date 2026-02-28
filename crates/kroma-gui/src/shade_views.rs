@@ -356,8 +356,8 @@ impl KromaApp {
     fn view_shade_asset(&self, asset_name: &str) -> Element<'_, Message> {
         let short = asset_name.rsplit('/').next().unwrap_or(asset_name);
         let ext = short.rsplit('.').next().unwrap_or("").to_lowercase();
-        if let Some(ref pkg) = self.shade_package {
-            if let Some(data) = pkg.read_asset(asset_name) {
+        if let Some(ref pkg) = self.shade_package
+            && let Some(data) = pkg.read_asset(asset_name) {
                 let size = data.len();
                 let data = data.as_slice();
                 let size_str = if size > 1_048_576 {
@@ -594,7 +594,6 @@ impl KromaApp {
                     .padding(16)
                     .into();
             }
-        }
         container(text(format!("Asset not found: {}", asset_name)).size(13))
             .width(Fill)
             .height(Fill)
