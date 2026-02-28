@@ -32,10 +32,59 @@ use crate::backend::wayland::hyprland::HyprlandEvent;
 
 pub enum WaylandBackend {
     Hyprland {
+        surface: WaylandSurfaceProvider,
         _handle: JoinHandle<()>,
         rx: mpsc::Receiver<HyprlandEvent>,
     },
-    Generic,
+    Generic {
+        surface: WaylandSurfaceProvider,
+    },
+}
+
+impl WaylandBackend {
+    pub fn surface(&self) -> Option<&dyn SurfaceProvider> {
+        match self {
+            WaylandBackend::Hyprland { surface, .. } => Some(surface),
+            WaylandBackend::Generic { surface, .. } => Some(surface),
+        }
+    }
+
+    pub fn surface_mut(&mut self) -> Option<&mut dyn SurfaceProvider> {
+        match self {
+            WaylandBackend::Hyprland { surface, .. } => Some(surface),
+            WaylandBackend::Generic { surface, .. } => Some(surface),
+        }
+    }
+
+    pub fn new(_session_type: &str, desktop_env: &str) -> Result<Self> {
+        info!("Detected Wayland session — using layer shell backend");
+        let backend = match desktop_env {
+            "Hyprland" => {
+                let mut surface_provider = WaylandSurfaceProvider::new();
+                surface_provider
+                    .connect()
+                    .and_then(|_| surface_provider.create_all_surfaces())?;
+
+                let (hypr_tx, hypr_rx) = mpsc::channel();
+                let handle = hyprland::start_listener(hypr_tx)?;
+                WaylandBackend::Hyprland {
+                    surface: surface_provider,
+                    _handle: handle,
+                    rx: hypr_rx,
+                }
+            }
+            _ => {
+                let mut surface_provider = WaylandSurfaceProvider::new();
+                surface_provider
+                    .connect()
+                    .and_then(|_| surface_provider.create_all_surfaces())?;
+                WaylandBackend::Generic {
+                    surface: surface_provider,
+                }
+            }
+        };
+        Ok(backend)
+    }
 }
 
 // ---------------------------------------------------------------------------

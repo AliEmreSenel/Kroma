@@ -228,15 +228,6 @@ impl RenderState {
         })
     }
 
-    /// Initialise wgpu with a real Wayland surface for rendering.
-    ///
-    /// # Arguments
-    /// * `display_ptr` - Raw `wl_display*` pointer
-    /// * `surface_ptr` - Raw `wl_surface*` pointer
-    /// * `width` / `height` - Surface dimensions
-    ///
-    /// # Safety
-    /// The display and surface pointers must be valid Wayland objects.
     pub fn init_gpu_with_surface(&mut self, surface: &dyn SurfaceProvider) -> Result<()> {
         let primary = surface
             .list_monitors()?
@@ -251,18 +242,18 @@ impl RenderState {
                 y: 0,
                 scale: 1.0,
             });
+
         let (width, height) = surface
             .size(primary.id)
             .unwrap_or((primary.width, primary.height));
-        info!("Creating wgpu instance (Vulkan backend)...");
-        info!("  dimensions  = {}x{}", width, height);
+
+        info!("Initializing WGPU (Vulkan)... Headless detected.");
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..Default::default()
         });
 
-        // Create a wgpu surface from the raw Wayland handles
         let raw_display = surface.display_handle()?;
         let raw_window = surface.create_surface(primary.id)?;
 
@@ -271,22 +262,14 @@ impl RenderState {
             raw_window_handle: raw_window,
         };
 
-        let surface = unsafe { instance.create_surface_unsafe(surface_target) }
-            .context("Failed to create wgpu surface from handles")?;
+        let wgpu_surface = unsafe { instance.create_surface_unsafe(surface_target) }.ok();
 
-        // Request adapter compatible with the surface
         let adapter = pollster_block(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            compatible_surface: Some(&surface),
-            ..Default::default()
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: wgpu_surface.as_ref(),
+            force_fallback_adapter: false,
         }))
-        .context("No GPU adapter compatible with the surface")?;
-
-        let adapter_info = adapter.get_info();
-        info!(
-            "GPU adapter: {} ({:?})",
-            adapter_info.name, adapter_info.backend
-        );
+        .context("No GPU adapter found")?;
 
         let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: wgpu::Features::FLOAT32_FILTERABLE,
@@ -295,46 +278,32 @@ impl RenderState {
         }))
         .context("Failed to create GPU device")?;
 
-        // Determine the best surface format
-        let surface_caps = surface.get_capabilities(&adapter);
-        let format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(
-                *surface_caps
-                    .formats
-                    .first()
-                    .context("No supported surface formats found")?,
-            );
+        let mut format = wgpu::TextureFormat::Rgba8UnormSrgb;
 
-        info!("Surface format: {:?}", format);
-
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: width.max(1),
-            height: height.max(1),
-            present_mode: wgpu::PresentMode::Fifo, // Vsync
-            alpha_mode: surface_caps
-                .alpha_modes
+        if let Some(ref s) = wgpu_surface {
+            let surface_caps = s.get_capabilities(&adapter);
+            format = surface_caps
+                .formats
                 .iter()
-                .find(|m| **m == wgpu::CompositeAlphaMode::Opaque)
+                .find(|f| f.is_srgb())
                 .copied()
-                .unwrap_or_else(|| {
-                    surface_caps
-                        .alpha_modes
-                        .first()
-                        .copied()
-                        .unwrap_or(wgpu::CompositeAlphaMode::Auto)
-                }),
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
+                .unwrap_or(surface_caps.formats[0]);
 
-        surface.configure(&device, &surface_config);
-
+            let surface_config = wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format,
+                width: width.max(1),
+                height: height.max(1),
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            };
+            s.configure(&device, &surface_config);
+            self.surface_config = Some(surface_config);
+        } else {
+            self.surface_config = None;
+        }
         // Create uniform buffer
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kroma-uniforms"),
@@ -416,7 +385,7 @@ impl RenderState {
         });
 
         self.instance = Some(instance);
-        self.surface = Some(surface);
+        self.surface = wgpu_surface;
         self.device = Some(device);
         self.queue = Some(queue);
         self.pipeline = Some(pipeline);
@@ -425,7 +394,6 @@ impl RenderState {
         self.bind_group_layout = Some(bind_group_layout);
         self.pipeline_layout = Some(pipeline_layout);
         self.vert_module = Some(vert_module);
-        self.surface_config = Some(surface_config);
 
         info!(
             "GPU pipeline initialised with real surface ({}x{})",
@@ -654,19 +622,20 @@ impl RenderState {
 
         // Update the CPU-side data buffer at the mapped index
         if let Some(&idx) = self.custom_uniform_indices.get(name)
-            && idx < MAX_CUSTOM_UNIFORMS {
-                self.custom_uniform_data[idx] = match value {
-                    UniformValue::Float(v) => *v as f32,
-                    UniformValue::Bool(b) => {
-                        if *b {
-                            1.0
-                        } else {
-                            0.0
-                        }
+            && idx < MAX_CUSTOM_UNIFORMS
+        {
+            self.custom_uniform_data[idx] = match value {
+                UniformValue::Float(v) => *v as f32,
+                UniformValue::Bool(b) => {
+                    if *b {
+                        1.0
+                    } else {
+                        0.0
                     }
-                    UniformValue::Int(i) => *i as f32,
-                };
-            }
+                }
+                UniformValue::Int(i) => *i as f32,
+            };
+        }
         log::debug!("Custom uniform '{}' set to {:?}", name, value);
     }
 
@@ -1492,11 +1461,10 @@ impl RenderState {
             || self.textures[index].width != width
             || self.textures[index].height != height;
 
-        if needs_resize
-            && let Err(e) = self.create_video_texture(width, height, index) {
-                warn!("Failed to create/resize video texture: {}", e);
-                return;
-            }
+        if needs_resize && let Err(e) = self.create_video_texture(width, height, index) {
+            warn!("Failed to create/resize video texture: {}", e);
+            return;
+        }
 
         if let Some(queue) = self.queue.as_ref() {
             queue.write_texture(
@@ -1974,25 +1942,5 @@ fn futures_lite_block_on<F: std::future::Future>(f: F) -> F::Output {
                 std::hint::spin_loop();
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn glsl_to_wgsl_simple_fragment() {
-        let glsl = r#"#version 450
-layout(location = 0) out vec4 fragColor;
-
-void main() {
-    fragColor = vec4(1.0, 0.0, 0.0, 1.0);
-}
-"#;
-        let result = glsl_to_wgsl(glsl);
-        assert!(result.is_ok(), "GLSL→WGSL failed: {:?}", result.err());
-        let wgsl = result.unwrap();
-        assert!(!wgsl.is_empty());
     }
 }

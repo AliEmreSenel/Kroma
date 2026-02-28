@@ -98,12 +98,13 @@ fn try_create_video_decoders(pkg: &LiveShadePackage) -> Vec<(usize, DefaultVideo
     // Iterate through sorted textures to match RenderState's internal `self.textures` vector
     for (i, (_name, def)) in tex_defs.iter().enumerate() {
         if def.ty == "video"
-            && let Some(ref source) = def.source {
-                // 1. Try loading from embedded assets (ZIP package)
-                if let Some(d) = video_decoder_for_source(pkg, source) {
-                    decoders.push((i, d))
-                }
+            && let Some(ref source) = def.source
+        {
+            // 1. Try loading from embedded assets (ZIP package)
+            if let Some(d) = video_decoder_for_source(pkg, source) {
+                decoders.push((i, d))
             }
+        }
     }
 
     decoders
@@ -464,12 +465,10 @@ fn main() -> Result<()> {
             continue;
         }
 
-        // Dispatch Wayland events
-        if let Backend::Wayland { surface, .. } = &mut backend
-            && let Err(e) = surface.dispatch() {
-                log::warn!("Wayland dispatch error: {}", e);
-            }
-
+        backend
+            .surface_mut()
+            .expect("There must be a surface")
+            .dispatch()?;
         // Update timing uniforms
         let now = Instant::now();
         let dt = now.duration_since(last_frame_time).as_secs_f32();
@@ -549,37 +548,38 @@ fn main() -> Result<()> {
 
         // Send preview frame if streaming is active
         if let Ok(mut ps) = preview_stream.try_lock()
-            && ps.active {
-                let interval =
-                    std::time::Duration::from_secs_f64(1.0 / ps.target_fps.max(1) as f64);
-                if ps.last_frame_time.elapsed() >= interval {
-                    let pw = ps.width;
-                    let ph = ps.height;
-                    match render_state.capture_preview_frame(pw, ph) {
-                        Ok(jpeg_bytes) => {
-                            let event = DaemonEvent::PreviewFrame {
-                                jpeg: jpeg_bytes,
-                                width: pw,
-                                height: ph,
-                            };
-                            if let Ok(json) = serde_json::to_string(&event)
-                                && let Some(ref mut w) = ps.writer {
-                                    use std::io::Write;
-                                    if writeln!(w, "{}", json).is_err() || w.flush().is_err() {
-                                        // Writer broken — stop streaming
-                                        ps.active = false;
-                                        ps.writer = None;
-                                        log::info!("Preview stream client disconnected");
-                                    }
-                                }
-                            ps.last_frame_time = std::time::Instant::now();
+            && ps.active
+        {
+            let interval = std::time::Duration::from_secs_f64(1.0 / ps.target_fps.max(1) as f64);
+            if ps.last_frame_time.elapsed() >= interval {
+                let pw = ps.width;
+                let ph = ps.height;
+                match render_state.capture_preview_frame(pw, ph) {
+                    Ok(jpeg_bytes) => {
+                        let event = DaemonEvent::PreviewFrame {
+                            jpeg: jpeg_bytes,
+                            width: pw,
+                            height: ph,
+                        };
+                        if let Ok(json) = serde_json::to_string(&event)
+                            && let Some(ref mut w) = ps.writer
+                        {
+                            use std::io::Write;
+                            if writeln!(w, "{}", json).is_err() || w.flush().is_err() {
+                                // Writer broken — stop streaming
+                                ps.active = false;
+                                ps.writer = None;
+                                log::info!("Preview stream client disconnected");
+                            }
                         }
-                        Err(e) => {
-                            log::warn!("Preview capture error: {}", e);
-                        }
+                        ps.last_frame_time = std::time::Instant::now();
+                    }
+                    Err(e) => {
+                        log::warn!("Preview capture error: {}", e);
                     }
                 }
             }
+        }
 
         // FPS tracking
         fps_counter += 1;
