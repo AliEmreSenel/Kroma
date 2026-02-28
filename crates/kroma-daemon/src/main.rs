@@ -26,7 +26,7 @@ use log::info;
 use kroma_shared::{
     ipc::{CompileError, DaemonCommand, DaemonEvent, maybe_send},
     shade::LiveShadePackage,
-    traits::{DataProvider, SurfaceProvider, VideoDecoder},
+    traits::{DataProvider, VideoDecoder},
 };
 
 use crate::{
@@ -87,7 +87,7 @@ fn video_decoder_for_source(
 /// Scans the package's texture definitions for any `ty == "video"` entries
 /// and attempts to create an FFmpeg decoder for the first one found.
 /// Works regardless of WallpaperMode — any package can include video textures.
-fn try_create_video_decoders(pkg: &LiveShadePackage) -> Vec<(usize, DefaultVideoDecoder)> {
+fn try_create_video_decoders(pkg: &LiveShadePackage) -> Vec<(usize, DefaultVideoDecoder, f64)> {
     let mut decoders = Vec::new();
 
     // We need to know the index of each texture to update the correct slot in RenderState.
@@ -102,7 +102,7 @@ fn try_create_video_decoders(pkg: &LiveShadePackage) -> Vec<(usize, DefaultVideo
         {
             // 1. Try loading from embedded assets (ZIP package)
             if let Some(d) = video_decoder_for_source(pkg, source) {
-                decoders.push((i, d))
+                decoders.push((i, d, 0.0))
             }
         }
     }
@@ -137,9 +137,8 @@ fn load_shade(
     render_state: &mut RenderState,
     audio_provider: &mut CpalAudioProvider,
     tx: Option<mpsc::Sender<DaemonEvent>>,
-) -> Result<(Vec<(usize, DefaultVideoDecoder)>, Vec<f64>)> {
+) -> Result<Vec<(usize, DefaultVideoDecoder, f64)>> {
     let mut video_decoders = vec![];
-    let mut video_frame_accums = vec![];
     match LiveShadePackage::load(std::path::Path::new(path)) {
         Ok(pkg) => {
             if let Some(audio_conf) = pkg.config.audio.as_ref()
@@ -153,7 +152,6 @@ fn load_shade(
             if pkg.config.slideshow.is_none() {
                 video_decoders = try_create_video_decoders(&pkg);
             }
-            video_frame_accums = [0.0].repeat(video_decoders.len());
             let pkg_name = pkg.config.meta.name.clone();
             match render_state.load_shade(pkg) {
                 Ok(_) => {
@@ -200,7 +198,7 @@ fn load_shade(
             )?;
         }
     }
-    Ok((video_decoders, video_frame_accums))
+    Ok(video_decoders)
 }
 
 fn main() -> Result<()> {
@@ -259,12 +257,10 @@ fn main() -> Result<()> {
 
     // Load initial shade if configured
     let mut current_shade_path: Option<String> = None;
-    let mut video_decoders: Vec<(usize, DefaultVideoDecoder)> = vec![];
-    let mut video_frame_accums: Vec<f64> = vec![]; // Time accumulator for video frame pacing
+    let mut video_decoders: Vec<(usize, DefaultVideoDecoder, f64)> = vec![];
     if let Some(ref shade_path) = daemon_config.current_shade {
         info!("Loading initial shade: {}", shade_path);
-        (video_decoders, video_frame_accums) =
-            load_shade(shade_path, &mut render_state, &mut audio_provider, None)?;
+        video_decoders = load_shade(shade_path, &mut render_state, &mut audio_provider, None)?;
     }
 
     // ---------------------------------------------------------------
@@ -364,13 +360,13 @@ fn main() -> Result<()> {
                 }
                 DaemonCommand::LoadShade { path } => {
                     info!("Loading shade package: {}", path);
-                    (video_decoders, video_frame_accums) =
+                    video_decoders =
                         load_shade(&path, &mut render_state, &mut audio_provider, response_tx)?;
                 }
                 DaemonCommand::Reload => {
                     if let Some(ref path) = current_shade_path {
                         info!("Reloading shade: {}", path);
-                        (video_decoders, video_frame_accums) =
+                        video_decoders =
                             load_shade(path, &mut render_state, &mut audio_provider, response_tx)?;
                     } else {
                         log::warn!("No shade loaded to reload");
@@ -506,8 +502,8 @@ fn main() -> Result<()> {
                             &source,
                         )
                         .unwrap(),
+                        0.0,
                     )];
-                    video_frame_accums = [0.0].repeat(video_decoders.len());
                 }
                 SlideshowEvent::SwappedToImage => {
                     video_decoders = vec![];
@@ -522,10 +518,10 @@ fn main() -> Result<()> {
 
         // Decode and upload next video frame at the video's native FPS
 
-        for (i, (tex_index, decoder)) in video_decoders.iter_mut().enumerate() {
-            video_frame_accums[i] += dt as f64;
-            while video_frame_accums[i] >= decoder.frame_interval() {
-                video_frame_accums[i] -= decoder.frame_interval();
+        for (tex_index, decoder, accum) in video_decoders.iter_mut() {
+            *accum += dt as f64;
+            while *accum >= decoder.frame_interval() {
+                *accum -= decoder.frame_interval();
                 let (vw, vh) = decoder.dimensions();
                 match decoder.next_frame() {
                     Some(rgba_data) => {
