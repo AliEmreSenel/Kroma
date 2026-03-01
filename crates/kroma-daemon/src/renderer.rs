@@ -14,7 +14,10 @@ use kroma_shared::shade::LiveShadePackage;
 use kroma_shared::types::ShaderUniforms;
 use wgpu::wgt::PollType;
 
-use crate::textures::{self, TextureSource, TextureUpdate};
+use crate::{
+    config::GpuPower,
+    textures::{self, TextureSource, TextureUpdate},
+};
 
 /// Fullscreen triangle vertex shader.
 const FULLSCREEN_VERT_WGSL: &str = include_str!("shaders/fullscreen.vert.wgsl");
@@ -32,6 +35,7 @@ const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 const MAX_CUSTOM_UNIFORMS: usize = 32;
 
 /// A loaded GPU texture with its sampler.
+#[derive(Debug)]
 struct LoadedTexture {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -138,7 +142,11 @@ impl RenderState {
         })
     }
 
-    pub fn init_gpu_with_surface(&mut self, surface: &dyn SurfaceProvider) -> Result<()> {
+    pub fn init_gpu_with_surface(
+        &mut self,
+        gpu_pref: &GpuPower,
+        surface: &dyn SurfaceProvider,
+    ) -> Result<()> {
         let primary = surface
             .list_monitors()?
             .first()
@@ -175,7 +183,7 @@ impl RenderState {
         let wgpu_surface = unsafe { instance.create_surface_unsafe(surface_target) }.ok();
 
         let adapter = pollster_block(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
+            power_preference: gpu_pref.into(),
             compatible_surface: wgpu_surface.as_ref(),
             force_fallback_adapter: false,
         }))
@@ -956,12 +964,6 @@ impl RenderState {
         });
 
         self.pipeline_layout = Some(pipeline_layout);
-
-        // Only rebuild render pipeline if we have a vertex shader module
-        // (headless mode may not have one yet)
-        if self.vert_module.is_some() {
-            self.rebuild_pipeline_with_frag(&self.current_frag_wgsl.clone())?;
-        }
 
         Ok(())
     }

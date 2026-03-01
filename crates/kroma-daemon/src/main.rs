@@ -80,7 +80,7 @@ impl Daemon {
             let surface = backend.surface().context("A surface must exist")?;
             info!("Initializing GPU with surface...");
 
-            if let Err(e) = render_state.init_gpu_with_surface(surface) {
+            if let Err(e) = render_state.init_gpu_with_surface(&config.gpu_power, surface) {
                 log::error!("GPU init with surface failed: {}", e);
             } else {
                 info!("GPU initialized with surface");
@@ -461,7 +461,8 @@ impl Daemon {
         if elapsed >= 1.0 {
             let current_fps = self.fps_counter as f32 / elapsed;
             let effective_target_fps = self.config.target_fps.max(1);
-            let log_interval = effective_target_fps * self.config.logging.fps_log_interval_secs.max(1);
+            let log_interval =
+                effective_target_fps * self.config.logging.fps_log_interval_secs.max(1);
             if self.frame % log_interval < effective_target_fps {
                 info!(
                     "FPS: {:.1} | time: {:.1}s | shader: {}",
