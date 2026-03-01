@@ -49,6 +49,8 @@ cargo build --workspace --release
 cargo run -p kroma-daemon
 # or
 ./target/release/kroma-daemon
+
+# The daemon starts in a neutral fallback state until a `.shade` package is loaded.
 ```
 
 ### Import a Shadertoy shader
@@ -111,6 +113,18 @@ pause_on_fullscreen = true
 pause_on_inactive = true
 gpu_power = "low"
 current_shade = "/path/to/your.shade"
+
+[preview]
+default_width = 480
+default_height = 270
+default_target_fps = 15
+max_target_fps = 60
+
+[logging]
+fps_log_interval_secs = 5
+
+[runtime]
+persist_current_shade = true
 
 [[monitors]]
 name = "DP-1"

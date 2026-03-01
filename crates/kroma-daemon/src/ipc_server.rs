@@ -16,6 +16,8 @@ use log::{error, info};
 
 use kroma_shared::ipc::{DaemonCommand, DaemonEvent, socket_path};
 
+use crate::config::PreviewConfig;
+
 /// Return type for [`start`]: join handle, shared status, and preview stream state.
 type IpcStartResult = (
     JoinHandle<()>,
@@ -63,6 +65,8 @@ pub struct PreviewStreamState {
     pub writer: Option<Box<dyn std::io::Write + Send>>,
     /// Last frame send time for throttling.
     pub last_frame_time: std::time::Instant,
+    /// Max allowed preview stream FPS.
+    pub max_target_fps: u32,
 }
 
 impl Default for DaemonStatus {
@@ -84,7 +88,7 @@ impl Default for DaemonStatus {
 /// Start the IPC listener on a background thread.
 ///
 /// Returns a join handle, shared status, and shared preview stream state.
-pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<IpcStartResult> {
+pub fn start(cmd_tx: Sender<InternalCommand>, preview_cfg: PreviewConfig) -> Result<IpcStartResult> {
     let path = socket_path();
 
     // Remove stale socket if it exists
@@ -103,11 +107,12 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<IpcStartResult> {
 
     let preview_state = Arc::new(Mutex::new(PreviewStreamState {
         active: false,
-        target_fps: 15,
-        width: 480,
-        height: 270,
+        target_fps: preview_cfg.default_target_fps.max(1),
+        width: preview_cfg.default_width.max(1),
+        height: preview_cfg.default_height.max(1),
         writer: None,
         last_frame_time: std::time::Instant::now(),
+        max_target_fps: preview_cfg.max_target_fps.max(1),
     }));
     let preview_state_clone = Arc::clone(&preview_state);
 
@@ -179,7 +184,6 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<IpcStartResult> {
                                                 }
                                             }
                                             Ok(DaemonCommand::StartPreviewStream { width, height, target_fps }) => {
-                                                log::info!("Preview stream started: {}x{} @ {} fps", width, height, target_fps);
                                                 let stream_writer = match writer.try_clone() {
                                                     Ok(w) => w,
                                                     Err(e) => {
@@ -187,18 +191,27 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<IpcStartResult> {
                                                         continue;
                                                     }
                                                 };
+                                                let clamped_fps;
                                                 {
                                                     let mut ps = preview.lock().unwrap_or_else(|e| e.into_inner());
                                                     if ps.writer.is_some() {
                                                         log::warn!("Preview stream: replacing existing client connection");
                                                     }
+                                                    clamped_fps = target_fps.clamp(1, ps.max_target_fps);
                                                     ps.active = true;
-                                                    ps.width = width;
-                                                    ps.height = height;
-                                                    ps.target_fps = target_fps;
+                                                    ps.width = width.max(1);
+                                                    ps.height = height.max(1);
+                                                    ps.target_fps = clamped_fps;
                                                     ps.writer = Some(Box::new(stream_writer));
                                                     ps.last_frame_time = std::time::Instant::now();
                                                 }
+                                                log::info!(
+                                                    "Preview stream started: {}x{} @ {} fps (requested: {})",
+                                                    width,
+                                                    height,
+                                                    clamped_fps,
+                                                    target_fps
+                                                );
                                                 let ack = DaemonEvent::Ready;
                                                 if let Ok(json) = serde_json::to_string(&ack) {
                                                     let _ = writeln!(writer, "{}", json);
