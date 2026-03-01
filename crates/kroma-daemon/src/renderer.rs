@@ -241,7 +241,7 @@ impl RenderState {
         let wgpu_surface = unsafe { instance.create_surface_unsafe(surface_target) }.ok();
 
         let adapter = pollster_block(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference: wgpu::PowerPreference::LowPower,
             compatible_surface: wgpu_surface.as_ref(),
             force_fallback_adapter: false,
         }))
@@ -791,7 +791,8 @@ impl RenderState {
                     let (w, h) = source.dimensions();
                     let gpu_format = source.format().wgpu_format();
                     // Create a 1×1 placeholder in the correct format
-                    let placeholder_data: Vec<u8> = vec![0u8; source.format().bytes_per_pixel() as usize];
+                    let placeholder_data: Vec<u8> =
+                        vec![0u8; source.format().bytes_per_pixel() as usize];
                     let placeholder = Self::create_gpu_texture(
                         device,
                         queue,
@@ -862,9 +863,7 @@ impl RenderState {
                     };
 
                     // Check if we need to resize the GPU texture
-                    if self.textures[i].width != width
-                        || self.textures[i].height != height
-                    {
+                    if self.textures[i].width != width || self.textures[i].height != height {
                         // Recreate the GPU texture at the new size
                         let new_tex = Self::create_gpu_texture(
                             device,

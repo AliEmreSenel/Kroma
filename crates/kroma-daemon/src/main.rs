@@ -3,15 +3,12 @@
 //! This binary holds the wgpu context, manages the render loop,
 //! data aggregation threads, and IPC communication with the GUI.
 
-mod audio;
 mod backend;
 mod config;
 mod data;
-mod font;
 mod ipc_server;
 mod renderer;
 mod textures;
-mod video;
 
 use std::{
     env, fs,
