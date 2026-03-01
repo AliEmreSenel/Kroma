@@ -15,6 +15,7 @@ mod video;
 
 use std::{
     env, fs,
+    path::Path,
     sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -37,66 +38,6 @@ use crate::{
     data::SystemDataProvider,
     renderer::RenderState,
 };
-
-fn load_shade(
-    path: &str,
-    render_state: &mut RenderState,
-    tx: Option<mpsc::Sender<DaemonEvent>>,
-) -> Result<()> {
-    match LiveShadePackage::load(std::path::Path::new(path)) {
-        Ok(pkg) => {
-            let pkg_name = pkg.config.meta.name.clone();
-            match render_state.load_shade(pkg) {
-                Ok(_) => {
-                    info!("Loaded: {}", pkg_name);
-                    maybe_send(
-                        tx,
-                        DaemonEvent::CompileResult {
-                            success: true,
-                            errors: vec![],
-                            warnings: vec![],
-                        },
-                    )?;
-                }
-                Err(e) => {
-                    log::error!("Failed to compile shader: {}", e);
-                    maybe_send(
-                        tx,
-                        DaemonEvent::CompileResult {
-                            success: false,
-                            errors: vec![CompileError {
-                                message: e.to_string(),
-                                line: None,
-                                column: None,
-                            }],
-                            warnings: vec![],
-                        },
-                    )?;
-                }
-            }
-        }
-        Err(e) => {
-            log::error!("Failed to load shade: {}", e);
-            maybe_send(
-                tx,
-                DaemonEvent::CompileResult {
-                    success: false,
-                    errors: vec![CompileError {
-                        message: format!("Package load error: {}", e),
-                        line: None,
-                        column: None,
-                    }],
-                    warnings: vec![],
-                },
-            )?;
-        }
-    }
-
-    // Force initial texture update (first frame decode for videos, etc.)
-    render_state.update_textures(0.0)?;
-
-    Ok(())
-}
 
 enum LoopControl {
     Continue,
@@ -225,29 +166,14 @@ impl Daemon {
             while let Ok(event) = hypr_rx.try_recv() {
                 match event {
                     HyprlandEvent::Fullscreen { fullscreen } if self.config.pause_on_fullscreen => {
-                        if fullscreen {
-                            self.paused = true;
-                            info!("Fullscreen detected — pausing render");
-                        } else {
-                            self.paused = false;
-                            info!("Fullscreen exited — resuming render");
-                        }
+                        self.paused = fullscreen;
                     }
                     HyprlandEvent::WorkspaceChanged { id } => {
-                        info!("Workspace changed to {} (was {})", id, self.active_workspace_id);
+                        info!(
+                            "Workspace changed to {} (was {})",
+                            id, self.active_workspace_id
+                        );
                         self.active_workspace_id = id;
-
-                        if self.config.pause_on_inactive {
-                            if id < 0 {
-                                if !self.paused {
-                                    self.paused = true;
-                                    info!("Special workspace active — pausing render");
-                                }
-                            } else if self.paused {
-                                self.paused = false;
-                                info!("Normal workspace active — resuming render");
-                            }
-                        }
                     }
                     HyprlandEvent::MonitorChanged { ref name } => {
                         info!("Active monitor: {}", name);
@@ -268,118 +194,109 @@ impl Daemon {
                 response_tx,
             } = internal;
 
-            if matches!(self.handle_command(command, response_tx)?, LoopControl::Shutdown) {
-                return Ok(LoopControl::Shutdown);
-            }
-        }
-
-        Ok(LoopControl::Continue)
-    }
-
-    fn handle_command(
-        &mut self,
-        command: DaemonCommand,
-        response_tx: Option<mpsc::Sender<DaemonEvent>>,
-    ) -> Result<LoopControl> {
-        match command {
-            DaemonCommand::Pause => {
-                self.paused = true;
-                info!("Rendering paused");
-            }
-            DaemonCommand::Resume => {
-                self.paused = false;
-                info!("Rendering resumed");
-            }
-            DaemonCommand::Shutdown => {
-                info!("Shutdown requested");
-                return Ok(LoopControl::Shutdown);
-            }
-            DaemonCommand::LoadShade { path } => {
-                info!("Loading shade package: {}", path);
-                self.load_shade(&path, response_tx)?;
-            }
-            DaemonCommand::Reload => {
-                if let Some(path) = self.current_shade_path.clone() {
-                    info!("Reloading shade: {}", path);
-                    self.load_shade(&path, response_tx)?;
-                } else {
-                    log::warn!("No shade loaded to reload");
-                    maybe_send(
-                        response_tx,
-                        DaemonEvent::Error {
-                            message: "No shade loaded to reload".into(),
-                        },
-                    )?;
+            match command {
+                DaemonCommand::Pause => {
+                    self.paused = true;
+                    info!("Rendering paused");
                 }
-            }
-            DaemonCommand::SetUniform { name, value } => {
-                log::debug!("Setting uniform {} = {:?}", name, value);
-                self.render_state.set_custom_uniform(&name, &value);
-            }
-            DaemonCommand::StatusQuery => {
-                // Handled inline in ipc_server, shouldn't reach here
-            }
-            DaemonCommand::QuerySystemInfo => {
-                // Handled inline in ipc_server, shouldn't reach here
-            }
-            DaemonCommand::RequestPreviewFrame { width, height } => {
-                match self.render_state.capture_preview_frame(width, height) {
-                    Ok(jpeg_bytes) => {
-                        maybe_send(
-                            response_tx,
-                            DaemonEvent::PreviewFrame {
-                                jpeg: jpeg_bytes,
-                                width,
-                                height,
-                            },
-                        )?;
-                    }
-                    Err(e) => {
-                        log::warn!("Preview capture failed: {}", e);
+                DaemonCommand::Resume => {
+                    self.paused = false;
+                    info!("Rendering resumed");
+                }
+                DaemonCommand::Shutdown => {
+                    info!("Shutdown requested");
+                    return Ok(LoopControl::Shutdown);
+                }
+                DaemonCommand::LoadShade { path } => {
+                    info!("Loading shade package: {}", path);
+                    self.load_shade(&path, response_tx)?;
+                }
+                DaemonCommand::Reload => {
+                    if let Some(path) = self.current_shade_path.clone() {
+                        info!("Reloading shade: {}", path);
+                        self.load_shade(&path, response_tx)?;
+                    } else {
+                        log::warn!("No shade loaded to reload");
                         maybe_send(
                             response_tx,
                             DaemonEvent::Error {
-                                message: format!("Preview capture failed: {}", e),
+                                message: "No shade loaded to reload".into(),
                             },
                         )?;
                     }
                 }
-            }
-            DaemonCommand::StartPreviewStream { .. } | DaemonCommand::StopPreviewStream => {
-                // Handled inline in ipc_server
-            }
-            DaemonCommand::LiveReload { glsl_source } => {
-                log::info!("Live reload: {} bytes of GLSL", glsl_source.len());
-                let result =
-                    kroma_shared::translator::translate(&glsl_source, "live-preview", "Kroma Editor");
-                let warnings: Vec<String> = result.warnings.clone();
-                for w in &warnings {
-                    log::warn!("Translation warning: {}", w);
+                DaemonCommand::SetUniform { name, value } => {
+                    log::debug!("Setting uniform {} = {:?}", name, value);
+                    self.render_state.set_custom_uniform(&name, &value);
                 }
+                DaemonCommand::StatusQuery => {
+                    // Handled inline in ipc_server, shouldn't reach here
+                }
+                DaemonCommand::QuerySystemInfo => {
+                    // Handled inline in ipc_server, shouldn't reach here
+                }
+                DaemonCommand::RequestPreviewFrame { width, height } => {
+                    match self.render_state.capture_preview_frame(width, height) {
+                        Ok(jpeg_bytes) => {
+                            maybe_send(
+                                response_tx,
+                                DaemonEvent::PreviewFrame {
+                                    jpeg: jpeg_bytes,
+                                    width,
+                                    height,
+                                },
+                            )?;
+                        }
+                        Err(e) => {
+                            log::warn!("Preview capture failed: {}", e);
+                            maybe_send(
+                                response_tx,
+                                DaemonEvent::Error {
+                                    message: format!("Preview capture failed: {}", e),
+                                },
+                            )?;
+                        }
+                    }
+                }
+                DaemonCommand::StartPreviewStream { .. } | DaemonCommand::StopPreviewStream => {
+                    // Handled inline in ipc_server
+                }
+                DaemonCommand::LiveReload { glsl_source } => {
+                    log::info!("Live reload: {} bytes of GLSL", glsl_source.len());
+                    let result = kroma_shared::translator::translate(
+                        &glsl_source,
+                        "live-preview",
+                        "Kroma Editor",
+                    );
+                    let warnings: Vec<String> = result.warnings.clone();
+                    for w in &warnings {
+                        log::warn!("Translation warning: {}", w);
+                    }
 
-                match self.render_state.load_glsl_source(&result.shader_source) {
-                    Ok(()) => {
-                        self.current_shade_path = Some("live-preview".to_string());
-                        maybe_send(
-                            response_tx,
-                            DaemonEvent::CompileResult {
-                                success: true,
-                                errors: vec![],
-                                warnings,
-                            },
-                        )?;
-                    }
-                    Err(e) => {
-                        log::error!("Live reload failed: {}", e);
-                        let compile_error = CompileError::from(e.to_string());
-                        maybe_send(
-                            response_tx,
-                            DaemonEvent::CompileResult {
-                                success: false,
-                                errors: vec![compile_error],
-                                warnings,
-                            },
-                        )?;
+                    match self.render_state.load_glsl_source(&result.shader_source) {
+                        Ok(()) => {
+                            self.current_shade_path = Some("live-preview".to_string());
+                            maybe_send(
+                                response_tx,
+                                DaemonEvent::CompileResult {
+                                    success: true,
+                                    errors: vec![],
+                                    warnings,
+                                },
+                            )?;
+                        }
+                        Err(e) => {
+                            log::error!("Live reload failed: {}", e);
+                            let compile_error = CompileError::from(e.to_string());
+                            maybe_send(
+                                response_tx,
+                                DaemonEvent::CompileResult {
+                                    success: false,
+                                    errors: vec![compile_error],
+                                    warnings,
+                                },
+                            )?;
+                        }
                     }
                 }
             }
@@ -389,11 +306,57 @@ impl Daemon {
     }
 
     fn load_shade(&mut self, path: &str, tx: Option<mpsc::Sender<DaemonEvent>>) -> Result<()> {
-        load_shade(
-            path,
-            &mut self.render_state,
-            tx,
-        )?;
+        match LiveShadePackage::load(Path::new(path)) {
+            Ok(pkg) => {
+                let pkg_name = pkg.config.meta.name.clone();
+                match self.render_state.load_shade(pkg) {
+                    Ok(_) => {
+                        info!("Loaded: {}", pkg_name);
+                        maybe_send(
+                            tx,
+                            DaemonEvent::CompileResult {
+                                success: true,
+                                errors: vec![],
+                                warnings: vec![],
+                            },
+                        )?;
+                    }
+                    Err(e) => {
+                        log::error!("Failed to compile shader: {}", e);
+                        maybe_send(
+                            tx,
+                            DaemonEvent::CompileResult {
+                                success: false,
+                                errors: vec![CompileError {
+                                    message: e.to_string(),
+                                    line: None,
+                                    column: None,
+                                }],
+                                warnings: vec![],
+                            },
+                        )?;
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to load shade: {}", e);
+                maybe_send(
+                    tx,
+                    DaemonEvent::CompileResult {
+                        success: false,
+                        errors: vec![CompileError {
+                            message: format!("Package load error: {}", e),
+                            line: None,
+                            column: None,
+                        }],
+                        warnings: vec![],
+                    },
+                )?;
+            }
+        }
+
+        // Force initial texture update (first frame decode for videos, etc.)
+        self.render_state.update_textures(0.0)?;
         self.current_shade_path = Some(path.to_string());
         Ok(())
     }
@@ -406,7 +369,9 @@ impl Daemon {
             .context("There must be a surface")?
             .dispatch()?;
 
-        let dt = frame_start.duration_since(self.last_frame_time).as_secs_f32();
+        let dt = frame_start
+            .duration_since(self.last_frame_time)
+            .as_secs_f32();
         self.last_frame_time = frame_start;
 
         self.render_state.uniforms.u_time = self.start_time.elapsed().as_secs_f32();
