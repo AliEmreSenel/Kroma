@@ -184,7 +184,6 @@ channel0 = { type = "video", source = "assets/loop.mp4", loop = true }
     let config: ShadeConfig = toml::from_str(toml_str).unwrap();
     assert_eq!(config.meta.name, "Test Wallpaper");
     assert_eq!(config.meta.version, "2.0");
-    assert!(config.slideshow.is_none());
     assert!(config.uniforms.contains_key("speed"));
     assert!(config.uniforms.contains_key("enabled"));
     assert!(config.textures.contains_key("channel0"));

@@ -10,11 +10,11 @@ mod data;
 mod font;
 mod ipc_server;
 mod renderer;
+mod textures;
 mod video;
 
 use std::{
     env, fs,
-    hash::{DefaultHasher, Hash, Hasher},
     sync::{Arc, Mutex, mpsc},
     thread::JoinHandle,
     time::{Duration, Instant},
@@ -26,216 +26,25 @@ use log::info;
 use kroma_shared::{
     ipc::{CompileError, DaemonCommand, DaemonEvent, maybe_send},
     shade::LiveShadePackage,
-    traits::{DataProvider, VideoDecoder},
+    traits::DataProvider,
 };
 
 use crate::{
-    audio::{AudioProvider, CpalAudioProvider},
     backend::{
         Backend,
         wayland::{WaylandBackend, hyprland::HyprlandEvent},
     },
     data::SystemDataProvider,
-    renderer::{RenderState, SlideshowEvent},
-    video::DefaultVideoDecoder,
+    renderer::RenderState,
 };
-
-fn video_decoder_for_source(
-    pkg: &LiveShadePackage,
-    source: &String,
-) -> Option<DefaultVideoDecoder> {
-    // We need to know the index of each texture to update the correct slot in RenderState.
-    // RenderState sorts textures by binding index. We must replicate that sort order here.
-    if let Some(video_data) = pkg.read_asset(source) {
-        match extract_video_to_temp(source, &video_data) {
-            Ok(temp_path) => match DefaultVideoDecoder::load(&temp_path) {
-                Ok(decoder) => Some(decoder),
-                Err(e) => {
-                    log::warn!("Decoder error: {}", e);
-                    None
-                }
-            },
-            Err(e) => {
-                log::warn!("Extract error: {}", e);
-                None
-            }
-        }
-    }
-    // 2. Try loading from disk (Folder package)
-    else {
-        let video_path = std::path::Path::new(source);
-        match DefaultVideoDecoder::load(video_path) {
-            Ok(decoder) => {
-                log::info!("Video decoder created for texture ({})", source);
-                Some(decoder)
-            }
-            Err(e) => {
-                log::warn!("Failed to create video decoder for '{}': {}", source, e);
-                None
-            }
-        }
-    }
-}
-
-/// Try to create a video decoder for a shade package.
-///
-/// Scans the package's texture definitions for any `ty == "video"` entries
-/// and attempts to create an FFmpeg decoder for the first one found.
-/// Works regardless of WallpaperMode — any package can include video textures.
-/// Try to create a video decoder for a shade package.
-///
-/// Scans the package's texture definitions for any `ty == "video"` entries
-/// and attempts to create an FFmpeg decoder for the first one found.
-/// Works regardless of WallpaperMode — any package can include video textures.
-fn try_create_video_decoders(pkg: &LiveShadePackage) -> Vec<(usize, DefaultVideoDecoder, f64)> {
-    let mut decoders = Vec::new();
-
-    // We need to know the index of each texture to update the correct slot in RenderState.
-    // RenderState sorts textures by binding index. We must replicate that sort order here.
-    let mut tex_defs: Vec<_> = pkg.config.textures.iter().collect();
-    tex_defs.sort_by_key(|(_, def)| def.binding.unwrap_or(u32::MAX));
-
-    // Iterate through sorted textures to match RenderState's internal `self.textures` vector
-    for (i, (_name, def)) in tex_defs.iter().enumerate() {
-        if def.ty == "video"
-            && let Some(ref source) = def.source
-        {
-            // 1. Try loading from embedded assets (ZIP package)
-            if let Some(d) = video_decoder_for_source(pkg, source) {
-                decoders.push((i, d, 0.0))
-            }
-        }
-    }
-
-    decoders
-}
-
-/// Extract embedded video data to a temp file so FFmpeg can open it.
-fn extract_video_to_temp(source: &str, data: &[u8]) -> Result<std::path::PathBuf> {
-    let extension = std::path::Path::new(source)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("mp4");
-    let temp_dir = std::env::temp_dir().join("kroma-video");
-    std::fs::create_dir_all(&temp_dir)?;
-    // Use a unique filename based on content hash to avoid clobbering
-    // when multiple video textures or daemon instances exist.
-    let hash = {
-        let mut h = DefaultHasher::new();
-        source.hash(&mut h);
-        data.len().hash(&mut h);
-        h.finish()
-    };
-    let temp_path = temp_dir.join(format!("kroma-video_{:016x}.{}", hash, extension));
-    std::fs::write(&temp_path, data)?;
-    log::info!("Extracted video to temp: {}", temp_path.display());
-    Ok(temp_path)
-}
-
-fn update_video(
-    render_state: &mut RenderState,
-    video_decoders: &mut Vec<(usize, DefaultVideoDecoder, f64)>,
-    dt: f32,
-) {
-    for (tex_index, decoder, accum) in video_decoders.iter_mut() {
-        let frame_interval = {
-            let raw = decoder.frame_interval();
-            if raw.is_finite() && raw > 0.0 {
-                raw
-            } else {
-                1.0 / 30.0
-            }
-        };
-
-        if dt == 0.0 {
-            let (vw, vh) = decoder.dimensions();
-            match decoder.next_frame() {
-                Some(rgba_data) => {
-                    render_state.update_video_frame(rgba_data, vw, vh, *tex_index);
-                }
-                None => {
-                    if let Err(e) = decoder.seek(0.0) {
-                        log::warn!("Video {} seek failed: {}", tex_index, e);
-                    }
-                }
-            }
-            continue;
-        }
-
-        *accum += dt as f64;
-        while *accum >= frame_interval {
-            *accum -= frame_interval;
-            let (vw, vh) = decoder.dimensions();
-            match decoder.next_frame() {
-                Some(rgba_data) => {
-                    // Update the specific texture slot associated with this video
-                    render_state.update_video_frame(rgba_data, vw, vh, *tex_index);
-                }
-                None => {
-                    // Loop video
-                    if let Err(e) = decoder.seek(0.0) {
-                        log::warn!("Video {} seek failed: {}", tex_index, e);
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn update(
-    render_state: &mut RenderState,
-    video_decoders: &mut Vec<(usize, DefaultVideoDecoder, f64)>,
-    dt: f32,
-) -> Result<()> {
-    match render_state.update_slideshow(dt as f64) {
-        Ok(res) => match res {
-            SlideshowEvent::SwappedToVideo { source } => {
-                if let Some(pkg) = render_state.active_package.as_ref() {
-                    if let Some(decoder) = video_decoder_for_source(pkg, &source) {
-                        *video_decoders = vec![(0, decoder, 0.0)];
-                    } else {
-                        log::warn!("Slideshow swap requested video '{}' but decoder init failed", source);
-                        video_decoders.clear();
-                    }
-                } else {
-                    log::warn!("Slideshow swap requested video '{}' but no active package", source);
-                    video_decoders.clear();
-                }
-            }
-            SlideshowEvent::SwappedToImage => {
-                video_decoders.clear();
-            }
-            SlideshowEvent::None => {}
-        },
-        Err(e) => {
-            log::warn!("Slideshow update failed: {}", e);
-        }
-    }
-
-    update_video(render_state, video_decoders, dt);
-    Ok(())
-}
 
 fn load_shade(
     path: &str,
     render_state: &mut RenderState,
-    audio_provider: &mut CpalAudioProvider,
     tx: Option<mpsc::Sender<DaemonEvent>>,
-) -> Result<Vec<(usize, DefaultVideoDecoder, f64)>> {
-    let mut video_decoders = vec![];
+) -> Result<()> {
     match LiveShadePackage::load(std::path::Path::new(path)) {
         Ok(pkg) => {
-            if let Some(audio_conf) = pkg.config.audio.as_ref()
-                && audio_conf.enabled
-            {
-                audio_provider.switch(audio_conf)?;
-            } else {
-                audio_provider.close();
-            }
-
-            if pkg.config.slideshow.is_none() {
-                video_decoders = try_create_video_decoders(&pkg);
-            }
             let pkg_name = pkg.config.meta.name.clone();
             match render_state.load_shade(pkg) {
                 Ok(_) => {
@@ -283,12 +92,11 @@ fn load_shade(
         }
     }
 
-    update(render_state, &mut video_decoders, 0.0)?;
+    // Force initial texture update (first frame decode for videos, etc.)
+    render_state.update_textures(0.0)?;
 
-    Ok(video_decoders)
+    Ok(())
 }
-
-type VideoDecoders = Vec<(usize, DefaultVideoDecoder, f64)>;
 
 enum LoopControl {
     Continue,
@@ -299,14 +107,12 @@ struct Daemon {
     config: config::DaemonConfig,
     backend: Backend,
     data_provider: SystemDataProvider,
-    audio_provider: CpalAudioProvider,
     render_state: RenderState,
     cmd_rx: mpsc::Receiver<ipc_server::InternalCommand>,
     ipc_status: Arc<Mutex<ipc_server::DaemonStatus>>,
     preview_stream: Arc<Mutex<ipc_server::PreviewStreamState>>,
     _ipc_handle: JoinHandle<()>,
     current_shade_path: Option<String>,
-    video_decoders: VideoDecoders,
     start_time: Instant,
     frame: u32,
     paused: bool,
@@ -330,7 +136,6 @@ impl Daemon {
 
         let backend = Backend::new(&session_type, &desktop_env)?;
         let data_provider = SystemDataProvider::new()?;
-        let audio_provider = CpalAudioProvider::new();
         let mut render_state = RenderState::new()?;
 
         let (surf_w, surf_h) = {
@@ -363,14 +168,12 @@ impl Daemon {
             config,
             backend,
             data_provider,
-            audio_provider,
             render_state,
             cmd_rx,
             ipc_status,
             preview_stream,
             _ipc_handle: ipc_handle,
             current_shade_path: None,
-            video_decoders: vec![],
             start_time: Instant::now(),
             frame: 0,
             paused: false,
@@ -586,10 +389,9 @@ impl Daemon {
     }
 
     fn load_shade(&mut self, path: &str, tx: Option<mpsc::Sender<DaemonEvent>>) -> Result<()> {
-        self.video_decoders = load_shade(
+        load_shade(
             path,
             &mut self.render_state,
-            &mut self.audio_provider,
             tx,
         )?;
         self.current_shade_path = Some(path.to_string());
@@ -619,12 +421,11 @@ impl Daemon {
             .unwrap_or_else(|| self.data_provider.get_cursor_pos());
         self.render_state.uniforms.apply_cursor(cursor);
 
-        let audio_spectrum = self.audio_provider.get_spectrum();
-        let audio_level = self.audio_provider.get_level();
-        self.render_state.uniforms.u_audio_level = audio_level;
-        self.render_state.update_audio_spectrum(&audio_spectrum);
+        // Advance all texture sources (video decoding, slideshow timers, audio, etc.)
+        self.render_state.update_textures(dt as f64)?;
 
-        update(&mut self.render_state, &mut self.video_decoders, dt)?;
+        // Derive audio level from audio texture sources
+        self.render_state.uniforms.u_audio_level = self.render_state.get_audio_level();
 
         self.render_state.render_frame()?;
         self.frame = self.frame.wrapping_add(1);
@@ -712,7 +513,6 @@ impl Daemon {
     }
 
     fn shutdown(&mut self) -> Result<()> {
-        self.audio_provider.close();
         self.cleanup_socket()?;
         info!("Daemon shutdown complete");
         Ok(())

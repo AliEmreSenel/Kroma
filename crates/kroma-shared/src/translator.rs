@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-use crate::types::{ShadeConfig, ShadeMeta, TextureDef, UniformDef};
+use crate::types::{ShadeConfig, ShadeMeta, TextureDef, TextureType, UniformDef};
 
 /// Pre-compiled regex for a word-boundary match.
 fn word_regex(word: &str) -> Regex {
@@ -119,13 +119,9 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
                     version: "1.0".to_string(),
                     tags: vec![],
                 },
-                mode: Default::default(),
                 textures: std::collections::HashMap::new(),
                 uniforms: std::collections::HashMap::new(),
                 rendering: Default::default(),
-                audio: Default::default(),
-                slideshow: Default::default(),
-                fonts: Default::default(),
                 buffers: Default::default(),
             },
             warnings,
@@ -336,12 +332,17 @@ layout(location = 0) out vec4 kroma_out_color;
         textures.insert(
             channel_name,
             TextureDef {
-                ty: "image".into(),
+                ty: TextureType::Image,
                 source: Some(format!("assets/channel{}.png", idx)),
+                sources: Vec::new(),
                 looping: true,
                 filter: Default::default(),
                 wrap: Default::default(),
                 binding: None,
+                font_size: None,
+                interval: None,
+                shuffle: false,
+                fft_bands: None,
             },
         );
     }
@@ -354,9 +355,7 @@ layout(location = 0) out vec4 kroma_out_color;
             description: String::new(),
             tags: Vec::new(),
         },
-        mode: Default::default(),
         rendering: Default::default(),
-        audio: Default::default(),
         uniforms: {
             let mut m = std::collections::HashMap::new();
             m.insert(
@@ -371,8 +370,6 @@ layout(location = 0) out vec4 kroma_out_color;
             m
         },
         textures,
-        slideshow: Default::default(),
-        fonts: Default::default(),
         buffers: Default::default(),
     };
 

@@ -120,39 +120,17 @@ impl ShaderUniforms {
 // Wallpaper mode — what kind of wallpaper this shade package provides
 // ---------------------------------------------------------------------------
 
-/// The type of wallpaper this shade package provides.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-#[derive(Default)]
-pub enum WallpaperMode {
-    /// Custom fragment shader (may optionally reference textures).
-    #[default]
-    Shader,
-    /// Static image wallpaper — no shader needed.
-    Image,
-    /// Video loop wallpaper — no shader needed.
-    Video,
-    /// Slideshow of images.
-    Slideshow,
-}
-
 /// Root of a `.shade` package's `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShadeConfig {
     pub meta: ShadeMeta,
-    /// Wallpaper mode. Defaults to "shader" for backwards compatibility.
-    #[serde(default)]
-    pub mode: WallpaperMode,
     #[serde(default)]
     pub rendering: RenderingConfig,
-    pub audio: Option<AudioConfig>,
     #[serde(default)]
     pub uniforms: HashMap<String, UniformDef>,
+    /// All texture channels — images, videos, fonts, slideshows, audio spectrum.
     #[serde(default)]
     pub textures: HashMap<String, TextureDef>,
-    pub slideshow: Option<SlideshowConfig>,
-    #[serde(default)]
-    pub fonts: HashMap<String, FontDef>,
     /// Render buffer passes (multi-pass shaders, Shadertoy-style).
     /// Keys are buffer names like "A", "B", "C", "D".
     #[serde(default)]
@@ -269,17 +247,75 @@ pub enum TextureWrap {
     Mirror,
 }
 
+/// The type of a texture channel.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextureType {
+    /// Static image (PNG/JPEG/WebP).
+    Image,
+    /// Video file decoded frame-by-frame.
+    Video,
+    /// Font atlas rasterized from a TTF/OTF file.
+    Font,
+    /// Slideshow that cycles through multiple sources.
+    Slideshow,
+    /// Audio FFT spectrum data (512×1 R32Float).
+    AudioSpectrum,
+}
+
+impl TextureType {
+    /// Human-readable name for logging.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Video => "video",
+            Self::Font => "font",
+            Self::Slideshow => "slideshow",
+            Self::AudioSpectrum => "audio_spectrum",
+        }
+    }
+}
+
+/// A single source entry within a slideshow texture.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlideSource {
+    /// Path to the asset file.
+    pub source: String,
+    /// Type of this slide entry: "image" or "video".
+    #[serde(rename = "type", default = "default_slide_type")]
+    pub ty: SlideSourceType,
+}
+
+/// The type of a slide within a slideshow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlideSourceType {
+    Image,
+    Video,
+}
+
+fn default_slide_type() -> SlideSourceType {
+    SlideSourceType::Image
+}
+
 /// A texture channel binding.
+///
+/// Unified definition for all texture types: image, video, font,
+/// slideshow, and audio spectrum. The `type` field determines which
+/// fields are relevant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextureDef {
-    /// "image", "video", or "audio_spectrum".
+    /// The texture type.
     #[serde(rename = "type")]
-    pub ty: String,
-    /// Path to the asset file (relative to package root, e.g. "assets/bg.png").
+    pub ty: TextureType,
+    /// Path to the asset file (for image, video, font types).
     #[serde(default)]
     pub source: Option<String>,
-    /// Whether video textures loop.
-    #[serde(default, rename = "loop")]
+    /// Array of sources (for slideshow type).
+    #[serde(default)]
+    pub sources: Vec<SlideSource>,
+    /// Whether video textures loop (default: true).
+    #[serde(default = "bool_true", rename = "loop")]
     pub looping: bool,
     /// Texture filtering mode.
     #[serde(default)]
@@ -290,48 +326,18 @@ pub struct TextureDef {
     /// GPU binding index (0-based). Auto-assigned if unset.
     #[serde(default)]
     pub binding: Option<u32>,
-}
-
-/// Slideshow configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlideshowConfig {
-    /// Interval between slides in seconds.
-    #[serde(default = "default_slideshow_interval")]
-    pub interval: f64,
-    /// Whether to shuffle the order.
+    /// Font size in pixels (only for font textures, default: 32.0).
+    #[serde(default)]
+    pub font_size: Option<f32>,
+    /// Slideshow interval in seconds (only for slideshow textures, default: 30.0).
+    #[serde(default)]
+    pub interval: Option<f64>,
+    /// Whether to shuffle slideshow order.
     #[serde(default)]
     pub shuffle: bool,
-    /// Crossfade duration in seconds (0 = instant).
+    /// Number of FFT bands for audio spectrum textures (default: 512).
     #[serde(default)]
-    pub crossfade: f64,
-}
-
-fn default_slideshow_interval() -> f64 {
-    30.0
-}
-
-impl Default for SlideshowConfig {
-    fn default() -> Self {
-        Self {
-            interval: default_slideshow_interval(),
-            shuffle: false,
-            crossfade: 0.0,
-        }
-    }
-}
-
-/// A font asset definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FontDef {
-    /// Path to the font file (e.g. "assets/font.ttf").
-    pub source: String,
-    /// Font size in pixels for atlas rasterization.
-    #[serde(default = "default_font_size")]
-    pub size: f32,
-}
-
-fn default_font_size() -> f32 {
-    32.0
+    pub fft_bands: Option<usize>,
 }
 
 /// A render buffer pass definition (multi-pass rendering).
