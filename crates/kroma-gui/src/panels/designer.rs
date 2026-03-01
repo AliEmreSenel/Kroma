@@ -7,7 +7,7 @@
 use iced::widget::space::horizontal;
 use iced::widget::{Space, button, column, container, row, scrollable, slider, text, text_input};
 use iced::{Border, Element, Fill, Padding, Theme};
-use kroma_shared::types::AudioConfig;
+// Audio is now a texture type — no separate AudioConfig needed.
 
 use crate::Message;
 use crate::icons;
@@ -480,7 +480,7 @@ impl DesignerPanel {
 
     /// Generate a ShadeConfig for the current design.
     pub fn generate_config(&self) -> kroma_shared::types::ShadeConfig {
-        let needs_audio = self
+        let _needs_audio = self
             .components
             .iter()
             .any(|c| c.enabled && c.component.needs_audio());
@@ -493,21 +493,13 @@ impl DesignerPanel {
                 description: "Created with the Kroma Simple Designer".into(),
                 tags: vec!["designer".into(), "auto-generated".into()],
             },
-            mode: Default::default(),
             rendering: kroma_shared::types::RenderingConfig {
                 target_fps: 30,
                 pause_offscreen: true,
                 pause_fullscreen: true,
             },
-            audio: Some(AudioConfig {
-                enabled: needs_audio,
-                source: "default".into(),
-                ..Default::default()
-            }),
             uniforms: Default::default(),
             textures: Default::default(),
-            slideshow: Default::default(),
-            fonts: Default::default(),
             buffers: Default::default(),
         }
     }

@@ -70,20 +70,8 @@ impl Panel for PropertiesPanel {
         let audio = card(
             "Audio",
             column![
-                checkbox(cfg.audio.as_ref().map(|a| a.enabled).unwrap_or_default())
-                    .label("Enable audio")
-                    .on_toggle(Message::ShadeAudioEnabled)
-                    .size(t.font_size_md)
-                    .text_size(t.font_size_sm),
-                text_input(
-                    "Source: desktop / mic / device",
-                    &cfg.audio
-                        .as_ref()
-                        .map(|a| a.source.clone())
-                        .unwrap_or_default()
-                )
-                .on_input(Message::ShadeAudioSource)
-                .size(t.font_size_sm),
+                text("Audio is now configured as a texture.").size(t.font_size_sm),
+                text("Add an 'audio_spectrum' texture in the Textures section.").size(t.font_size_sm),
             ]
             .spacing(t.spacing_sm),
             t,
@@ -138,7 +126,7 @@ impl Panel for PropertiesPanel {
                 let label = name.clone();
                 texture_items.push(
                     row![
-                        text(format!("{} [{}]", label, t.ty)).size(11).width(Fill),
+                        text(format!("{} [{}]", label, t.ty.as_str())).size(11).width(Fill),
                         button(text("X").size(10))
                             .on_press(Message::ShadeRemoveTexture(name))
                             .padding(Padding::from([2, 6])),

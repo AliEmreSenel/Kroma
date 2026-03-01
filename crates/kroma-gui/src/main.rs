@@ -412,7 +412,9 @@ enum Message {
     ShadeTargetFps(String),
     ShadePauseOffscreen(bool),
     ShadePauseFullscreen(bool),
+    #[allow(dead_code)]
     ShadeAudioEnabled(bool),
+    #[allow(dead_code)]
     ShadeAudioSource(String),
     ShadeConfigToml(text_editor::Action),
     ShadeAddUniform,
@@ -626,13 +628,9 @@ impl KromaApp {
                     description: String::new(),
                     tags: Vec::new(),
                 },
-                mode: Default::default(),
                 rendering: Default::default(),
-                audio: Default::default(),
                 uniforms: Default::default(),
                 textures: Default::default(),
-                slideshow: Default::default(),
-                fonts: Default::default(),
                 buffers: Default::default(),
             },
             shade_config_toml: text_editor::Content::new(),

@@ -658,31 +658,10 @@ impl KromaApp {
             self.card(
                 "Audio",
                 column![
-                checkbox(
-                    self.shade_config
-                        .audio
-                        .as_ref()
-                        .map_or_else(|| false, |a| a.enabled)
-                )
-                .label("Enable audio capture")
-                .on_toggle(Message::ShadeAudioEnabled),
-                row![
-                    text("Source:").size(13).width(80),
-                    iced::widget::pick_list(
-                        &self.available_audio_sources[..],
-                        Some(self.shade_config.audio.as_ref()
-                        .map_or_else(|| "".to_string(), |a| a.source.clone())),
-                        Message::ShadeAudioSource,
-                    )
-                    .width(280)
-                    .placeholder("Select audio source"),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
-                text(
-                    "Select an audio source from the system, or 'default' for the default device."
-                )
-                .size(11),
+                text("Audio is now configured as a texture type.")
+                    .size(13),
+                text("Add an 'audio_spectrum' texture in the Textures section below.")
+                    .size(11),
             ]
                 .spacing(8),
             );
@@ -737,7 +716,7 @@ impl KromaApp {
         for name in texture_keys {
             if let Some(t) = self.shade_config.textures.get(&name) {
                 let src = t.source.clone().unwrap_or_else(|| "[!] no source".into());
-                let ty = t.ty.clone();
+                let ty = t.ty.as_str();
                 let binding_str = t
                     .binding
                     .map(|b| format!(" [binding {}]", b))
@@ -786,7 +765,7 @@ impl KromaApp {
                 .size(10)
                 .into(),
         );
-        if self.shade_config.textures.values().any(|t| t.ty == "glsl") {
+        if self.shade_config.textures.values().any(|t| t.ty == kroma_shared::types::TextureType::Image) {
             texture_items.push(
                 row![
                     text(icons::INFO).font(icons::ICON_FONT).size(10).color(self.theme_tokens.info),
@@ -797,7 +776,7 @@ impl KromaApp {
                 .into(),
             );
         }
-        if self.shade_config.textures.values().any(|t| t.ty == "font") {
+        if self.shade_config.textures.values().any(|t| t.ty == kroma_shared::types::TextureType::Font) {
             texture_items.push(
                 row![
                     text(icons::INFO).font(icons::ICON_FONT).size(10).color(self.theme_tokens.text_accent),
@@ -897,7 +876,7 @@ pub fn view_shade_settings_inline<'a>(ctx: crate::panels::AppContext<'a>) -> Ele
 
     let t = ctx.tokens;
     let cfg = ctx.shade_config;
-    let available_sources = ctx.available_audio_sources;
+    let _available_sources = ctx.available_audio_sources;
 
     // Meta section
     let meta = card(
@@ -944,24 +923,10 @@ pub fn view_shade_settings_inline<'a>(ctx: crate::panels::AppContext<'a>) -> Ele
     let audio = card(
         "Audio",
         column![
-            checkbox(cfg.audio.as_ref().map_or_else(|| false, |a| a.enabled))
-                .label("Enable audio")
-                .on_toggle(Message::ShadeAudioEnabled),
-            row![
-                text("Source:").size(13).width(80),
-                iced::widget::pick_list(
-                    available_sources,
-                    Some(
-                        cfg.audio
-                            .as_ref()
-                            .map_or_else(|| "".to_string(), |a| a.source.clone())
-                    ),
-                    Message::ShadeAudioSource,
-                )
-                .width(200)
-                .placeholder("Select audio source"),
-            ]
-            .spacing(8),
+            text("Audio is now configured as a texture type.")
+                .size(13),
+            text("Add an 'audio_spectrum' texture in the Textures section.")
+                .size(11),
         ]
         .spacing(8),
         t,

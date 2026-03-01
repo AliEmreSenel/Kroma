@@ -184,6 +184,7 @@ pub struct CpalAudioProvider {
 }
 
 impl CpalAudioProvider {
+    #[allow(dead_code)]
     pub fn close(&mut self) {
         self.source = "none".to_string();
         self.stream = None;

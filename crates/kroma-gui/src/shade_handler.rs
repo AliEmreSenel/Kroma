@@ -26,13 +26,9 @@ impl KromaApp {
                         description: String::new(),
                         tags: Vec::new(),
                     },
-                    mode: Default::default(),
                     rendering: Default::default(),
-                    audio: Default::default(),
                     uniforms: Default::default(),
                     textures: Default::default(),
-                    slideshow: Default::default(),
-                    fonts: Default::default(),
                     buffers: Default::default(),
                 };
                 let default_frag = "// Kroma shader\nvoid mainImage(out vec4 fragColor, in vec2 fragCoord) {\n    vec2 uv = fragCoord / u_resolution;\n    fragColor = vec4(uv, 0.5 + 0.5 * sin(u_time), 1.0);\n}\n";
@@ -137,8 +133,8 @@ impl KromaApp {
             }
             Message::ShadePauseOffscreen(b) => self.shade_config.rendering.pause_offscreen = b,
             Message::ShadePauseFullscreen(b) => self.shade_config.rendering.pause_fullscreen = b,
-            Message::ShadeAudioEnabled(b) => self.shade_config.audio.as_mut().unwrap().enabled = b,
-            Message::ShadeAudioSource(s) => self.shade_config.audio.as_mut().unwrap().source = s,
+            Message::ShadeAudioEnabled(_) => { /* audio is now a texture type */ }
+            Message::ShadeAudioSource(_) => { /* audio is now a texture type */ }
             Message::ShadeConfigToml(action) => self.shade_config_toml.perform(action),
             Message::ShadeAddUniform => {
                 if !self.shade_new_uniform_name.is_empty() {
@@ -166,12 +162,23 @@ impl KromaApp {
                     self.shade_config.textures.insert(
                         self.shade_new_texture_name.clone(),
                         kroma_shared::types::TextureDef {
-                            ty: self.shade_new_texture_type.clone(),
+                            ty: match self.shade_new_texture_type.as_str() {
+                                "video" => kroma_shared::types::TextureType::Video,
+                                "font" => kroma_shared::types::TextureType::Font,
+                                "slideshow" => kroma_shared::types::TextureType::Slideshow,
+                                "audio_spectrum" => kroma_shared::types::TextureType::AudioSpectrum,
+                                _ => kroma_shared::types::TextureType::Image,
+                            },
                             source: None,
+                            sources: Vec::new(),
                             looping: false,
                             filter: Default::default(),
                             wrap: Default::default(),
                             binding: None,
+                            font_size: None,
+                            interval: None,
+                            shuffle: false,
+                            fft_bands: None,
                         },
                     );
                     self.shade_new_texture_name.clear();
@@ -361,21 +368,25 @@ impl KromaApp {
                 // Determine texture type from extension
                 let ext = asset_name.rsplit('.').next().unwrap_or("").to_lowercase();
                 let tex_type = match ext.as_str() {
-                    "mp4" | "webm" | "avi" | "mkv" => "video",
-                    "glsl" | "frag" => "glsl",
-                    "ttf" | "otf" | "woff" | "woff2" => "font",
-                    _ => "image",
+                    "mp4" | "webm" | "avi" | "mkv" => kroma_shared::types::TextureType::Video,
+                    "ttf" | "otf" | "woff" | "woff2" => kroma_shared::types::TextureType::Font,
+                    _ => kroma_shared::types::TextureType::Image,
                 };
-                let is_video = tex_type == "video";
+                let is_video = tex_type == kroma_shared::types::TextureType::Video;
                 self.shade_config.textures.insert(
                     channel_name.clone(),
                     kroma_shared::types::TextureDef {
-                        ty: tex_type.into(),
+                        ty: tex_type,
                         source: Some(asset_name.clone()),
+                        sources: Vec::new(),
                         looping: is_video,
                         filter: Default::default(),
                         wrap: Default::default(),
                         binding: Some(channel),
+                        font_size: None,
+                        interval: None,
+                        shuffle: false,
+                        fft_bands: None,
                     },
                 );
                 self.sync_shade_toml();
