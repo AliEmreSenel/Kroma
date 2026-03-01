@@ -97,7 +97,6 @@ pub trait TextureSource {
     }
 
     /// Human-readable type name (for logging).
-    #[allow(dead_code)]
     fn texture_type(&self) -> &'static str;
 }
 
@@ -149,10 +148,7 @@ pub fn create_texture_source(
             Ok(Some(Box::new(tex)))
         }
         TextureType::AudioSpectrum => {
-            let source = def
-                .source
-                .as_deref()
-                .unwrap_or("desktop");
+            let source = def.source.as_deref().unwrap_or("desktop");
             let bands = def.fft_bands.unwrap_or(512);
             let tex = self::audio::AudioTexture::load(source, bands)?;
             Ok(Some(Box::new(tex)))
@@ -195,10 +191,7 @@ pub fn create_video_source(
 ///
 /// If the video is embedded in the package, extracts it to a temp file.
 /// If it's already a path on disk, returns that directly.
-pub fn resolve_video_path(
-    pkg: &LiveShadePackage,
-    source: &str,
-) -> Result<std::path::PathBuf> {
+pub fn resolve_video_path(pkg: &LiveShadePackage, source: &str) -> Result<std::path::PathBuf> {
     // Try embedded asset first
     if let Some(data) = pkg.read_asset(source) {
         return extract_video_to_temp(source, &data);

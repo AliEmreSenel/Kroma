@@ -73,3 +73,11 @@ pub trait VideoDecoder {
     /// Returns `(width, height)` of the video stream.
     fn dimensions(&self) -> (u32, u32);
 }
+
+pub trait AudioProvider: Send + Sync {
+    /// Returns a normalised audio spectrum: `SPECTRUM_BANDS` values in 0.0–1.0.
+    fn get_spectrum(&self) -> Vec<f32>;
+
+    /// Returns the current audio level (RMS, 0.0–1.0).
+    fn get_level(&self) -> f32;
+}
