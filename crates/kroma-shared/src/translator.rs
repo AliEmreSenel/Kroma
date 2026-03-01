@@ -9,6 +9,7 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
+use log::info;
 use regex::Regex;
 
 use crate::types::{ShadeConfig, ShadeMeta, TextureDef, TextureType, UniformDef};
@@ -237,28 +238,29 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
                 // Append output assignment before the closing brace of kroma_main.
                 // Find the matching closing brace by counting depth from the opening brace.
                 if let Some(main_pos) = output.find("void kroma_main()")
-                    && let Some(open_rel) = output[main_pos..].find('{') {
-                        let open_abs = main_pos + open_rel;
-                        let mut depth = 0;
-                        let mut close_pos = None;
-                        for (i, ch) in output[open_abs..].char_indices() {
-                            match ch {
-                                '{' => depth += 1,
-                                '}' => {
-                                    depth -= 1;
-                                    if depth == 0 {
-                                        close_pos = Some(open_abs + i);
-                                        break;
-                                    }
+                    && let Some(open_rel) = output[main_pos..].find('{')
+                {
+                    let open_abs = main_pos + open_rel;
+                    let mut depth = 0;
+                    let mut close_pos = None;
+                    for (i, ch) in output[open_abs..].char_indices() {
+                        match ch {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    close_pos = Some(open_abs + i);
+                                    break;
                                 }
-                                _ => {}
                             }
-                        }
-                        if let Some(pos) = close_pos {
-                            let writeback = format!("    kroma_out_color = {};\n", frag_color_name);
-                            output.insert_str(pos, &writeback);
+                            _ => {}
                         }
                     }
+                    if let Some(pos) = close_pos {
+                        let writeback = format!("    kroma_out_color = {};\n", frag_color_name);
+                        output.insert_str(pos, &writeback);
+                    }
+                }
             }
         } else {
             warnings.push("Found mainImage but could not parse its signature.".into());

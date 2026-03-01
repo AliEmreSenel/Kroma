@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use wgpu::PowerPreference;
 
 /// GPU power preference.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -16,6 +17,15 @@ pub enum GpuPower {
     Low,
     /// Prefer high performance (discrete) GPU.
     High,
+}
+
+impl Into<PowerPreference> for &GpuPower {
+    fn into(self) -> PowerPreference {
+        match self {
+            GpuPower::Low => PowerPreference::LowPower,
+            GpuPower::High => PowerPreference::HighPerformance,
+        }
+    }
 }
 
 /// Daemon-level configuration.
