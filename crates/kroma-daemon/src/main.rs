@@ -20,7 +20,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use glam::Vec2;
 use log::info;
 
 use kroma_shared::{
@@ -132,6 +131,64 @@ fn extract_video_to_temp(source: &str, data: &[u8]) -> Result<std::path::PathBuf
     Ok(temp_path)
 }
 
+fn update_video(
+    render_state: &mut RenderState,
+    video_decoders: &mut Vec<(usize, DefaultVideoDecoder, f64)>,
+    dt: f32,
+) {
+    for (tex_index, decoder, accum) in video_decoders.iter_mut() {
+        *accum += dt as f64;
+        while *accum >= decoder.frame_interval() || dt == 0.0 {
+            *accum -= decoder.frame_interval();
+            let (vw, vh) = decoder.dimensions();
+            match decoder.next_frame() {
+                Some(rgba_data) => {
+                    // Update the specific texture slot associated with this video
+                    render_state.update_video_frame(rgba_data, vw, vh, *tex_index);
+                }
+                None => {
+                    // Loop video
+                    if let Err(e) = decoder.seek(0.0) {
+                        log::warn!("Video {} seek failed: {}", tex_index, e);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn update(
+    render_state: &mut RenderState,
+    video_decoders: &mut Vec<(usize, DefaultVideoDecoder, f64)>,
+    dt: f32,
+) {
+    match render_state.update_slideshow(dt as f64) {
+        Ok(res) => match res {
+            SlideshowEvent::SwappedToVideo { source } => {
+                *video_decoders = vec![(
+                    0,
+                    video_decoder_for_source(
+                        render_state.active_package.as_ref().unwrap(),
+                        &source,
+                    )
+                    .unwrap(),
+                    0.0,
+                )];
+            }
+            SlideshowEvent::SwappedToImage => {
+                *video_decoders = vec![];
+            }
+            SlideshowEvent::None => (),
+        },
+
+        Err(e) => {
+            panic!("{:?}", e)
+        }
+    }
+
+    update_video(render_state, video_decoders, dt);
+}
+
 fn load_shade(
     path: &str,
     render_state: &mut RenderState,
@@ -198,6 +255,9 @@ fn load_shade(
             )?;
         }
     }
+
+    update(render_state, &mut video_decoders, 0.0);
+
     Ok(video_decoders)
 }
 
@@ -477,10 +537,10 @@ fn main() -> Result<()> {
         // Gather system data
         let stats = data_provider.get_system_stats();
         render_state.uniforms.apply_system_stats(&stats);
-        let cursor = data_provider.get_cursor_pos();
-        // Flip mouse Y: Hyprland uses Y=0 at top, Shadertoy expects Y=0 at bottom
-        let flipped_cursor = Vec2::new(cursor.x, render_state.uniforms.u_resolution[1] - cursor.y);
-        render_state.uniforms.apply_cursor(flipped_cursor);
+        let cursor = backend
+            .cursor_pos()
+            .unwrap_or_else(|| data_provider.get_cursor_pos());
+        render_state.uniforms.apply_cursor(cursor);
 
         // Gather audio data
         let audio_spectrum = audio_provider.get_spectrum();
@@ -490,53 +550,7 @@ fn main() -> Result<()> {
         // Upload audio spectrum to GPU texture
         render_state.update_audio_spectrum(&audio_spectrum);
 
-        // Advance slideshow if active
-
-        match render_state.update_slideshow(dt as f64) {
-            Ok(res) => match res {
-                SlideshowEvent::SwappedToVideo { source } => {
-                    video_decoders = vec![(
-                        0,
-                        video_decoder_for_source(
-                            render_state.active_package.as_ref().unwrap(),
-                            &source,
-                        )
-                        .unwrap(),
-                        0.0,
-                    )];
-                }
-                SlideshowEvent::SwappedToImage => {
-                    video_decoders = vec![];
-                }
-                SlideshowEvent::None => (),
-            },
-
-            Err(e) => {
-                panic!("{:?}", e)
-            }
-        }
-
-        // Decode and upload next video frame at the video's native FPS
-
-        for (tex_index, decoder, accum) in video_decoders.iter_mut() {
-            *accum += dt as f64;
-            while *accum >= decoder.frame_interval() {
-                *accum -= decoder.frame_interval();
-                let (vw, vh) = decoder.dimensions();
-                match decoder.next_frame() {
-                    Some(rgba_data) => {
-                        // Update the specific texture slot associated with this video
-                        render_state.update_video_frame(rgba_data, vw, vh, *tex_index);
-                    }
-                    None => {
-                        // Loop video
-                        if let Err(e) = decoder.seek(0.0) {
-                            log::warn!("Video {} seek failed: {}", tex_index, e);
-                        }
-                    }
-                }
-            }
-        }
+        update(&mut render_state, &mut video_decoders, dt);
 
         // Render frame
         render_state.render_frame()?;

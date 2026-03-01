@@ -6,6 +6,7 @@ use crate::backend::x11::X11SurfaceProvider;
 use crate::backend::{headless::HeadlessSurfaceProvider, wayland::WaylandBackend};
 
 use anyhow::{Result, anyhow};
+use glam::Vec2;
 use kroma_shared::traits::SurfaceProvider;
 use log::{info, warn};
 
@@ -30,6 +31,14 @@ impl Backend {
             Backend::Wayland { backend, .. } => backend.surface_mut(),
             Backend::X11 { surface, .. } => Some(surface),
             Backend::Headless { surface, .. } => Some(surface),
+        }
+    }
+
+    pub fn cursor_pos(&self) -> Option<Vec2> {
+        match self {
+            Backend::Wayland { backend, .. } => backend.cursor_pos(),
+            Backend::X11 { .. } => None,
+            Backend::Headless { .. } => None,
         }
     }
 

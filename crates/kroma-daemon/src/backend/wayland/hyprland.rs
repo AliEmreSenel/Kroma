@@ -4,8 +4,9 @@
 //! that affect rendering behaviour — fullscreen windows, workspace changes,
 //! active monitor changes, etc.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
 use std::time::Duration;
 
@@ -148,14 +149,38 @@ fn parse_event(line: &str) -> Option<HyprlandEvent> {
     }
 }
 
+/// Start polling Hyprland cursor position on a background thread.
+///
+/// Returns shared cursor state and a handle for the polling thread.
+pub fn start_cursor_tracker() -> Result<(Arc<Mutex<Vec2>>, std::thread::JoinHandle<()>)> {
+    let cursor_pos = Arc::new(Mutex::new(Vec2::new(0.5, 0.5)));
+    let cursor_clone = Arc::clone(&cursor_pos);
+
+    let handle = std::thread::Builder::new()
+        .name("kroma-hypr-cursor".into())
+        .spawn(move || {
+            loop {
+                match query_hyprland_cursor() {
+                    Ok(pos) => {
+                        *cursor_clone.lock().unwrap_or_else(|e| e.into_inner()) = pos;
+                    }
+                    Err(_) => {
+                        debug!("Could not query Hyprland cursor position");
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(33));
+            }
+        })
+        .context("Failed to spawn Hyprland cursor tracker thread")?;
+
+    Ok((cursor_pos, handle))
+}
+
 /// Query cursor position via Hyprland IPC socket directly (no process spawning).
 ///
 /// Connects to `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`,
 /// sends `cursorpos`, reads the response.
 pub fn query_hyprland_cursor() -> anyhow::Result<Vec2> {
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-
     let instance_sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
         .map_err(|_| anyhow::anyhow!("HYPRLAND_INSTANCE_SIGNATURE not set"))?;
 
