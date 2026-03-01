@@ -15,8 +15,9 @@ mod video;
 use std::{
     env, fs,
     hash::{DefaultHasher, Hash, Hasher},
-    sync::mpsc,
-    time::Instant,
+    sync::{Arc, Mutex, mpsc},
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -137,9 +138,33 @@ fn update_video(
     dt: f32,
 ) {
     for (tex_index, decoder, accum) in video_decoders.iter_mut() {
+        let frame_interval = {
+            let raw = decoder.frame_interval();
+            if raw.is_finite() && raw > 0.0 {
+                raw
+            } else {
+                1.0 / 30.0
+            }
+        };
+
+        if dt == 0.0 {
+            let (vw, vh) = decoder.dimensions();
+            match decoder.next_frame() {
+                Some(rgba_data) => {
+                    render_state.update_video_frame(rgba_data, vw, vh, *tex_index);
+                }
+                None => {
+                    if let Err(e) = decoder.seek(0.0) {
+                        log::warn!("Video {} seek failed: {}", tex_index, e);
+                    }
+                }
+            }
+            continue;
+        }
+
         *accum += dt as f64;
-        while *accum >= decoder.frame_interval() || dt == 0.0 {
-            *accum -= decoder.frame_interval();
+        while *accum >= frame_interval {
+            *accum -= frame_interval;
             let (vw, vh) = decoder.dimensions();
             match decoder.next_frame() {
                 Some(rgba_data) => {
@@ -161,32 +186,34 @@ fn update(
     render_state: &mut RenderState,
     video_decoders: &mut Vec<(usize, DefaultVideoDecoder, f64)>,
     dt: f32,
-) {
+) -> Result<()> {
     match render_state.update_slideshow(dt as f64) {
         Ok(res) => match res {
             SlideshowEvent::SwappedToVideo { source } => {
-                *video_decoders = vec![(
-                    0,
-                    video_decoder_for_source(
-                        render_state.active_package.as_ref().unwrap(),
-                        &source,
-                    )
-                    .unwrap(),
-                    0.0,
-                )];
+                if let Some(pkg) = render_state.active_package.as_ref() {
+                    if let Some(decoder) = video_decoder_for_source(pkg, &source) {
+                        *video_decoders = vec![(0, decoder, 0.0)];
+                    } else {
+                        log::warn!("Slideshow swap requested video '{}' but decoder init failed", source);
+                        video_decoders.clear();
+                    }
+                } else {
+                    log::warn!("Slideshow swap requested video '{}' but no active package", source);
+                    video_decoders.clear();
+                }
             }
             SlideshowEvent::SwappedToImage => {
-                *video_decoders = vec![];
+                video_decoders.clear();
             }
-            SlideshowEvent::None => (),
+            SlideshowEvent::None => {}
         },
-
         Err(e) => {
-            panic!("{:?}", e)
+            log::warn!("Slideshow update failed: {}", e);
         }
     }
 
     update_video(render_state, video_decoders, dt);
+    Ok(())
 }
 
 fn load_shade(
@@ -256,129 +283,165 @@ fn load_shade(
         }
     }
 
-    update(render_state, &mut video_decoders, 0.0);
+    update(render_state, &mut video_decoders, 0.0)?;
 
     Ok(video_decoders)
 }
 
-fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+type VideoDecoders = Vec<(usize, DefaultVideoDecoder, f64)>;
 
-    info!("Kroma Daemon v{}", env!("CARGO_PKG_VERSION"));
-    info!("Initializing...");
+enum LoopControl {
+    Continue,
+    Shutdown,
+}
 
-    // ---------------------------------------------------------------
-    // 0. Load daemon configuration
-    // ---------------------------------------------------------------
-    let daemon_config = config::DaemonConfig::load()?;
-    info!(
-        "Target FPS: {}, GPU power: {:?}",
-        daemon_config.target_fps, daemon_config.gpu_power
-    );
+struct Daemon {
+    config: config::DaemonConfig,
+    backend: Backend,
+    data_provider: SystemDataProvider,
+    audio_provider: CpalAudioProvider,
+    render_state: RenderState,
+    cmd_rx: mpsc::Receiver<ipc_server::InternalCommand>,
+    ipc_status: Arc<Mutex<ipc_server::DaemonStatus>>,
+    preview_stream: Arc<Mutex<ipc_server::PreviewStreamState>>,
+    _ipc_handle: JoinHandle<()>,
+    current_shade_path: Option<String>,
+    video_decoders: VideoDecoders,
+    start_time: Instant,
+    frame: u32,
+    paused: bool,
+    active_workspace_id: i64,
+    last_frame_time: Instant,
+    frame_budget: Duration,
+    fps_counter: u32,
+    fps_timer: Instant,
+}
 
-    let session_type = env::var("XDG_SESSION_TYPE").unwrap_or_default();
-    let desktop_env = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+impl Daemon {
+    fn new() -> Result<Self> {
+        let config = config::DaemonConfig::load()?;
+        info!(
+            "Target FPS: {}, GPU power: {:?}",
+            config.target_fps, config.gpu_power
+        );
 
-    let mut backend = Backend::new(&session_type, &desktop_env)?;
-    let data_provider = SystemDataProvider::new()?;
-    let mut audio_provider = CpalAudioProvider::new();
+        let session_type = env::var("XDG_SESSION_TYPE").unwrap_or_default();
+        let desktop_env = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
 
-    // ---------------------------------------------------------------
-    // 3. Start the IPC server (async, background)
-    // ---------------------------------------------------------------
-    let (cmd_tx, cmd_rx) = mpsc::channel();
-    let (_ipc_handle, ipc_status, preview_stream) = ipc_server::start(cmd_tx)?;
-    info!("IPC server listening");
+        let backend = Backend::new(&session_type, &desktop_env)?;
+        let data_provider = SystemDataProvider::new()?;
+        let audio_provider = CpalAudioProvider::new();
+        let mut render_state = RenderState::new()?;
 
-    // ---------------------------------------------------------------
-    // 4. Initialize the renderer
-    // ---------------------------------------------------------------
-    let mut render_state = RenderState::new()?;
+        let (surf_w, surf_h) = {
+            let surface = backend.surface().context("A surface must exist")?;
+            info!("Initializing GPU with surface...");
 
-    let surface = backend.surface().context("A surface must exist")?;
-    info!("Initializing GPU with surface...");
+            if let Err(e) = render_state.init_gpu_with_surface(surface) {
+                log::error!("GPU init with surface failed: {}", e);
+            } else {
+                info!("GPU initialized with surface");
+            }
 
-    if let Err(e) = render_state.init_gpu_with_surface(surface) {
-        log::error!("GPU init with surface failed: {}", e);
-    } else {
-        info!("GPU initialized with surface");
+            let primary_monitor = surface
+                .list_monitors()?
+                .first()
+                .cloned()
+                .context("At least one monitor should exist")?;
+
+            surface.size(primary_monitor.id)?
+        };
+
+        render_state.uniforms.u_resolution = [surf_w as f32, surf_h as f32];
+
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (ipc_handle, ipc_status, preview_stream) = ipc_server::start(cmd_tx)?;
+        info!("IPC server listening");
+
+        let mut daemon = Self {
+            frame_budget: config.frame_budget(),
+            config,
+            backend,
+            data_provider,
+            audio_provider,
+            render_state,
+            cmd_rx,
+            ipc_status,
+            preview_stream,
+            _ipc_handle: ipc_handle,
+            current_shade_path: None,
+            video_decoders: vec![],
+            start_time: Instant::now(),
+            frame: 0,
+            paused: false,
+            active_workspace_id: 1,
+            last_frame_time: Instant::now(),
+            fps_counter: 0,
+            fps_timer: Instant::now(),
+        };
+
+        if let Some(shade_path) = daemon.config.current_shade.clone() {
+            info!("Loading initial shade: {}", shade_path);
+            daemon.load_shade(&shade_path, None)?;
+        }
+
+        info!(
+            "Daemon initialized ({}x{} @ {} FPS target)",
+            surf_w, surf_h, daemon.config.target_fps
+        );
+
+        Ok(daemon)
     }
 
-    let (surf_w, surf_h) = surface.size(
-        surface
-            .list_monitors()?
-            .first()
-            .expect("At least one monitor should exist")
-            .id,
-    )?;
+    fn run(mut self) -> Result<()> {
+        info!("Entering render loop");
 
-    // Set resolution
-    render_state.uniforms.u_resolution = [surf_w as f32, surf_h as f32];
+        loop {
+            self.process_backend_events();
 
-    // Load initial shade if configured
-    let mut current_shade_path: Option<String> = None;
-    let mut video_decoders: Vec<(usize, DefaultVideoDecoder, f64)> = vec![];
-    if let Some(ref shade_path) = daemon_config.current_shade {
-        info!("Loading initial shade: {}", shade_path);
-        video_decoders = load_shade(shade_path, &mut render_state, &mut audio_provider, None)?;
+            if matches!(self.process_ipc_commands()?, LoopControl::Shutdown) {
+                self.shutdown()?;
+                return Ok(());
+            }
+
+            if self.paused {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+
+            self.render_tick()?;
+        }
     }
 
-    // ---------------------------------------------------------------
-    // 5. Main loop
-    // ---------------------------------------------------------------
-    info!(
-        "Entering render loop ({}x{} @ {} FPS target)",
-        surf_w, surf_h, daemon_config.target_fps
-    );
-    let start_time = Instant::now();
-    let mut frame: u32 = 0;
-    let mut paused = false;
-    let mut active_workspace_id: i64 = 1;
-    let mut last_frame_time = Instant::now();
-    let frame_budget = daemon_config.frame_budget();
-
-    // FPS tracking
-    let mut fps_counter: u32 = 0;
-    let mut fps_timer = Instant::now();
-    let mut current_fps: f32;
-
-    loop {
-        // Process Hyprland compositor events (non-blocking)
+    fn process_backend_events(&mut self) {
         if let Backend::Wayland {
             backend: WaylandBackend::Hyprland { rx: hypr_rx, .. },
             ..
-        } = &mut backend
+        } = &mut self.backend
         {
             while let Ok(event) = hypr_rx.try_recv() {
                 match event {
-                    HyprlandEvent::Fullscreen { fullscreen }
-                        if daemon_config.pause_on_fullscreen =>
-                    {
+                    HyprlandEvent::Fullscreen { fullscreen } if self.config.pause_on_fullscreen => {
                         if fullscreen {
-                            paused = true;
+                            self.paused = true;
                             info!("Fullscreen detected — pausing render");
                         } else {
-                            paused = false;
+                            self.paused = false;
                             info!("Fullscreen exited — resuming render");
                         }
                     }
                     HyprlandEvent::WorkspaceChanged { id } => {
-                        info!("Workspace changed to {} (was {})", id, active_workspace_id);
-                        active_workspace_id = id;
-                        // Pause when workspace changes away (wallpaper is always on all workspaces,
-                        // but we can save GPU cycles when the user isn't looking at it).
-                        if daemon_config.pause_on_inactive {
-                            // On Hyprland the wallpaper layer is visible on every workspace,
-                            // so we interpret "inactive" as special workspaces (negative IDs)
-                            // which are overlaid and hide the desktop.
+                        info!("Workspace changed to {} (was {})", id, self.active_workspace_id);
+                        self.active_workspace_id = id;
+
+                        if self.config.pause_on_inactive {
                             if id < 0 {
-                                if !paused {
-                                    paused = true;
+                                if !self.paused {
+                                    self.paused = true;
                                     info!("Special workspace active — pausing render");
                                 }
-                            } else if paused {
-                                // Only resume if fullscreen doesn't keep us paused
-                                paused = false;
+                            } else if self.paused {
+                                self.paused = false;
                                 info!("Normal workspace active — resuming render");
                             }
                         }
@@ -392,179 +455,200 @@ fn main() -> Result<()> {
                     _ => {}
                 }
             }
-        };
+        }
+    }
 
-        // Process IPC commands (non-blocking)
-        while let Ok(internal) = cmd_rx.try_recv() {
+    fn process_ipc_commands(&mut self) -> Result<LoopControl> {
+        while let Ok(internal) = self.cmd_rx.try_recv() {
             let ipc_server::InternalCommand {
                 command,
                 response_tx,
             } = internal;
 
-            match command {
-                DaemonCommand::Pause => {
-                    paused = true;
-                    info!("Rendering paused");
+            if matches!(self.handle_command(command, response_tx)?, LoopControl::Shutdown) {
+                return Ok(LoopControl::Shutdown);
+            }
+        }
+
+        Ok(LoopControl::Continue)
+    }
+
+    fn handle_command(
+        &mut self,
+        command: DaemonCommand,
+        response_tx: Option<mpsc::Sender<DaemonEvent>>,
+    ) -> Result<LoopControl> {
+        match command {
+            DaemonCommand::Pause => {
+                self.paused = true;
+                info!("Rendering paused");
+            }
+            DaemonCommand::Resume => {
+                self.paused = false;
+                info!("Rendering resumed");
+            }
+            DaemonCommand::Shutdown => {
+                info!("Shutdown requested");
+                return Ok(LoopControl::Shutdown);
+            }
+            DaemonCommand::LoadShade { path } => {
+                info!("Loading shade package: {}", path);
+                self.load_shade(&path, response_tx)?;
+            }
+            DaemonCommand::Reload => {
+                if let Some(path) = self.current_shade_path.clone() {
+                    info!("Reloading shade: {}", path);
+                    self.load_shade(&path, response_tx)?;
+                } else {
+                    log::warn!("No shade loaded to reload");
+                    maybe_send(
+                        response_tx,
+                        DaemonEvent::Error {
+                            message: "No shade loaded to reload".into(),
+                        },
+                    )?;
                 }
-                DaemonCommand::Resume => {
-                    paused = false;
-                    info!("Rendering resumed");
-                }
-                DaemonCommand::Shutdown => {
-                    info!("Shutdown requested — cleaning up");
-                    let sock = kroma_shared::ipc::socket_path();
-                    if sock.exists() {
-                        let _ = fs::remove_file(&sock);
+            }
+            DaemonCommand::SetUniform { name, value } => {
+                log::debug!("Setting uniform {} = {:?}", name, value);
+                self.render_state.set_custom_uniform(&name, &value);
+            }
+            DaemonCommand::StatusQuery => {
+                // Handled inline in ipc_server, shouldn't reach here
+            }
+            DaemonCommand::QuerySystemInfo => {
+                // Handled inline in ipc_server, shouldn't reach here
+            }
+            DaemonCommand::RequestPreviewFrame { width, height } => {
+                match self.render_state.capture_preview_frame(width, height) {
+                    Ok(jpeg_bytes) => {
+                        maybe_send(
+                            response_tx,
+                            DaemonEvent::PreviewFrame {
+                                jpeg: jpeg_bytes,
+                                width,
+                                height,
+                            },
+                        )?;
                     }
-                    return Ok(());
-                }
-                DaemonCommand::LoadShade { path } => {
-                    info!("Loading shade package: {}", path);
-                    video_decoders =
-                        load_shade(&path, &mut render_state, &mut audio_provider, response_tx)?;
-                }
-                DaemonCommand::Reload => {
-                    if let Some(ref path) = current_shade_path {
-                        info!("Reloading shade: {}", path);
-                        video_decoders =
-                            load_shade(path, &mut render_state, &mut audio_provider, response_tx)?;
-                    } else {
-                        log::warn!("No shade loaded to reload");
+                    Err(e) => {
+                        log::warn!("Preview capture failed: {}", e);
                         maybe_send(
                             response_tx,
                             DaemonEvent::Error {
-                                message: "No shade loaded to reload".into(),
+                                message: format!("Preview capture failed: {}", e),
                             },
                         )?;
                     }
                 }
-                DaemonCommand::SetUniform { name, value } => {
-                    log::debug!("Setting uniform {} = {:?}", name, value);
-                    render_state.set_custom_uniform(&name, &value);
+            }
+            DaemonCommand::StartPreviewStream { .. } | DaemonCommand::StopPreviewStream => {
+                // Handled inline in ipc_server
+            }
+            DaemonCommand::LiveReload { glsl_source } => {
+                log::info!("Live reload: {} bytes of GLSL", glsl_source.len());
+                let result =
+                    kroma_shared::translator::translate(&glsl_source, "live-preview", "Kroma Editor");
+                let warnings: Vec<String> = result.warnings.clone();
+                for w in &warnings {
+                    log::warn!("Translation warning: {}", w);
                 }
-                DaemonCommand::StatusQuery => {
-                    // Handled inline in ipc_server, shouldn't reach here
-                }
-                DaemonCommand::QuerySystemInfo => {
-                    // Handled inline in ipc_server, shouldn't reach here
-                }
-                DaemonCommand::RequestPreviewFrame { width, height } => {
-                    match render_state.capture_preview_frame(width, height) {
-                        Ok(jpeg_bytes) => {
-                            maybe_send(
-                                response_tx,
-                                DaemonEvent::PreviewFrame {
-                                    jpeg: jpeg_bytes,
-                                    width,
-                                    height,
-                                },
-                            )?;
-                        }
-                        Err(e) => {
-                            log::warn!("Preview capture failed: {}", e);
-                            maybe_send(
-                                response_tx,
-                                DaemonEvent::Error {
-                                    message: format!("Preview capture failed: {}", e),
-                                },
-                            )?;
-                        }
+
+                match self.render_state.load_glsl_source(&result.shader_source) {
+                    Ok(()) => {
+                        self.current_shade_path = Some("live-preview".to_string());
+                        maybe_send(
+                            response_tx,
+                            DaemonEvent::CompileResult {
+                                success: true,
+                                errors: vec![],
+                                warnings,
+                            },
+                        )?;
                     }
-                }
-                DaemonCommand::StartPreviewStream { .. } | DaemonCommand::StopPreviewStream => {
-                    // Handled inline in ipc_server
-                }
-                DaemonCommand::LiveReload { glsl_source } => {
-                    log::info!("Live reload: {} bytes of GLSL", glsl_source.len());
-                    // Translate the raw Shadertoy GLSL with our translator first
-                    let result = kroma_shared::translator::translate(
-                        &glsl_source,
-                        "live-preview",
-                        "Kroma Editor",
-                    );
-                    let warnings: Vec<String> = result.warnings.clone();
-                    for w in &warnings {
-                        log::warn!("Translation warning: {}", w);
-                    }
-                    match render_state.load_glsl_source(&result.shader_source) {
-                        Ok(()) => {
-                            current_shade_path = Some("live-preview".to_string());
-                            maybe_send(
-                                response_tx,
-                                DaemonEvent::CompileResult {
-                                    success: true,
-                                    errors: vec![],
-                                    warnings,
-                                },
-                            )?;
-                        }
-                        Err(e) => {
-                            log::error!("Live reload failed: {}", e);
-                            // Try to extract line numbers from error message
-                            let compile_error = CompileError::from(e.to_string());
-                            maybe_send(
-                                response_tx,
-                                DaemonEvent::CompileResult {
-                                    success: false,
-                                    errors: vec![compile_error],
-                                    warnings,
-                                },
-                            )?;
-                        }
+                    Err(e) => {
+                        log::error!("Live reload failed: {}", e);
+                        let compile_error = CompileError::from(e.to_string());
+                        maybe_send(
+                            response_tx,
+                            DaemonEvent::CompileResult {
+                                success: false,
+                                errors: vec![compile_error],
+                                warnings,
+                            },
+                        )?;
                     }
                 }
             }
         }
 
-        if paused {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            continue;
+        Ok(LoopControl::Continue)
+    }
+
+    fn load_shade(&mut self, path: &str, tx: Option<mpsc::Sender<DaemonEvent>>) -> Result<()> {
+        self.video_decoders = load_shade(
+            path,
+            &mut self.render_state,
+            &mut self.audio_provider,
+            tx,
+        )?;
+        self.current_shade_path = Some(path.to_string());
+        Ok(())
+    }
+
+    fn render_tick(&mut self) -> Result<()> {
+        let frame_start = Instant::now();
+
+        self.backend
+            .surface_mut()
+            .context("There must be a surface")?
+            .dispatch()?;
+
+        let dt = frame_start.duration_since(self.last_frame_time).as_secs_f32();
+        self.last_frame_time = frame_start;
+
+        self.render_state.uniforms.u_time = self.start_time.elapsed().as_secs_f32();
+        self.render_state.uniforms.u_delta_time = dt;
+        self.render_state.uniforms.u_frame = self.frame;
+
+        let stats = self.data_provider.get_system_stats();
+        self.render_state.uniforms.apply_system_stats(&stats);
+        let cursor = self
+            .backend
+            .cursor_pos()
+            .unwrap_or_else(|| self.data_provider.get_cursor_pos());
+        self.render_state.uniforms.apply_cursor(cursor);
+
+        let audio_spectrum = self.audio_provider.get_spectrum();
+        let audio_level = self.audio_provider.get_level();
+        self.render_state.uniforms.u_audio_level = audio_level;
+        self.render_state.update_audio_spectrum(&audio_spectrum);
+
+        update(&mut self.render_state, &mut self.video_decoders, dt)?;
+
+        self.render_state.render_frame()?;
+        self.frame = self.frame.wrapping_add(1);
+
+        self.maybe_stream_preview_frame();
+        self.update_fps_and_status();
+
+        let elapsed = frame_start.elapsed();
+        if elapsed < self.frame_budget {
+            std::thread::sleep(self.frame_budget - elapsed);
         }
 
-        backend
-            .surface_mut()
-            .expect("There must be a surface")
-            .dispatch()?;
-        // Update timing uniforms
-        let now = Instant::now();
-        let dt = now.duration_since(last_frame_time).as_secs_f32();
-        last_frame_time = now;
+        Ok(())
+    }
 
-        render_state.uniforms.u_time = start_time.elapsed().as_secs_f32();
-        render_state.uniforms.u_delta_time = dt;
-        render_state.uniforms.u_frame = frame;
-
-        // Gather system data
-        let stats = data_provider.get_system_stats();
-        render_state.uniforms.apply_system_stats(&stats);
-        let cursor = backend
-            .cursor_pos()
-            .unwrap_or_else(|| data_provider.get_cursor_pos());
-        render_state.uniforms.apply_cursor(cursor);
-
-        // Gather audio data
-        let audio_spectrum = audio_provider.get_spectrum();
-        let audio_level = audio_provider.get_level();
-        render_state.uniforms.u_audio_level = audio_level;
-
-        // Upload audio spectrum to GPU texture
-        render_state.update_audio_spectrum(&audio_spectrum);
-
-        update(&mut render_state, &mut video_decoders, dt);
-
-        // Render frame
-        render_state.render_frame()?;
-        frame = frame.wrapping_add(1);
-
-        // Send preview frame if streaming is active
-        if let Ok(mut ps) = preview_stream.try_lock()
+    fn maybe_stream_preview_frame(&mut self) {
+        if let Ok(mut ps) = self.preview_stream.try_lock()
             && ps.active
         {
-            let interval = std::time::Duration::from_secs_f64(1.0 / ps.target_fps.max(1) as f64);
+            let interval = Duration::from_secs_f64(1.0 / ps.target_fps.max(1) as f64);
             if ps.last_frame_time.elapsed() >= interval {
                 let pw = ps.width;
                 let ph = ps.height;
-                match render_state.capture_preview_frame(pw, ph) {
+                match self.render_state.capture_preview_frame(pw, ph) {
                     Ok(jpeg_bytes) => {
                         let event = DaemonEvent::PreviewFrame {
                             jpeg: jpeg_bytes,
@@ -576,13 +660,12 @@ fn main() -> Result<()> {
                         {
                             use std::io::Write;
                             if writeln!(w, "{}", json).is_err() || w.flush().is_err() {
-                                // Writer broken — stop streaming
                                 ps.active = false;
                                 ps.writer = None;
                                 log::info!("Preview stream client disconnected");
                             }
                         }
-                        ps.last_frame_time = std::time::Instant::now();
+                        ps.last_frame_time = Instant::now();
                     }
                     Err(e) => {
                         log::warn!("Preview capture error: {}", e);
@@ -590,45 +673,75 @@ fn main() -> Result<()> {
                 }
             }
         }
+    }
 
-        // FPS tracking
-        fps_counter += 1;
-        if fps_timer.elapsed().as_secs_f32() >= 1.0 {
-            current_fps = fps_counter as f32 / fps_timer.elapsed().as_secs_f32();
-            let log_interval = daemon_config.target_fps.max(1) * 5;
-            if frame % log_interval < daemon_config.target_fps.max(1) {
+    fn update_fps_and_status(&mut self) {
+        self.fps_counter += 1;
+        let elapsed = self.fps_timer.elapsed().as_secs_f32();
+
+        if elapsed >= 1.0 {
+            let current_fps = self.fps_counter as f32 / elapsed;
+            let log_interval = self.config.target_fps.max(1) * 5;
+            if self.frame % log_interval < self.config.target_fps.max(1) {
                 info!(
                     "FPS: {:.1} | time: {:.1}s | shader: {}",
                     current_fps,
-                    start_time.elapsed().as_secs_f32(),
-                    current_shade_path.as_deref().unwrap_or("default")
+                    self.start_time.elapsed().as_secs_f32(),
+                    self.current_shade_path.as_deref().unwrap_or("default")
                 );
             }
-            fps_counter = 0;
-            fps_timer = std::time::Instant::now();
+            self.fps_counter = 0;
+            self.fps_timer = Instant::now();
 
-            // Update shared IPC status
-            if let Ok(mut status) = ipc_status.lock() {
+            if let Ok(mut status) = self.ipc_status.lock() {
                 status.fps = current_fps;
-                status.paused = paused;
-                status.loaded_shade = current_shade_path.clone();
-                status.cpu_usage = render_state.uniforms.u_cpu * 100.0;
-                status.ram_usage = render_state.uniforms.u_ram * 100.0;
-                status.battery = if render_state.uniforms.u_battery >= 0.0 {
-                    Some(render_state.uniforms.u_battery * 100.0)
+                status.paused = self.paused;
+                status.loaded_shade = self.current_shade_path.clone();
+                status.cpu_usage = self.render_state.uniforms.u_cpu * 100.0;
+                status.ram_usage = self.render_state.uniforms.u_ram * 100.0;
+                status.battery = if self.render_state.uniforms.u_battery >= 0.0 {
+                    Some(self.render_state.uniforms.u_battery * 100.0)
                 } else {
                     None
                 };
-                status.audio_level = render_state.uniforms.u_audio_level;
-                status.cursor_x = render_state.uniforms.u_mouse[0];
-                status.cursor_y = render_state.uniforms.u_mouse[1];
+                status.audio_level = self.render_state.uniforms.u_audio_level;
+                status.cursor_x = self.render_state.uniforms.u_mouse[0];
+                status.cursor_y = self.render_state.uniforms.u_mouse[1];
             }
         }
+    }
 
-        // Frame rate limiting
-        let elapsed = now.elapsed();
-        if elapsed < frame_budget {
-            std::thread::sleep(frame_budget - elapsed);
+    fn shutdown(&mut self) -> Result<()> {
+        self.audio_provider.close();
+        self.cleanup_socket()?;
+        info!("Daemon shutdown complete");
+        Ok(())
+    }
+
+    fn cleanup_socket(&self) -> Result<()> {
+        let sock = kroma_shared::ipc::socket_path();
+        if sock.exists() {
+            fs::remove_file(&sock)
+                .with_context(|| format!("Failed to remove IPC socket: {}", sock.display()))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        if let Err(e) = self.cleanup_socket() {
+            log::debug!("IPC socket cleanup skipped: {}", e);
         }
     }
+}
+
+fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    info!("Kroma Daemon v{}", env!("CARGO_PKG_VERSION"));
+    info!("Initializing...");
+
+    let daemon = Daemon::new()?;
+    daemon.run()
 }
