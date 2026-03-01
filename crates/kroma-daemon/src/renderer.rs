@@ -1377,7 +1377,7 @@ impl RenderState {
             }
         } else {
             false
-        };
+        } || dt == 0.0;
 
         if let (true, Some(slideshow)) = (should_advance, &self.slideshow) {
             let idx = slideshow.current;

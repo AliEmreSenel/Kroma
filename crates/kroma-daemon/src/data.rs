@@ -1,25 +1,21 @@
 //! System data provider implementation.
 //!
 //! Implements [`kroma_shared::traits::DataProvider`] using `sysinfo` for
-//! system stats and Hyprland IPC for cursor position.
+//! system stats.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
 use glam::Vec2;
-use log::debug;
 use sysinfo::System;
 
 use kroma_shared::traits::DataProvider;
 use kroma_shared::types::SystemStats;
 
-use crate::backend::wayland::hyprland::query_hyprland_cursor;
-
 /// Data provider that gathers system stats and cursor position.
 pub struct SystemDataProvider {
     sys: Arc<Mutex<System>>,
-    cursor_pos: Arc<Mutex<Vec2>>,
 }
 
 impl SystemDataProvider {
@@ -57,33 +53,7 @@ impl SystemDataProvider {
             })
             .context("Failed to spawn sysinfo thread")?;
 
-        // Spawn a background thread that queries cursor position.
-        // Uses hyprctl on Hyprland, or /dev/input fallback.
-        let cursor_pos = Arc::new(Mutex::new(Vec2::new(0.5, 0.5)));
-        let cursor_clone = Arc::clone(&cursor_pos);
-        let is_hyprland = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok();
-        std::thread::Builder::new()
-            .name("kroma-cursor".into())
-            .spawn(move || {
-                if !is_hyprland {
-                    debug!("Not running under Hyprland — cursor tracking disabled");
-                    return;
-                }
-                loop {
-                    match query_hyprland_cursor() {
-                        Ok(pos) => {
-                            *cursor_clone.lock().unwrap_or_else(|e| e.into_inner()) = pos;
-                        }
-                        Err(_) => {
-                            debug!("Could not query Hyprland cursor position");
-                        }
-                    }
-                    std::thread::sleep(Duration::from_millis(33)); // ~30 Hz
-                }
-            })
-            .context("Failed to spawn cursor thread")?;
-
-        Ok(Self { sys, cursor_pos })
+        Ok(Self { sys })
     }
 }
 
@@ -105,7 +75,7 @@ impl DataProvider for SystemDataProvider {
     }
 
     fn get_cursor_pos(&self) -> Vec2 {
-        *self.cursor_pos.lock().unwrap_or_else(|e| e.into_inner())
+        Vec2::new(0.5, 0.5)
     }
 }
 

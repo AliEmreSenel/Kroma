@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result};
+use glam::Vec2;
 use log::{info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle};
 use smithay_client_toolkit::{
@@ -34,6 +35,9 @@ pub enum WaylandBackend {
     Hyprland {
         surface: WaylandSurfaceProvider,
         _handle: JoinHandle<()>,
+        _cursor_handle: JoinHandle<()>,
+        cursor_pos: Arc<Mutex<Vec2>>,
+        cursor_height: f32,
         rx: mpsc::Receiver<HyprlandEvent>,
     },
     Generic {
@@ -56,6 +60,21 @@ impl WaylandBackend {
         }
     }
 
+    pub fn cursor_pos(&self) -> Option<Vec2> {
+        match self {
+            WaylandBackend::Hyprland {
+                cursor_pos,
+                cursor_height,
+                ..
+            } => {
+                let mut pos = *cursor_pos.lock().unwrap_or_else(|e| e.into_inner());
+                pos.y = *cursor_height - pos.y;
+                Some(pos)
+            }
+            WaylandBackend::Generic { .. } => None,
+        }
+    }
+
     pub fn new(_session_type: &str, desktop_env: &str) -> Result<Self> {
         info!("Detected Wayland session — using layer shell backend");
         let backend = match desktop_env {
@@ -64,12 +83,21 @@ impl WaylandBackend {
                 surface_provider
                     .connect()
                     .and_then(|_| surface_provider.create_all_surfaces())?;
+                let cursor_height = surface_provider
+                    .list_monitors()?
+                    .first()
+                    .map(|m| m.height as f32)
+                    .unwrap_or(1080.0);
 
                 let (hypr_tx, hypr_rx) = mpsc::channel();
                 let handle = hyprland::start_listener(hypr_tx)?;
+                let (cursor_pos, cursor_handle) = hyprland::start_cursor_tracker()?;
                 WaylandBackend::Hyprland {
                     surface: surface_provider,
                     _handle: handle,
+                    _cursor_handle: cursor_handle,
+                    cursor_pos,
+                    cursor_height,
                     rx: hypr_rx,
                 }
             }
