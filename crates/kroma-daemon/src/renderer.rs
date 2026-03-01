@@ -16,80 +16,14 @@ use wgpu::wgt::PollType;
 
 use crate::textures::{self, TextureSource, TextureUpdate};
 
-/// Default fullscreen triangle vertex shader (WGSL).
-///
-/// Draws a full-screen triangle with UVs — the fragment shader does the rest.
-const FULLSCREEN_VERT_WGSL: &str = r#"
-struct VertexOutput {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
+/// Fullscreen triangle vertex shader.
+const FULLSCREEN_VERT_WGSL: &str = include_str!("shaders/fullscreen.vert.wgsl");
 
-@vertex
-fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
-    // Full-screen triangle trick: 3 vertices, no buffer needed.
-    var out: VertexOutput;
-    let x = f32(i32(vertex_index) / 2) * 4.0 - 1.0;
-    let y = f32(i32(vertex_index) % 2) * 4.0 - 1.0;
-    out.position = vec4<f32>(x, y, 0.0, 1.0);
-    out.uv = vec2<f32>((x + 1.0) / 2.0, 1.0 - (y + 1.0) / 2.0);
-    return out;
-}
-"#;
+/// Fallback fragment shader when no shade is loaded.
+const FALLBACK_NO_SHADE_FRAG_WGSL: &str = include_str!("shaders/fallback_no_shade.frag.wgsl");
 
-/// Default fragment shader (WGSL) — gradient that reacts to time.
-const DEFAULT_FRAG_WGSL: &str = r#"
-struct Globals {
-    u_time: f32,
-    u_delta_time: f32,
-    u_frame: u32,
-    _pad0: u32,
-    u_resolution: vec2<f32>,
-    _pad1: vec2<f32>,
-    u_mouse: vec4<f32>,
-    u_cpu: f32,
-    u_ram: f32,
-    u_battery: f32,
-    u_audio_level: f32,
-};
-
-@group(0) @binding(0) var<uniform> globals: Globals;
-
-@fragment
-fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    let t = globals.u_time;
-    let r = 0.5 + 0.5 * sin(t + uv.x * 6.2831);
-    let g = 0.5 + 0.5 * sin(t * 1.3 + uv.y * 6.2831);
-    let b = 0.5 + 0.5 * sin(t * 0.7 + (uv.x + uv.y) * 3.1416);
-    return vec4<f32>(r, g, b, 1.0);
-}
-"#;
-
-/// Default fragment shader for image/video mode — just samples texture 0.
-const IMAGE_SAMPLER_FRAG_WGSL: &str = r#"
-struct Globals {
-    u_time: f32,
-    u_delta_time: f32,
-    u_frame: u32,
-    _pad0: u32,
-    u_resolution: vec2<f32>,
-    _pad1: vec2<f32>,
-    u_mouse: vec4<f32>,
-    u_cpu: f32,
-    u_ram: f32,
-    u_battery: f32,
-    u_audio_level: f32,
-};
-
-@group(0) @binding(0) var<uniform> globals: Globals;
-@group(1) @binding(0) var t_texture0: texture_2d<f32>;
-@group(1) @binding(1) var s_texture0: sampler;
-
-@fragment
-fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-    return textureSample(t_texture0, s_texture0, uv);
-}
-"#;
+/// Fragment shader for image/video mode — samples texture 0.
+const IMAGE_SAMPLER_FRAG_WGSL: &str = include_str!("shaders/image_sampler.frag.wgsl");
 
 /// The preferred surface texture format.
 const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
@@ -199,7 +133,7 @@ impl RenderState {
             texture_sources: Vec::new(),
             texture_bind_group: None,
             texture_bind_group_layout: None,
-            current_frag_wgsl: DEFAULT_FRAG_WGSL.to_string(),
+            current_frag_wgsl: FALLBACK_NO_SHADE_FRAG_WGSL.to_string(),
             buffer_passes: Vec::new(),
         })
     }
@@ -382,7 +316,7 @@ impl RenderState {
     ///
     /// If the package has a GLSL shader, translates it to WGSL and builds the
     /// pipeline. If it has image/video assets, loads them as GPU textures.
-    /// If there is no shader (image/video mode), uses a default sampler shader.
+    /// If there is no shader, uses either a texture sampler or a no-shade fallback.
     pub fn load_shade(&mut self, pkg: LiveShadePackage) -> Result<()> {
         let pkg = Arc::new(pkg);
 
@@ -423,21 +357,21 @@ impl RenderState {
                 self.current_frag_wgsl = wgsl_source;
             }
             None => {
-                // No shader — pick a sensible default based on what assets are available.
+                // No shader — pick a fallback based on available assets.
                 // If there are textures (images, video, fonts), sample the first one.
-                // Otherwise, show a gradient.
-                let default_wgsl = if !self.textures.is_empty() {
+                // Otherwise, render the no-shade fallback and wait for a loaded package.
+                let fallback_wgsl = if !self.textures.is_empty() {
                     info!(
-                        "Using default texture sampler shader ({} textures loaded)",
+                        "Using texture sampler fallback ({} textures loaded)",
                         self.textures.len()
                     );
                     IMAGE_SAMPLER_FRAG_WGSL.to_string()
                 } else {
-                    info!("No textures or shader — using default gradient");
-                    DEFAULT_FRAG_WGSL.to_string()
+                    info!("No shader or textures in package — using no-shade fallback");
+                    FALLBACK_NO_SHADE_FRAG_WGSL.to_string()
                 };
-                self.rebuild_pipeline_with_frag(&default_wgsl)?;
-                self.current_frag_wgsl = default_wgsl;
+                self.rebuild_pipeline_with_frag(&fallback_wgsl)?;
+                self.current_frag_wgsl = fallback_wgsl;
             }
         }
 

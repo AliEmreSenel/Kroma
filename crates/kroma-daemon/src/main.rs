@@ -98,7 +98,8 @@ impl Daemon {
         render_state.uniforms.u_resolution = [surf_w as f32, surf_h as f32];
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
-        let (ipc_handle, ipc_status, preview_stream) = ipc_server::start(cmd_tx)?;
+        let (ipc_handle, ipc_status, preview_stream) =
+            ipc_server::start(cmd_tx, config.preview.clone())?;
         info!("IPC server listening");
 
         let mut daemon = Self {
@@ -124,6 +125,8 @@ impl Daemon {
         if let Some(shade_path) = daemon.config.current_shade.clone() {
             info!("Loading initial shade: {}", shade_path);
             daemon.load_shade(&shade_path, None)?;
+        } else {
+            info!("No startup shade configured. Load a .shade file to start.");
         }
 
         info!(
@@ -303,12 +306,15 @@ impl Daemon {
     }
 
     fn load_shade(&mut self, path: &str, tx: Option<mpsc::Sender<DaemonEvent>>) -> Result<()> {
+        let mut loaded_successfully = false;
+
         match LiveShadePackage::load(Path::new(path)) {
             Ok(pkg) => {
                 let pkg_name = pkg.config.meta.name.clone();
                 match self.render_state.load_shade(pkg) {
                     Ok(_) => {
                         info!("Loaded: {}", pkg_name);
+                        loaded_successfully = true;
                         maybe_send(
                             tx,
                             DaemonEvent::CompileResult {
@@ -352,9 +358,19 @@ impl Daemon {
             }
         }
 
-        // Force initial texture update (first frame decode for videos, etc.)
-        self.render_state.update_textures(0.0)?;
-        self.current_shade_path = Some(path.to_string());
+        if loaded_successfully {
+            // Force initial texture update (first frame decode for videos, etc.)
+            self.render_state.update_textures(0.0)?;
+            self.current_shade_path = Some(path.to_string());
+
+            if self.config.runtime.persist_current_shade {
+                self.config.current_shade = Some(path.to_string());
+                if let Err(e) = self.config.save() {
+                    log::warn!("Failed to persist current shade to config: {}", e);
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -444,13 +460,16 @@ impl Daemon {
 
         if elapsed >= 1.0 {
             let current_fps = self.fps_counter as f32 / elapsed;
-            let log_interval = self.config.target_fps.max(1) * 5;
-            if self.frame % log_interval < self.config.target_fps.max(1) {
+            let effective_target_fps = self.config.target_fps.max(1);
+            let log_interval = effective_target_fps * self.config.logging.fps_log_interval_secs.max(1);
+            if self.frame % log_interval < effective_target_fps {
                 info!(
                     "FPS: {:.1} | time: {:.1}s | shader: {}",
                     current_fps,
                     self.start_time.elapsed().as_secs_f32(),
-                    self.current_shade_path.as_deref().unwrap_or("default")
+                    self.current_shade_path
+                        .as_deref()
+                        .unwrap_or("fallback (load a .shade file)")
                 );
             }
             self.fps_counter = 0;
