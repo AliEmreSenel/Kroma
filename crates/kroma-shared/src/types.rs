@@ -338,6 +338,12 @@ pub struct TextureDef {
     /// Number of FFT bands for audio spectrum textures (default: 512).
     #[serde(default)]
     pub fft_bands: Option<usize>,
+    /// Enable filesystem hot-reload for external disk-backed sources.
+    ///
+    /// Applies to `image`, `video`, and slideshow children that resolve from
+    /// disk paths outside the package. Default: false.
+    #[serde(default)]
+    pub hot_reload: bool,
 }
 
 /// A render buffer pass definition (multi-pass rendering).

@@ -1,15 +1,17 @@
 //! Video texture source.
 //!
 //! Wraps an FFmpeg decoder and produces RGBA frames at the video's
-//! native frame rate. Handles accumulator-based timing and looping.
+//! native frame rate. Handles accumulator-based timing, looping, and
+//! hot-reload for external disk-backed files.
 
 use std::path::Path;
 
-use anyhow::Result;
-use log::info;
+use anyhow::{Context, Result};
+use log::{info, warn};
 
 use kroma_shared::traits::VideoDecoder;
 
+use super::hot_reload::SourceHotReload;
 use super::{TextureSource, TextureUpdate};
 
 pub struct FfmpegVideoDecoder {
@@ -211,14 +213,59 @@ pub struct VideoTexture {
     /// Cached last frame data for dimensions.
     last_width: u32,
     last_height: u32,
+    /// Optional filesystem watcher for external hot-reload.
+    hot_reload: SourceHotReload,
 }
 
 impl VideoTexture {
-    /// Open a video file and prepare the decoder.
-    pub fn load(path: &Path, looping: bool) -> Result<Self> {
+    fn load_decoder(path: &Path) -> Result<(FfmpegVideoDecoder, u32, u32)> {
         let decoder = FfmpegVideoDecoder::load(path)?;
         let (w, h) = decoder.dimensions();
-        info!("VideoTexture loaded: {}x{}, looping={}", w, h, looping);
+        Ok((decoder, w, h))
+    }
+
+    fn reload_decoder_from_path(&mut self, path: &Path) -> Result<()> {
+        let (decoder, w, h) = Self::load_decoder(path)
+            .with_context(|| format!("Failed to reload video decoder '{}'", path.display()))?;
+        self.decoder = decoder;
+        self.last_width = w;
+        self.last_height = h;
+        self.accum = 0.0;
+        self.first_frame = true;
+        info!("VideoTexture reloaded from disk: {} ({}x{})", path.display(), w, h);
+        Ok(())
+    }
+
+    /// Open a video file and prepare the decoder.
+    pub fn load(path: &Path, looping: bool, hot_reload: bool) -> Result<Self> {
+        let hot_reload = if hot_reload {
+            match SourceHotReload::from_source(Some(path)) {
+                Ok(hot_reload) => hot_reload,
+                Err(e) => {
+                    warn!("VideoTexture watcher disabled for {}: {}", path.display(), e);
+                    SourceHotReload::disabled()
+                }
+            }
+        } else {
+            SourceHotReload::disabled()
+        };
+
+        let decoder_path = hot_reload.source_path().unwrap_or(path);
+        let (decoder, w, h) = Self::load_decoder(decoder_path)
+            .with_context(|| format!("Failed to load video decoder '{}'", decoder_path.display()))?;
+
+        if let Some(watch_path) = hot_reload.source_path() {
+            info!(
+                "VideoTexture loaded: {}x{}, looping={}, watcher={}",
+                w,
+                h,
+                looping,
+                watch_path.display()
+            );
+        } else {
+            info!("VideoTexture loaded: {}x{}, looping={}", w, h, looping);
+        }
+
         Ok(Self {
             decoder,
             accum: 0.0,
@@ -226,6 +273,7 @@ impl VideoTexture {
             first_frame: true,
             last_width: w,
             last_height: h,
+            hot_reload,
         })
     }
 
@@ -262,6 +310,12 @@ impl VideoTexture {
 
 impl TextureSource for VideoTexture {
     fn update(&mut self, dt: f64) -> Result<TextureUpdate> {
+        if let Some(path) = self.hot_reload.take_changed_path()
+            && let Err(e) = self.reload_decoder_from_path(&path)
+        {
+            warn!("VideoTexture reload failed: {}", e);
+        }
+
         // On first frame, decode immediately regardless of timing.
         if self.first_frame {
             self.first_frame = false;

@@ -100,7 +100,7 @@ speed = { type = "float", min = 0.1, max = 5.0, default = 1.0 }
 color_shift = { type = "bool", default = false }
 
 [textures]
-channel0 = { type = "video", source = "assets/rain_loop.mp4", loop = true }
+channel0 = { type = "video", source = "assets/rain_loop.mp4", loop = true, hot_reload = true }
 ```
 
 ## Configuration

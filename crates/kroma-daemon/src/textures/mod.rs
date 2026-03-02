@@ -7,12 +7,13 @@
 
 pub mod audio;
 pub mod font;
+pub mod hot_reload;
 pub mod image;
 pub mod slideshow;
 pub mod video;
 
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -115,8 +116,14 @@ pub fn create_texture_source(
                 .source
                 .as_ref()
                 .context("Image texture requires a `source` path")?;
-            let bytes = read_asset_or_disk(pkg, source)?;
-            let tex = self::image::ImageTexture::load(&bytes, &def.filter, &def.wrap)?;
+            let (bytes, disk_path) = read_asset_or_disk_with_path(pkg, source)?;
+            let tex = self::image::ImageTexture::load(
+                &bytes,
+                &def.filter,
+                &def.wrap,
+                disk_path.as_deref(),
+                def.hot_reload,
+            )?;
             Ok(Some(Box::new(tex)))
         }
         TextureType::Video => {
@@ -124,7 +131,7 @@ pub fn create_texture_source(
                 .source
                 .as_ref()
                 .context("Video texture requires a `source` path")?;
-            let tex = create_video_source(pkg, source, def.looping)?;
+            let tex = create_video_source(pkg, source, def.looping, def.hot_reload)?;
             Ok(Some(Box::new(tex)))
         }
         TextureType::Font => {
@@ -144,6 +151,7 @@ pub fn create_texture_source(
                 &def.sources,
                 interval,
                 def.shuffle,
+                def.hot_reload,
             )?;
             Ok(Some(Box::new(tex)))
         }
@@ -162,16 +170,26 @@ pub fn create_texture_source(
 
 /// Read an asset from the shade package or from disk.
 pub fn read_asset_or_disk(pkg: &LiveShadePackage, source: &str) -> Result<Vec<u8>> {
+    let (data, _) = read_asset_or_disk_with_path(pkg, source)?;
+    Ok(data)
+}
+
+/// Read an asset from the shade package or from disk, returning the resolved
+/// disk path when the source is external.
+pub fn read_asset_or_disk_with_path(
+    pkg: &LiveShadePackage,
+    source: &str,
+) -> Result<(Vec<u8>, Option<PathBuf>)> {
     // 1. Try the package's embedded assets (ZIP)
     if let Some(data) = pkg.read_asset(source) {
-        return Ok(data);
+        return Ok((data, None));
     }
     // 2. Try loading from disk
     let path = Path::new(source);
     if path.exists() {
         let data = std::fs::read(path)
             .with_context(|| format!("Failed to read asset from disk: {}", source))?;
-        return Ok(data);
+        return Ok((data, Some(path.to_path_buf())));
     }
     anyhow::bail!("Asset '{}' not found in package or on disk", source)
 }
@@ -182,24 +200,26 @@ pub fn create_video_source(
     pkg: &LiveShadePackage,
     source: &str,
     looping: bool,
+    hot_reload: bool,
 ) -> Result<self::video::VideoTexture> {
-    let path = resolve_video_path(pkg, source)?;
-    self::video::VideoTexture::load(&path, looping)
+    let (path, is_external_disk) = resolve_video_path_with_origin(pkg, source)?;
+    self::video::VideoTexture::load(&path, looping, hot_reload && is_external_disk)
 }
 
-/// Resolve a video source to a filesystem path.
-///
-/// If the video is embedded in the package, extracts it to a temp file.
-/// If it's already a path on disk, returns that directly.
-pub fn resolve_video_path(pkg: &LiveShadePackage, source: &str) -> Result<std::path::PathBuf> {
+/// Resolve a video source to a filesystem path, also returning whether the
+/// source is an external disk file (not embedded in the package).
+pub fn resolve_video_path_with_origin(
+    pkg: &LiveShadePackage,
+    source: &str,
+) -> Result<(std::path::PathBuf, bool)> {
     // Try embedded asset first
     if let Some(data) = pkg.read_asset(source) {
-        return extract_video_to_temp(source, &data);
+        return Ok((extract_video_to_temp(source, &data)?, false));
     }
     // Try disk path
     let path = std::path::Path::new(source);
     if path.exists() {
-        return Ok(path.to_path_buf());
+        return Ok((path.to_path_buf(), true));
     }
     anyhow::bail!("Video asset '{}' not found in package or on disk", source)
 }
