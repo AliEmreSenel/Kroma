@@ -16,7 +16,9 @@ use kroma_shared::types::{SlideSource, SlideSourceType, TextureFilter, TextureWr
 
 use super::image::ImageTexture;
 use super::video::VideoTexture;
-use super::{TextureSource, TextureUpdate, read_asset_or_disk, resolve_video_path};
+use super::{
+    TextureSource, TextureUpdate, read_asset_or_disk_with_path, resolve_video_path_with_origin,
+};
 
 // ---------------------------------------------------------------------------
 // Slide entry — lightweight metadata kept for every slide
@@ -31,6 +33,8 @@ struct SlideEntry {
     /// For videos: resolved filesystem path (temp-extracted or on-disk).
     /// For images: `None` — read from package each time.
     video_path: Option<PathBuf>,
+    /// Whether the resolved video path points to an external disk source.
+    video_external: bool,
     /// Whether this entry is an image or video.
     ty: SlideSourceType,
 }
@@ -65,13 +69,20 @@ impl SlideChild {
 fn load_slide_child(
     entry: &SlideEntry,
     pkg: &LiveShadePackage,
+    hot_reload: bool,
 ) -> Result<SlideChild> {
     match entry.ty {
         SlideSourceType::Image => {
             // Read directly from the mmap-backed package (or disk)
-            let bytes = read_asset_or_disk(pkg, &entry.source)
+            let (bytes, disk_path) = read_asset_or_disk_with_path(pkg, &entry.source)
                 .with_context(|| format!("Slideshow image '{}'", entry.source))?;
-            let tex = ImageTexture::load(&bytes, &TextureFilter::Linear, &TextureWrap::Clamp)?;
+            let tex = ImageTexture::load(
+                &bytes,
+                &TextureFilter::Linear,
+                &TextureWrap::Clamp,
+                disk_path.as_deref(),
+                hot_reload,
+            )?;
             Ok(SlideChild::Image(tex))
         }
         SlideSourceType::Video => {
@@ -79,7 +90,7 @@ fn load_slide_child(
                 .video_path
                 .as_ref()
                 .context("Video slide has no file path")?;
-            let tex = VideoTexture::load(path, true)?;
+            let tex = VideoTexture::load(path, true, hot_reload && entry.video_external)?;
             Ok(SlideChild::Video(tex))
         }
     }
@@ -107,6 +118,8 @@ pub struct SlideshowTexture {
     timer: f64,
     /// Seconds between slides.
     interval: f64,
+    /// Whether external slide sources should auto-reload from filesystem changes.
+    hot_reload: bool,
 }
 
 impl SlideshowTexture {
@@ -120,6 +133,7 @@ impl SlideshowTexture {
         sources: &[SlideSource],
         interval: f64,
         shuffle: bool,
+        hot_reload: bool,
     ) -> Result<Self> {
         anyhow::ensure!(!sources.is_empty(), "Slideshow requires at least one source");
 
@@ -130,14 +144,16 @@ impl SlideshowTexture {
                 SlideSourceType::Image => SlideEntry {
                     source: slide.source.clone(),
                     video_path: None,
+                    video_external: false,
                     ty: SlideSourceType::Image,
                 },
                 SlideSourceType::Video => {
-                    let path = resolve_video_path(&pkg, &slide.source)
+                    let (path, video_external) = resolve_video_path_with_origin(&pkg, &slide.source)
                         .with_context(|| format!("Slideshow video '{}'", slide.source))?;
                     SlideEntry {
                         source: slide.source.clone(),
                         video_path: Some(path),
+                        video_external,
                         ty: SlideSourceType::Video,
                     }
                 }
@@ -158,7 +174,7 @@ impl SlideshowTexture {
         }
 
         // Load only the first child eagerly
-        let first_child = load_slide_child(&entries[0], &pkg)
+        let first_child = load_slide_child(&entries[0], &pkg, hot_reload)
             .context("Failed to load first slideshow child")?;
 
         info!(
@@ -175,6 +191,7 @@ impl SlideshowTexture {
             current_child: Some(first_child),
             timer: 0.0,
             interval,
+            hot_reload,
         })
     }
 }
@@ -202,7 +219,7 @@ impl TextureSource for SlideshowTexture {
             self.current = next;
 
             // Load the new child on demand from the mmap
-            match load_slide_child(&self.entries[self.current], &self.pkg) {
+            match load_slide_child(&self.entries[self.current], &self.pkg, self.hot_reload) {
                 Ok(child) => {
                     self.current_child = Some(child);
                 }

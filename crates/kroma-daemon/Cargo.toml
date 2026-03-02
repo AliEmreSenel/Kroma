@@ -40,3 +40,4 @@ cpal.workspace = true
 rustfft.workspace = true
 ffmpeg-next.workspace = true
 fontdue.workspace = true
+notify.workspace = true
