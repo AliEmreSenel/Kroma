@@ -9,7 +9,6 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
-use log::info;
 use regex::Regex;
 
 use crate::types::{ShadeConfig, ShadeMeta, TextureDef, TextureType, UniformDef};

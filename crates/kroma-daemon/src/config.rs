@@ -19,9 +19,9 @@ pub enum GpuPower {
     High,
 }
 
-impl Into<PowerPreference> for &GpuPower {
-    fn into(self) -> PowerPreference {
-        match self {
+impl From<&GpuPower> for PowerPreference {
+    fn from(val: &GpuPower) -> Self {
+        match val {
             GpuPower::Low => PowerPreference::LowPower,
             GpuPower::High => PowerPreference::HighPerformance,
         }
