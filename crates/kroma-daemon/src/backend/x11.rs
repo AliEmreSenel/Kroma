@@ -97,31 +97,32 @@ impl X11SurfaceProvider {
 
         for (idx, &crtc) in reply.crtcs.iter().enumerate() {
             if let Ok(cookie) = conn.randr_get_crtc_info(crtc, 0)
-                && let Ok(crtc_info) = cookie.reply() {
-                    if crtc_info.width == 0 || crtc_info.height == 0 {
-                        continue; // Disabled CRTC
-                    }
-
-                    let name = if let Some(&output) = crtc_info.outputs.first() {
-                        conn.randr_get_output_info(output, 0)
-                            .ok()
-                            .and_then(|c| c.reply().ok())
-                            .map(|info| String::from_utf8_lossy(&info.name).to_string())
-                            .unwrap_or_else(|| format!("screen-{}", idx))
-                    } else {
-                        format!("screen-{}", idx)
-                    };
-
-                    monitors.push(MonitorConfig {
-                        id: MonitorId(idx as u32),
-                        name,
-                        width: crtc_info.width as u32,
-                        height: crtc_info.height as u32,
-                        x: crtc_info.x as i32,
-                        y: crtc_info.y as i32,
-                        scale: 1.0,
-                    });
+                && let Ok(crtc_info) = cookie.reply()
+            {
+                if crtc_info.width == 0 || crtc_info.height == 0 {
+                    continue; // Disabled CRTC
                 }
+
+                let name = if let Some(&output) = crtc_info.outputs.first() {
+                    conn.randr_get_output_info(output, 0)
+                        .ok()
+                        .and_then(|c| c.reply().ok())
+                        .map(|info| String::from_utf8_lossy(&info.name).to_string())
+                        .unwrap_or_else(|| format!("screen-{}", idx))
+                } else {
+                    format!("screen-{}", idx)
+                };
+
+                monitors.push(MonitorConfig {
+                    id: MonitorId(idx as u32),
+                    name,
+                    width: crtc_info.width as u32,
+                    height: crtc_info.height as u32,
+                    x: crtc_info.x as i32,
+                    y: crtc_info.y as i32,
+                    scale: 1.0,
+                });
+            }
         }
 
         Ok(monitors)

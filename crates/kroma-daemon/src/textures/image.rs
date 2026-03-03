@@ -72,7 +72,11 @@ impl ImageTexture {
                 Ok(hot_reload) => hot_reload,
                 Err(e) => {
                     if let Some(path) = disk_source {
-                        warn!("ImageTexture watcher disabled for {}: {}", path.display(), e);
+                        warn!(
+                            "ImageTexture watcher disabled for {}: {}",
+                            path.display(),
+                            e
+                        );
                     } else {
                         warn!("ImageTexture watcher disabled: {}", e);
                     }
@@ -115,12 +119,16 @@ impl ImageTexture {
                     if tex.hot_reload.source_path().is_some() {
                         info!(
                             "ImageTexture loaded ({}x{}) with watcher: {}",
-                            tex.width, tex.height, path.display()
+                            tex.width,
+                            tex.height,
+                            path.display()
                         );
                     } else {
                         info!(
                             "ImageTexture loaded from disk ({}x{}): {}",
-                            tex.width, tex.height, path.display()
+                            tex.width,
+                            tex.height,
+                            path.display()
                         );
                     }
                 } else {

@@ -88,7 +88,10 @@ impl Default for DaemonStatus {
 /// Start the IPC listener on a background thread.
 ///
 /// Returns a join handle, shared status, and shared preview stream state.
-pub fn start(cmd_tx: Sender<InternalCommand>, preview_cfg: PreviewConfig) -> Result<IpcStartResult> {
+pub fn start(
+    cmd_tx: Sender<InternalCommand>,
+    preview_cfg: PreviewConfig,
+) -> Result<IpcStartResult> {
     let path = socket_path();
 
     // Remove stale socket if it exists

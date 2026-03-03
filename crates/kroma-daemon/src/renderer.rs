@@ -384,10 +384,7 @@ impl RenderState {
                 .iter()
                 .map(|f| format!("{}: {} ({})", f.name, f.source, f.error))
                 .collect();
-            self.switch_to_fallback_error(
-                fallback::render_texture_error,
-                &paths,
-            )?;
+            self.switch_to_fallback_error(fallback::render_texture_error, &paths)?;
             info!(
                 "Shade '{}' loaded with texture errors — showing fallback",
                 pkg.config.meta.name,
@@ -838,11 +835,7 @@ impl RenderState {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    let source_path = def
-                        .source
-                        .as_deref()
-                        .unwrap_or("<unknown>")
-                        .to_string();
+                    let source_path = def.source.as_deref().unwrap_or("<unknown>").to_string();
 
                     if def.optional {
                         // Optional texture: push a transparent 1×1 RGBA placeholder
@@ -869,10 +862,7 @@ impl RenderState {
                         self.texture_sources.push(None);
                     } else {
                         // Required texture: record the failure.
-                        warn!(
-                            "Required texture '{}' failed to load: {}",
-                            name, e
-                        );
+                        warn!("Required texture '{}' failed to load: {}", name, e);
                         required_failures.push(TextureLoadFailure {
                             name: name.to_string(),
                             source: source_path,
@@ -1052,11 +1042,7 @@ impl RenderState {
     /// `render_fn` generates an `Rgba8Unorm` text bitmap given `(paths, width, height)`.
     /// The R channel encodes the text region type (title / subtitle / path);
     /// the GPU shader handles all visual rendering (background, colors, shadow).
-    fn switch_to_fallback_error<F>(
-        &mut self,
-        render_fn: F,
-        paths: &[String],
-    ) -> Result<()>
+    fn switch_to_fallback_error<F>(&mut self, render_fn: F, paths: &[String]) -> Result<()>
     where
         F: FnOnce(&[String], u32, u32) -> Vec<u8>,
     {
@@ -1101,7 +1087,10 @@ impl RenderState {
         self.rebuild_pipeline_with_frag(FALLBACK_ERROR_FRAG_WGSL)?;
         self.current_frag_wgsl = FALLBACK_ERROR_FRAG_WGSL.to_string();
 
-        info!("Switched to GPU fallback error display ({}x{})", width, height);
+        info!(
+            "Switched to GPU fallback error display ({}x{})",
+            width, height
+        );
         Ok(())
     }
 
@@ -1110,10 +1099,7 @@ impl RenderState {
     /// Called on startup when no shade is configured, or when a package has
     /// no shader and no textures.
     pub fn show_no_shade_fallback(&mut self) -> Result<()> {
-        self.switch_to_fallback_error(
-            |_paths, w, h| fallback::render_no_shade(w, h),
-            &[],
-        )
+        self.switch_to_fallback_error(|_paths, w, h| fallback::render_no_shade(w, h), &[])
     }
 
     /// Show a load-error fallback when a shade package fails to open or load.

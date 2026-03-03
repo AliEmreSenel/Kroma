@@ -356,7 +356,10 @@ impl Daemon {
                         )?;
                     }
                     Ok(ShadeLoadOutcome::CompileError(msg)) => {
-                        log::error!("Shade '{}' shader compile error — fallback displayed", pkg_name);
+                        log::error!(
+                            "Shade '{}' shader compile error — fallback displayed",
+                            pkg_name
+                        );
                         loaded_successfully = true;
                         maybe_send(
                             tx,
@@ -373,7 +376,8 @@ impl Daemon {
                     }
                     Err(e) => {
                         log::error!("Failed to load shade '{}': {}", pkg_name, e);
-                        self.render_state.switch_to_load_error(path, &format!("{:#}", e))?;
+                        self.render_state
+                            .switch_to_load_error(path, &format!("{:#}", e))?;
                         maybe_send(
                             tx,
                             DaemonEvent::CompileResult {
@@ -391,7 +395,8 @@ impl Daemon {
             }
             Err(e) => {
                 log::error!("Failed to load shade: {}", e);
-                self.render_state.switch_to_load_error(path, &format!("{:#}", e))?;
+                self.render_state
+                    .switch_to_load_error(path, &format!("{:#}", e))?;
                 maybe_send(
                     tx,
                     DaemonEvent::CompileResult {

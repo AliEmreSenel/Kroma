@@ -141,9 +141,16 @@ impl SlideshowTexture {
         hot_reload: bool,
         optional: bool,
     ) -> Result<Self> {
-        let pkg_fallback = if optional { Some(Arc::clone(&pkg)) } else { None };
+        let pkg_fallback = if optional {
+            Some(Arc::clone(&pkg))
+        } else {
+            None
+        };
         let inner = || -> Result<Self> {
-            anyhow::ensure!(!sources.is_empty(), "Slideshow requires at least one source");
+            anyhow::ensure!(
+                !sources.is_empty(),
+                "Slideshow requires at least one source"
+            );
 
             let mut entries = Vec::with_capacity(sources.len());
 
@@ -156,8 +163,9 @@ impl SlideshowTexture {
                         ty: SlideSourceType::Image,
                     },
                     SlideSourceType::Video => {
-                        let (path, video_external) = resolve_video_path_with_origin(&pkg, &slide.source)
-                            .with_context(|| format!("Slideshow video '{}'", slide.source))?;
+                        let (path, video_external) =
+                            resolve_video_path_with_origin(&pkg, &slide.source)
+                                .with_context(|| format!("Slideshow video '{}'", slide.source))?;
                         SlideEntry {
                             source: slide.source.clone(),
                             video_path: Some(path),
@@ -206,7 +214,10 @@ impl SlideshowTexture {
         match inner() {
             Ok(tex) => Ok(tex),
             Err(e) if optional => {
-                warn!("Optional slideshow failed to load (using placeholder): {}", e);
+                warn!(
+                    "Optional slideshow failed to load (using placeholder): {}",
+                    e
+                );
                 Ok(Self {
                     pkg: pkg_fallback.expect("optional=true but no fallback pkg"),
                     entries: Vec::new(),
@@ -250,11 +261,7 @@ impl TextureSource for SlideshowTexture {
                     self.current_child = Some(child);
                 }
                 Err(e) => {
-                    log::warn!(
-                        "Failed to load slideshow child {}: {}",
-                        self.current,
-                        e
-                    );
+                    log::warn!("Failed to load slideshow child {}: {}", self.current, e);
                     // Leave current_child as None — will return Unchanged
                 }
             }
