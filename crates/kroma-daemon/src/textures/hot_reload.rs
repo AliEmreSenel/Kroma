@@ -72,12 +72,8 @@ impl SourceHotReload {
 
     /// Return the source path when relevant file changes were observed.
     pub fn take_changed_path(&mut self) -> Option<PathBuf> {
-        let Some(rx) = self.watch_rx.as_ref() else {
-            return None;
-        };
-        let Some(source_path) = self.source_path.as_ref() else {
-            return None;
-        };
+        let rx = self.watch_rx.as_ref()?;
+        let source_path = self.source_path.as_ref()?;
 
         let mut changed = false;
 
