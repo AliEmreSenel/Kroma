@@ -180,6 +180,7 @@ impl KromaApp {
                             shuffle: false,
                             fft_bands: None,
                             hot_reload: false,
+                            optional: false,
                         },
                     );
                     self.shade_new_texture_name.clear();
@@ -389,6 +390,7 @@ impl KromaApp {
                         shuffle: false,
                         fft_bands: None,
                         hot_reload: false,
+                        optional: false,
                     },
                 );
                 self.sync_shade_toml();

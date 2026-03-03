@@ -331,9 +331,10 @@ impl LowerCtx {
                 self.vars.insert(var_name.clone(), src);
                 // Preserve original variable name for roundtrip
                 if let Some(node) = self.graph.node_mut(src.node)
-                    && node.label.is_none() {
-                        node.label = Some(var_name.clone());
-                    }
+                    && node.label.is_none()
+                {
+                    node.label = Some(var_name.clone());
+                }
             }
         }
         // Tail declarations (multiple in one line)
@@ -344,9 +345,10 @@ impl LowerCtx {
                 self.vars.insert(var_name.clone(), src);
                 // Preserve original variable name for roundtrip
                 if let Some(node) = self.graph.node_mut(src.node)
-                    && node.label.is_none() {
-                        node.label = Some(var_name.clone());
-                    }
+                    && node.label.is_none()
+                {
+                    node.label = Some(var_name.clone());
+                }
             }
         }
     }
@@ -367,9 +369,10 @@ impl LowerCtx {
         );
         // Set Thresh (port 1) to 0.5 as default (condition > 0.5 → true)
         if let Some(node) = self.graph.node_mut(node_id)
-            && node.defaults.len() > 1 {
-                node.defaults[1] = DefaultValue::Float(0.5);
-            }
+            && node.defaults.len() > 1
+        {
+            node.defaults[1] = DefaultValue::Float(0.5);
+        }
 
         match &sel.rest {
             SelectionRestStatement::Statement(then_stmt) => {
@@ -508,27 +511,28 @@ impl LowerCtx {
         match init {
             ForInitStatement::Declaration(boxed_decl) => {
                 if let Declaration::InitDeclaratorList(idl) = boxed_decl.as_ref()
-                    && let Some(Initializer::Simple(init_expr)) = &idl.head.initializer {
-                        let src = self.lower_expr(init_expr);
-                        self.connect(
-                            src,
+                    && let Some(Initializer::Simple(init_expr)) = &idl.head.initializer
+                {
+                    let src = self.lower_expr(init_expr);
+                    self.connect(
+                        src,
+                        PortAddr {
+                            node: node_id,
+                            port: 0,
+                        },
+                    ); // "Init"
+
+                    // Register the loop var so the body can reference it
+                    if let Some(name) = &idl.head.name {
+                        self.vars.insert(
+                            name.0.clone(),
                             PortAddr {
                                 node: node_id,
-                                port: 0,
+                                port: 0, // output port 0 of ForLoop = result
                             },
-                        ); // "Init"
-
-                        // Register the loop var so the body can reference it
-                        if let Some(name) = &idl.head.name {
-                            self.vars.insert(
-                                name.0.clone(),
-                                PortAddr {
-                                    node: node_id,
-                                    port: 0, // output port 0 of ForLoop = result
-                                },
-                            );
-                        }
+                        );
                     }
+                }
             }
             ForInitStatement::Expression(Some(e)) => {
                 let src = self.lower_expr(e);
@@ -545,15 +549,16 @@ impl LowerCtx {
 
         // Condition: try to extract the upper bound as "Count"
         if let Some(syntax::Condition::Expr(cond_expr)) = &rest.condition
-            && let Some(count_src) = self.extract_loop_bound(cond_expr) {
-                self.connect(
-                    count_src,
-                    PortAddr {
-                        node: node_id,
-                        port: 1,
-                    },
-                ); // "Count"
-            }
+            && let Some(count_src) = self.extract_loop_bound(cond_expr)
+        {
+            self.connect(
+                count_src,
+                PortAddr {
+                    node: node_id,
+                    port: 1,
+                },
+            ); // "Count"
+        }
 
         // Body: lower all statements for side effects, then extract value
         match body {
@@ -676,22 +681,23 @@ impl LowerCtx {
 
                 // Check if LHS is a swizzle write (e.g., color.rgb = ...)
                 if let Expr::Dot(base_expr, field) = lhs.as_ref()
-                    && is_swizzle(&field.0) {
-                        if let Expr::Variable(ident) = base_expr.as_ref() {
-                            // Update the variable with the swizzle write result
-                            self.vars.insert(ident.0.clone(), final_src);
-                            if is_frag_color(&ident.0) {
-                                self.connect(
-                                    final_src,
-                                    PortAddr {
-                                        node: NodeId(1),
-                                        port: 0,
-                                    },
-                                );
-                            }
+                    && is_swizzle(&field.0)
+                {
+                    if let Expr::Variable(ident) = base_expr.as_ref() {
+                        // Update the variable with the swizzle write result
+                        self.vars.insert(ident.0.clone(), final_src);
+                        if is_frag_color(&ident.0) {
+                            self.connect(
+                                final_src,
+                                PortAddr {
+                                    node: NodeId(1),
+                                    port: 0,
+                                },
+                            );
                         }
-                        return final_src;
                     }
+                    return final_src;
+                }
 
                 // Update var map if lhs is a variable
                 if let Expr::Variable(ident) = lhs.as_ref() {
@@ -833,9 +839,10 @@ impl LowerCtx {
     fn lower_unary(&mut self, op: UnaryOp, operand: &Expr) -> PortAddr {
         // Optimization: -literal → FloatConst(-literal) instead of Negate node
         if matches!(op, UnaryOp::Minus)
-            && let Some(val) = Self::try_as_float_literal(operand) {
-                return self.make_float_const((-val) as f64);
-            }
+            && let Some(val) = Self::try_as_float_literal(operand)
+        {
+            return self.make_float_const((-val) as f64);
+        }
 
         let kind = match op {
             UnaryOp::Minus => NodeKind::Negate,
@@ -860,9 +867,10 @@ impl LowerCtx {
         // Port 0 = Cond, Port 1 = Thresh (default 0.5), Port 2 = True, Port 3 = False
         self.lower_arg_or_default(cond, node_id, 0);
         if let Some(node) = self.graph.node_mut(node_id)
-            && node.defaults.len() > 1 {
-                node.defaults[1] = DefaultValue::Float(0.5);
-            }
+            && node.defaults.len() > 1
+        {
+            node.defaults[1] = DefaultValue::Float(0.5);
+        }
         self.lower_arg_or_default(t, node_id, 2);
         self.lower_arg_or_default(f, node_id, 3);
         PortAddr {
@@ -1010,9 +1018,10 @@ impl LowerCtx {
                     .0
                     .strip_prefix("iChannel")
                     .and_then(|s| s.parse::<f32>().ok())
-                    && let Some(node) = self.graph.node_mut(node_id) {
-                        node.defaults[0] = DefaultValue::Float(ch);
-                    }
+                && let Some(node) = self.graph.node_mut(node_id)
+            {
+                node.defaults[0] = DefaultValue::Float(ch);
+            }
             // Connect UV to port 1
             if args.len() >= 2 {
                 let uv = self.lower_expr(&args[1]);
@@ -1182,11 +1191,11 @@ impl LowerCtx {
         // iResolution.xy → UV pattern
         if let Expr::Variable(ident) = object
             && is_resolution(&ident.0)
-                && (field_str == "xy" || field_str == "x" || field_str == "y")
-            {
-                let id = self.add_node(NodeKind::Resolution);
-                return PortAddr { node: id, port: 0 };
-            }
+            && (field_str == "xy" || field_str == "x" || field_str == "y")
+        {
+            let id = self.add_node(NodeKind::Resolution);
+            return PortAddr { node: id, port: 0 };
+        }
 
         let obj_src = self.lower_expr(object);
 
@@ -1337,9 +1346,10 @@ impl LowerCtx {
         let node_id = self.add_node(NodeKind::FloatConst);
         // Set the default value
         if let Some(node) = self.graph.node_mut(node_id)
-            && !node.defaults.is_empty() {
-                node.defaults[0] = DefaultValue::Float(val as f32);
-            }
+            && !node.defaults.is_empty()
+        {
+            node.defaults[0] = DefaultValue::Float(val as f32);
+        }
         PortAddr {
             node: node_id,
             port: 0,
@@ -1397,17 +1407,18 @@ impl LowerCtx {
             Expr::Variable(ident) => {
                 // Check if it's a known variable with a known width
                 if let Some(addr) = self.vars.get(ident.0.as_str())
-                    && let Some(node) = self.graph.node(addr.node) {
-                        let outputs = node.outputs();
-                        if let Some(out) = outputs.get(addr.port) {
-                            return match out.data_type {
-                                DataType::Float => 1,
-                                DataType::Vec2 => 2,
-                                DataType::Vec3 => 3,
-                                DataType::Vec4 => 4,
-                            };
-                        }
+                    && let Some(node) = self.graph.node(addr.node)
+                {
+                    let outputs = node.outputs();
+                    if let Some(out) = outputs.get(addr.port) {
+                        return match out.data_type {
+                            DataType::Float => 1,
+                            DataType::Vec2 => 2,
+                            DataType::Vec3 => 3,
+                            DataType::Vec4 => 4,
+                        };
                     }
+                }
                 match ident.0.as_str() {
                     "iResolution" => 3,
                     "u_resolution" | "fragCoord" | "gl_FragCoord" => 2,

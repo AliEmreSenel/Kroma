@@ -407,21 +407,22 @@ impl KromaApp {
             }
             GraphMessage::StartEditValue(node_id, port_idx) => {
                 if let Some(node) = graph!().node(node_id)
-                    && let Some(def) = node.defaults.get(port_idx) {
-                        let text = match def {
-                            editor::DefaultValue::Float(v) => format!("{:.2}", v),
-                            editor::DefaultValue::Vec2(v) => {
-                                format!("{:.2}, {:.2}", v[0], v[1])
-                            }
-                            editor::DefaultValue::Vec3(v) => {
-                                format!("{:.2}, {:.2}, {:.2}", v[0], v[1], v[2])
-                            }
-                            editor::DefaultValue::Vec4(v) => {
-                                format!("{:.2}, {:.2}, {:.2}, {:.2}", v[0], v[1], v[2], v[3])
-                            }
-                        };
-                        canvas_mut!().editing_value = Some((node_id, port_idx, text));
-                    }
+                    && let Some(def) = node.defaults.get(port_idx)
+                {
+                    let text = match def {
+                        editor::DefaultValue::Float(v) => format!("{:.2}", v),
+                        editor::DefaultValue::Vec2(v) => {
+                            format!("{:.2}, {:.2}", v[0], v[1])
+                        }
+                        editor::DefaultValue::Vec3(v) => {
+                            format!("{:.2}, {:.2}, {:.2}", v[0], v[1], v[2])
+                        }
+                        editor::DefaultValue::Vec4(v) => {
+                            format!("{:.2}, {:.2}, {:.2}, {:.2}", v[0], v[1], v[2], v[3])
+                        }
+                    };
+                    canvas_mut!().editing_value = Some((node_id, port_idx, text));
+                }
             }
             GraphMessage::EditValueChanged(text) => {
                 if let Some((_, _, ref mut current_text)) = canvas_mut!().editing_value {
@@ -431,14 +432,15 @@ impl KromaApp {
             GraphMessage::CommitEditValue => {
                 if let Some((node_id, port_idx, text)) = canvas_mut!().editing_value.take()
                     && let Some(node) = graph!().node(node_id)
-                        && let Some(old_def) = node.defaults.get(port_idx).cloned() {
-                            let new_def = parse_default_value_text(&text, &old_def);
-                            let cmd = commands::ChangeDefaultCmd::new(
-                                target, node_id, port_idx, old_def, new_def,
-                            );
-                            exec_cmd!(Box::new(cmd));
-                            mark_dirty!();
-                        }
+                    && let Some(old_def) = node.defaults.get(port_idx).cloned()
+                {
+                    let new_def = parse_default_value_text(&text, &old_def);
+                    let cmd = commands::ChangeDefaultCmd::new(
+                        target, node_id, port_idx, old_def, new_def,
+                    );
+                    exec_cmd!(Box::new(cmd));
+                    mark_dirty!();
+                }
             }
             GraphMessage::CancelEditValue => {
                 canvas_mut!().editing_value = None;

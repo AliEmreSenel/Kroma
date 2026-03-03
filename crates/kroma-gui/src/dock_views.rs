@@ -871,8 +871,6 @@ impl KromaApp {
             let top_zone = drop_zone("^", dock::tree::DropZone::Top, path_owned.clone());
             let bottom_zone = drop_zone("v", dock::tree::DropZone::Bottom, path_owned);
 
-            
-
             container(
                 column![
                     container(top_zone)

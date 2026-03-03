@@ -71,7 +71,8 @@ impl Panel for PropertiesPanel {
             "Audio",
             column![
                 text("Audio is now configured as a texture.").size(t.font_size_sm),
-                text("Add an 'audio_spectrum' texture in the Textures section.").size(t.font_size_sm),
+                text("Add an 'audio_spectrum' texture in the Textures section.")
+                    .size(t.font_size_sm),
             ]
             .spacing(t.spacing_sm),
             t,
@@ -126,7 +127,9 @@ impl Panel for PropertiesPanel {
                 let label = name.clone();
                 texture_items.push(
                     row![
-                        text(format!("{} [{}]", label, t.ty.as_str())).size(11).width(Fill),
+                        text(format!("{} [{}]", label, t.ty.as_str()))
+                            .size(11)
+                            .width(Fill),
                         button(text("X").size(10))
                             .on_press(Message::ShadeRemoveTexture(name))
                             .padding(Padding::from([2, 6])),

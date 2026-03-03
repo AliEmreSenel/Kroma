@@ -802,9 +802,10 @@ impl KromaApp {
                     if self.panel_designer.selected == Some(idx) {
                         self.panel_designer.selected = None;
                     } else if let Some(sel) = self.panel_designer.selected
-                        && sel > idx {
-                            self.panel_designer.selected = Some(sel - 1);
-                        }
+                        && sel > idx
+                    {
+                        self.panel_designer.selected = Some(sel - 1);
+                    }
                 } else {
                     self.panel_designer
                         .components
@@ -818,9 +819,10 @@ impl KromaApp {
                     if self.panel_designer.selected == Some(idx) {
                         self.panel_designer.selected = None;
                     } else if let Some(sel) = self.panel_designer.selected
-                        && sel > idx {
-                            self.panel_designer.selected = Some(sel - 1);
-                        }
+                        && sel > idx
+                    {
+                        self.panel_designer.selected = Some(sel - 1);
+                    }
                 }
             }
             Message::DesignerGenerate => {
@@ -868,27 +870,31 @@ impl KromaApp {
             }
             Message::DesignerSetComponentX(idx, val) => {
                 if let Some(comp) = self.panel_designer.components.get_mut(idx)
-                    && let Ok(v) = val.parse::<f32>() {
-                        comp.x = v.clamp(0.0, 1.0);
-                    }
+                    && let Ok(v) = val.parse::<f32>()
+                {
+                    comp.x = v.clamp(0.0, 1.0);
+                }
             }
             Message::DesignerSetComponentY(idx, val) => {
                 if let Some(comp) = self.panel_designer.components.get_mut(idx)
-                    && let Ok(v) = val.parse::<f32>() {
-                        comp.y = v.clamp(0.0, 1.0);
-                    }
+                    && let Ok(v) = val.parse::<f32>()
+                {
+                    comp.y = v.clamp(0.0, 1.0);
+                }
             }
             Message::DesignerSetComponentW(idx, val) => {
                 if let Some(comp) = self.panel_designer.components.get_mut(idx)
-                    && let Ok(v) = val.parse::<f32>() {
-                        comp.width = v.clamp(0.01, 1.0);
-                    }
+                    && let Ok(v) = val.parse::<f32>()
+                {
+                    comp.width = v.clamp(0.01, 1.0);
+                }
             }
             Message::DesignerSetComponentH(idx, val) => {
                 if let Some(comp) = self.panel_designer.components.get_mut(idx)
-                    && let Ok(v) = val.parse::<f32>() {
-                        comp.height = v.clamp(0.01, 1.0);
-                    }
+                    && let Ok(v) = val.parse::<f32>()
+                {
+                    comp.height = v.clamp(0.01, 1.0);
+                }
             }
 
             // ---------------------------------------------------------------
@@ -896,30 +902,28 @@ impl KromaApp {
             // ---------------------------------------------------------------
             Message::VideoPlay(name) => {
                 if let Some(ref pkg) = self.shade_package
-                    && let Some(data) = pkg.read_asset(&name) {
-                        let safe_name = name.replace('/', "_");
-                        let base = if std::path::Path::new("/dev/shm").is_dir() {
-                            std::path::PathBuf::from("/dev/shm")
-                        } else {
-                            std::env::temp_dir()
-                        };
-                        let temp_path = base.join(format!("kroma_video_{}", safe_name));
-                        if std::fs::write(&temp_path, &data).is_ok() {
-                            match video::VideoPlayerState::open(temp_path, name.clone()) {
-                                Ok(mut player) => {
-                                    // Decode first frame
-                                    player.advance_frame();
-                                    self.video_player = Some(player);
-                                }
-                                Err(e) => {
-                                    self.toast(
-                                        ToastLevel::Error,
-                                        format!("Video open failed: {}", e),
-                                    );
-                                }
+                    && let Some(data) = pkg.read_asset(&name)
+                {
+                    let safe_name = name.replace('/', "_");
+                    let base = if std::path::Path::new("/dev/shm").is_dir() {
+                        std::path::PathBuf::from("/dev/shm")
+                    } else {
+                        std::env::temp_dir()
+                    };
+                    let temp_path = base.join(format!("kroma_video_{}", safe_name));
+                    if std::fs::write(&temp_path, &data).is_ok() {
+                        match video::VideoPlayerState::open(temp_path, name.clone()) {
+                            Ok(mut player) => {
+                                // Decode first frame
+                                player.advance_frame();
+                                self.video_player = Some(player);
+                            }
+                            Err(e) => {
+                                self.toast(ToastLevel::Error, format!("Video open failed: {}", e));
                             }
                         }
                     }
+                }
             }
             Message::VideoTogglePlay => {
                 if let Some(ref mut player) = self.video_player {
@@ -933,9 +937,10 @@ impl KromaApp {
             }
             Message::VideoTick => {
                 if let Some(ref mut player) = self.video_player
-                    && player.playing {
-                        player.advance_frame();
-                    }
+                    && player.playing
+                {
+                    player.advance_frame();
+                }
             }
             Message::VideoStop => {
                 if let Some(ref player) = self.video_player {

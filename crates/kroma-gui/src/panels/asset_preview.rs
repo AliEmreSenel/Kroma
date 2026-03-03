@@ -270,74 +270,58 @@ impl AssetPreviewPanel {
         let ext = short.rsplit('.').next().unwrap_or("").to_lowercase();
 
         if let Some(pkg) = ctx.shade_package
-            && let Some(data) = pkg.read_asset(asset_name) {
-                let size = data.len();
-                let size_str = if size > 1_048_576 {
-                    format!("{:.1} MB", size as f64 / 1_048_576.0)
-                } else if size > 1024 {
-                    format!("{:.1} KB", size as f64 / 1024.0)
-                } else {
-                    format!("{} bytes", size)
-                };
-                let data = data.as_slice();
+            && let Some(data) = pkg.read_asset(asset_name)
+        {
+            let size = data.len();
+            let size_str = if size > 1_048_576 {
+                format!("{:.1} MB", size as f64 / 1_048_576.0)
+            } else if size > 1024 {
+                format!("{:.1} KB", size as f64 / 1024.0)
+            } else {
+                format!("{} bytes", size)
+            };
+            let data = data.as_slice();
 
-                let content: Element<'_, Message> = match ext.as_str() {
-                    "glsl" | "frag" | "vert" => {
-                        let source = String::from_utf8_lossy(data);
-                        column![
-                            iced::widget::row![
-                                text(icons::CODE).font(icons::ICON_FONT).size(12),
-                                text(format!(" {}", short)).size(12),
-                            ]
-                            .spacing(2)
-                            .align_y(iced::Alignment::Center),
-                            text(size_str.clone()).size(10).color(t.text_secondary),
-                            scrollable(text(source.to_string()).size(10))
-                                .width(Fill)
-                                .height(Fill),
-                        ]
-                        .spacing(4)
-                        .into()
-                    }
-                    "jpg" | "jpeg" | "png" | "bmp" | "gif" | "webp" => {
-                        build_image_preview(short, &size_str, data, t)
-                    }
-                    "mp4" | "webm" | "avi" | "mkv" => {
-                        build_video_preview(short, &size_str, data, t, asset_name, ctx.video_player)
-                    }
-                    "ttf" | "otf" | "woff" | "woff2" => {
-                        build_font_preview(short, &size_str, data, t)
-                    }
-                    "mp3" | "wav" | "ogg" | "flac" => column![
+            let content: Element<'_, Message> = match ext.as_str() {
+                "glsl" | "frag" | "vert" => {
+                    let source = String::from_utf8_lossy(data);
+                    column![
                         iced::widget::row![
-                            text(icons::AUDIO).font(icons::ICON_FONT).size(12),
+                            text(icons::CODE).font(icons::ICON_FONT).size(12),
                             text(format!(" {}", short)).size(12),
                         ]
                         .spacing(2)
                         .align_y(iced::Alignment::Center),
                         text(size_str.clone()).size(10).color(t.text_secondary),
-                        build_audio_info(data, t),
+                        scrollable(text(source.to_string()).size(10))
+                            .width(Fill)
+                            .height(Fill),
                     ]
                     .spacing(4)
-                    .into(),
-                    "toml" | "json" | "yaml" | "yml" | "txt" | "md" => {
-                        let source = String::from_utf8_lossy(data);
-                        column![
-                            iced::widget::row![
-                                text(icons::FILE).font(icons::ICON_FONT).size(12),
-                                text(format!(" {}", short)).size(12),
-                            ]
-                            .spacing(2)
-                            .align_y(iced::Alignment::Center),
-                            text(size_str.clone()).size(10).color(t.text_secondary),
-                            scrollable(text(source.to_string()).size(10))
-                                .width(Fill)
-                                .height(Fill),
-                        ]
-                        .spacing(4)
-                        .into()
-                    }
-                    _ => column![
+                    .into()
+                }
+                "jpg" | "jpeg" | "png" | "bmp" | "gif" | "webp" => {
+                    build_image_preview(short, &size_str, data, t)
+                }
+                "mp4" | "webm" | "avi" | "mkv" => {
+                    build_video_preview(short, &size_str, data, t, asset_name, ctx.video_player)
+                }
+                "ttf" | "otf" | "woff" | "woff2" => build_font_preview(short, &size_str, data, t),
+                "mp3" | "wav" | "ogg" | "flac" => column![
+                    iced::widget::row![
+                        text(icons::AUDIO).font(icons::ICON_FONT).size(12),
+                        text(format!(" {}", short)).size(12),
+                    ]
+                    .spacing(2)
+                    .align_y(iced::Alignment::Center),
+                    text(size_str.clone()).size(10).color(t.text_secondary),
+                    build_audio_info(data, t),
+                ]
+                .spacing(4)
+                .into(),
+                "toml" | "json" | "yaml" | "yml" | "txt" | "md" => {
+                    let source = String::from_utf8_lossy(data);
+                    column![
                         iced::widget::row![
                             text(icons::FILE).font(icons::ICON_FONT).size(12),
                             text(format!(" {}", short)).size(12),
@@ -345,20 +329,35 @@ impl AssetPreviewPanel {
                         .spacing(2)
                         .align_y(iced::Alignment::Center),
                         text(size_str.clone()).size(10).color(t.text_secondary),
-                        text(format!("Binary file ({} extension)", ext))
-                            .size(10)
-                            .color(t.text_secondary),
+                        scrollable(text(source.to_string()).size(10))
+                            .width(Fill)
+                            .height(Fill),
                     ]
                     .spacing(4)
-                    .into(),
-                };
+                    .into()
+                }
+                _ => column![
+                    iced::widget::row![
+                        text(icons::FILE).font(icons::ICON_FONT).size(12),
+                        text(format!(" {}", short)).size(12),
+                    ]
+                    .spacing(2)
+                    .align_y(iced::Alignment::Center),
+                    text(size_str.clone()).size(10).color(t.text_secondary),
+                    text(format!("Binary file ({} extension)", ext))
+                        .size(10)
+                        .color(t.text_secondary),
+                ]
+                .spacing(4)
+                .into(),
+            };
 
-                return container(content)
-                    .width(Fill)
-                    .height(Fill)
-                    .padding(8)
-                    .into();
-            }
+            return container(content)
+                .width(Fill)
+                .height(Fill)
+                .padding(8)
+                .into();
+        }
 
         container(
             text(format!("Asset not found: {}", asset_name))
@@ -534,55 +533,56 @@ fn build_video_preview<'a>(
     // If we have an active player for this asset, show playback UI
     if let Some(player) = video_player
         && player.asset_name == asset_name
-            && let Some((w, h, ref rgba)) = player.current_frame {
-                let handle = img::Handle::from_rgba(w, h, rgba.clone());
-                let pos_str = format!("{:.1}s / {:.1}s", player.position, player.duration);
-                let progress = if player.duration > 0.0 {
-                    (player.position / player.duration) as f32
-                } else {
-                    0.0
-                };
+        && let Some((w, h, ref rgba)) = player.current_frame
+    {
+        let handle = img::Handle::from_rgba(w, h, rgba.clone());
+        let pos_str = format!("{:.1}s / {:.1}s", player.position, player.duration);
+        let progress = if player.duration > 0.0 {
+            (player.position / player.duration) as f32
+        } else {
+            0.0
+        };
 
-                let play_icon = if player.playing {
-                    icons::PAUSE
-                } else {
-                    icons::PLAY
-                };
+        let play_icon = if player.playing {
+            icons::PAUSE
+        } else {
+            icons::PLAY
+        };
 
-                return column![
-                    iced::widget::row![
-                        text(icons::VIDEO).font(icons::ICON_FONT).size(12),
-                        text(format!(" {}", name)).size(12),
-                    ]
-                    .spacing(2)
-                    .align_y(iced::Alignment::Center),
-                    text(format!("{} | {}", size_str, player.format_info))
-                        .size(10)
-                        .color(tokens.text_secondary),
-                    img::Image::new(handle)
-                        .width(Fill)
-                        .content_fit(iced::ContentFit::Contain),
-                    // Controls bar
-                    row![
-                        button(text(play_icon).font(icons::ICON_FONT).size(14))
-                            .on_press(Message::VideoTogglePlay)
-                            .padding(4),
-                        text(pos_str.clone()).size(10).color(tokens.text_secondary),
-                        slider(0.0..=1.0, progress, Message::VideoSeek)
-                            .width(Fill)
-                            .step(0.01),
-                        button(text(icons::STOP).font(icons::ICON_FONT).size(14))
-                            .on_press(Message::VideoStop)
-                            .padding(4),
-                    ]
-                    .spacing(8)
-                    .align_y(iced::alignment::Vertical::Center),
-                ]
-                .spacing(4)
+        return column![
+            iced::widget::row![
+                text(icons::VIDEO).font(icons::ICON_FONT).size(12),
+                text(format!(" {}", name)).size(12),
+            ]
+            .spacing(2)
+            .align_y(iced::Alignment::Center),
+            text(format!("{} | {}", size_str, player.format_info))
+                .size(10)
+                .color(tokens.text_secondary),
+            img::Image::new(handle)
                 .width(Fill)
-                .height(Fill)
-                .into();
-            }
+                .content_fit(iced::ContentFit::Contain),
+            // Controls bar
+            row![
+                button(text(play_icon).font(icons::ICON_FONT).size(14))
+                    .on_press(Message::VideoTogglePlay)
+                    .padding(4),
+                text(pos_str.clone()).size(10).color(tokens.text_secondary),
+                slider(0.0..=1.0, progress, Message::VideoSeek)
+                    .width(Fill)
+                    .step(0.01),
+                button(text(icons::STOP).font(icons::ICON_FONT).size(14))
+                    .on_press(Message::VideoStop)
+                    .padding(4),
+            ]
+            .spacing(8)
+            .align_y(iced::alignment::Vertical::Center),
+        ]
+        .spacing(4)
+        .width(Fill)
+        .height(Fill)
+        .into();
+    }
 
     // Fast-path: empty data can't be a video
     if data.is_empty() {

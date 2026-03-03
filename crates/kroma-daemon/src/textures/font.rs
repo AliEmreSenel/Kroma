@@ -7,7 +7,8 @@
 
 use super::{TextureSource, TextureUpdate};
 use anyhow::Result;
-use log::info;
+use font8x8::UnicodeFonts;
+use log::{info, warn};
 
 /// A rasterized font atlas with glyph metrics.
 pub struct FontAtlas {
@@ -155,6 +156,103 @@ pub fn rasterize_font_atlas(font_data: &[u8], font_size: f32) -> Result<FontAtla
     })
 }
 
+// ---------------------------------------------------------------------------
+// font8x8 fallback atlas
+// ---------------------------------------------------------------------------
+
+/// Scale factor applied to each 8×8 font8x8 glyph.
+const F8_SCALE: u32 = 2;
+
+/// Build a [`FontAtlas`] from the built-in `font8x8` bitmap font.
+///
+/// Used as a fallback when the real font file fails to load on an optional
+/// texture. The atlas covers the same printable ASCII range as the main
+/// rasterizer and produces white-on-transparent RGBA8 data.
+pub fn rasterize_font8x8_atlas() -> FontAtlas {
+    let chars: Vec<char> = ATLAS_CHARS.map(|b| b as char).collect();
+    let num_glyphs = chars.len();
+
+    let glyph_w: u32 = 8 * F8_SCALE;
+    let glyph_h: u32 = 8 * F8_SCALE;
+    let cell_w = glyph_w + 2; // 1px padding each side
+    let cell_h = glyph_h + 2;
+
+    let cols = (num_glyphs as f32).sqrt().ceil() as u32;
+    let rows = (num_glyphs as u32).div_ceil(cols);
+
+    let atlas_w = cols * cell_w;
+    let atlas_h = rows * cell_h;
+
+    let mut rgba = vec![0u8; (atlas_w * atlas_h * 4) as usize];
+    let mut glyphs = Vec::with_capacity(num_glyphs);
+
+    for (i, &ch) in chars.iter().enumerate() {
+        let col = (i as u32) % cols;
+        let row = (i as u32) / cols;
+        let base_x = col * cell_w + 1;
+        let base_y = row * cell_h + 1;
+
+        // Render the 8×8 glyph (scaled) into the atlas cell.
+        if let Some(bitmap) = font8x8::BASIC_FONTS.get(ch) {
+            for (gy, &glyph_row) in bitmap.iter().enumerate() {
+                for gx in 0..8u32 {
+                    if glyph_row & (1 << gx) != 0 {
+                        // Fill the scaled pixel block.
+                        for sy in 0..F8_SCALE {
+                            for sx in 0..F8_SCALE {
+                                let px = base_x + gx * F8_SCALE + sx;
+                                let py = base_y + (gy as u32) * F8_SCALE + sy;
+                                let idx = ((py * atlas_w + px) * 4) as usize;
+                                if idx + 3 < rgba.len() {
+                                    rgba[idx] = 255;     // R
+                                    rgba[idx + 1] = 255; // G
+                                    rgba[idx + 2] = 255; // B
+                                    rgba[idx + 3] = 255; // A
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let uv_min = [
+            base_x as f32 / atlas_w as f32,
+            base_y as f32 / atlas_h as f32,
+        ];
+        let uv_max = [
+            (base_x + glyph_w) as f32 / atlas_w as f32,
+            (base_y + glyph_h) as f32 / atlas_h as f32,
+        ];
+
+        glyphs.push(GlyphInfo {
+            ch,
+            index: i as u32,
+            advance_width: glyph_w as f32,
+            offset_x: 0.0,
+            offset_y: 0.0,
+            uv_min,
+            uv_max,
+        });
+    }
+
+    info!(
+        "font8x8 fallback atlas rasterized: {}x{} ({} glyphs, {}x scale)",
+        atlas_w, atlas_h, num_glyphs, F8_SCALE
+    );
+
+    FontAtlas {
+        rgba_data: rgba,
+        width: atlas_w,
+        height: atlas_h,
+        glyphs,
+        cols,
+        rows,
+        cell_width: cell_w,
+        cell_height: cell_h,
+    }
+}
+
 /// A rasterized font atlas texture.
 pub struct FontTexture {
     /// RGBA8 atlas pixel data.
@@ -167,21 +265,39 @@ pub struct FontTexture {
 
 impl FontTexture {
     /// Rasterize a font into an atlas texture.
-    pub fn load(font_data: &[u8], font_size: f32) -> Result<Self> {
-        let atlas = rasterize_font_atlas(font_data, font_size)?;
-        let width = atlas.width;
-        let height = atlas.height;
-        let rgba = atlas.rgba_data;
-        info!(
-            "FontTexture loaded ({}x{}, {:.0}px)",
-            width, height, font_size
-        );
-        Ok(Self {
-            rgba,
-            width,
-            height,
-            needs_upload: true,
-        })
+    ///
+    /// When `optional` is `true` and rasterization fails, the texture
+    /// degrades to a 1×1 transparent placeholder instead of returning an
+    /// error.
+    pub fn load(font_data: &[u8], font_size: f32, optional: bool) -> Result<Self> {
+        match rasterize_font_atlas(font_data, font_size) {
+            Ok(atlas) => {
+                let width = atlas.width;
+                let height = atlas.height;
+                let rgba = atlas.rgba_data;
+                info!(
+                    "FontTexture loaded ({}x{}, {:.0}px)",
+                    width, height, font_size
+                );
+                Ok(Self {
+                    rgba,
+                    width,
+                    height,
+                    needs_upload: true,
+                })
+            }
+            Err(e) if optional => {
+                warn!("Optional font failed to load (using font8x8 fallback): {}", e);
+                let atlas = rasterize_font8x8_atlas();
+                Ok(Self {
+                    width: atlas.width,
+                    height: atlas.height,
+                    rgba: atlas.rgba_data,
+                    needs_upload: true,
+                })
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 

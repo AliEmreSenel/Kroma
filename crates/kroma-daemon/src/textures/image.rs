@@ -54,12 +54,18 @@ impl ImageTexture {
     ///
     /// If `disk_source` is provided, initial load uses the same filesystem
     /// read path as hot-reload updates.
+    ///
+    /// When `optional` is `true` and any loading step fails, the texture
+    /// degrades to a 1×1 transparent placeholder rather than returning an
+    /// error. The hot-reload watcher (if enabled) stays active so the
+    /// texture resolves automatically when the file appears/changes.
     pub fn load(
         bytes: &[u8],
         _filter: &TextureFilter,
         _wrap: &TextureWrap,
         disk_source: Option<&Path>,
         hot_reload: bool,
+        optional: bool,
     ) -> Result<Self> {
         let hot_reload = if hot_reload {
             match SourceHotReload::from_source(disk_source) {
@@ -78,7 +84,7 @@ impl ImageTexture {
         };
 
         let mut tex = Self {
-            rgba: Vec::new(),
+            rgba: vec![0u8; 4], // 1×1 transparent placeholder
             width: 1,
             height: 1,
             needs_upload: true,
@@ -91,29 +97,42 @@ impl ImageTexture {
             .or(disk_source)
             .map(|p| p.to_path_buf());
 
-        if let Some(path) = initial_path.as_deref() {
-            tex.reload_from_source(path)?;
-            if tex.hot_reload.source_path().is_some() {
-                info!(
-                    "ImageTexture loaded ({}x{}) with watcher: {}",
-                    tex.width,
-                    tex.height,
-                    path.display()
-                );
-            } else {
-                info!(
-                    "ImageTexture loaded from disk ({}x{}): {}",
-                    tex.width,
-                    tex.height,
-                    path.display()
-                );
-            }
+        let load_result = if let Some(path) = initial_path.as_deref() {
+            tex.reload_from_source(path)
+        } else if !bytes.is_empty() {
+            Self::decode(bytes).map(|(rgba, w, h)| {
+                tex.rgba = rgba;
+                tex.width = w;
+                tex.height = h;
+            })
         } else {
-            let (rgba, width, height) = Self::decode(bytes)?;
-            tex.rgba = rgba;
-            tex.width = width;
-            tex.height = height;
-            info!("ImageTexture loaded ({}x{})", tex.width, tex.height);
+            Err(anyhow::anyhow!("No image data available"))
+        };
+
+        match load_result {
+            Ok(()) => {
+                if let Some(path) = initial_path.as_deref() {
+                    if tex.hot_reload.source_path().is_some() {
+                        info!(
+                            "ImageTexture loaded ({}x{}) with watcher: {}",
+                            tex.width, tex.height, path.display()
+                        );
+                    } else {
+                        info!(
+                            "ImageTexture loaded from disk ({}x{}): {}",
+                            tex.width, tex.height, path.display()
+                        );
+                    }
+                } else {
+                    info!("ImageTexture loaded ({}x{})", tex.width, tex.height);
+                }
+            }
+            Err(e) if optional => {
+                warn!("Optional image failed to load (using placeholder): {}", e);
+                // tex is already a 1×1 transparent placeholder; hot-reload
+                // watcher (if any) stays active for when file appears.
+            }
+            Err(e) => return Err(e),
         }
 
         Ok(tex)

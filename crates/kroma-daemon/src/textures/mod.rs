@@ -106,6 +106,12 @@ pub trait TextureSource {
 // ---------------------------------------------------------------------------
 
 /// Create a [`TextureSource`] from a shade package and texture definition.
+///
+/// Each texture type's `load()` method accepts `def.optional`: when `true`
+/// and loading fails, the texture degrades to a transparent placeholder
+/// instead of returning an error. Types with hot-reload support (Image,
+/// Video) keep their filesystem watcher active so the texture resolves
+/// automatically when the file appears.
 pub fn create_texture_source(
     pkg: &Arc<LiveShadePackage>,
     def: &TextureDef,
@@ -116,13 +122,21 @@ pub fn create_texture_source(
                 .source
                 .as_ref()
                 .context("Image texture requires a `source` path")?;
-            let (bytes, disk_path) = read_asset_or_disk_with_path(pkg, source)?;
+            // Resolve asset bytes + disk path. When the read fails and the
+            // texture is optional, pass empty bytes so ImageTexture::load
+            // can degrade to a placeholder with its hot-reload watcher.
+            let (bytes, disk_path) = match read_asset_or_disk_with_path(pkg, source) {
+                Ok(result) => result,
+                Err(_) if def.optional => (vec![], Some(PathBuf::from(source))),
+                Err(e) => return Err(e),
+            };
             let tex = self::image::ImageTexture::load(
                 &bytes,
                 &def.filter,
                 &def.wrap,
                 disk_path.as_deref(),
                 def.hot_reload,
+                def.optional,
             )?;
             Ok(Some(Box::new(tex)))
         }
@@ -131,7 +145,13 @@ pub fn create_texture_source(
                 .source
                 .as_ref()
                 .context("Video texture requires a `source` path")?;
-            let tex = create_video_source(pkg, source, def.looping, def.hot_reload)?;
+            let tex = create_video_source(
+                pkg,
+                source,
+                def.looping,
+                def.hot_reload,
+                def.optional,
+            )?;
             Ok(Some(Box::new(tex)))
         }
         TextureType::Font => {
@@ -139,9 +159,13 @@ pub fn create_texture_source(
                 .source
                 .as_ref()
                 .context("Font texture requires a `source` path")?;
-            let bytes = read_asset_or_disk(pkg, source)?;
+            let bytes = match read_asset_or_disk(pkg, source) {
+                Ok(b) => b,
+                Err(_) if def.optional => vec![],
+                Err(e) => return Err(e),
+            };
             let size = def.font_size.unwrap_or(32.0);
-            let tex = self::font::FontTexture::load(&bytes, size)?;
+            let tex = self::font::FontTexture::load(&bytes, size, def.optional)?;
             Ok(Some(Box::new(tex)))
         }
         TextureType::Slideshow => {
@@ -152,13 +176,14 @@ pub fn create_texture_source(
                 interval,
                 def.shuffle,
                 def.hot_reload,
+                def.optional,
             )?;
             Ok(Some(Box::new(tex)))
         }
         TextureType::AudioSpectrum => {
             let source = def.source.as_deref().unwrap_or("desktop");
             let bands = def.fft_bands.unwrap_or(512);
-            let tex = self::audio::AudioTexture::load(source, bands)?;
+            let tex = self::audio::AudioTexture::load(source, bands, def.optional)?;
             Ok(Some(Box::new(tex)))
         }
     }
@@ -201,9 +226,18 @@ pub fn create_video_source(
     source: &str,
     looping: bool,
     hot_reload: bool,
+    optional: bool,
 ) -> Result<self::video::VideoTexture> {
-    let (path, is_external_disk) = resolve_video_path_with_origin(pkg, source)?;
-    self::video::VideoTexture::load(&path, looping, hot_reload && is_external_disk)
+    let (path, is_external_disk) = match resolve_video_path_with_origin(pkg, source) {
+        Ok(result) => result,
+        Err(_) if optional => {
+            // Asset not found — pass the raw source path so the
+            // VideoTexture watcher can monitor it.
+            (PathBuf::from(source), true)
+        }
+        Err(e) => return Err(e),
+    };
+    self::video::VideoTexture::load(&path, looping, hot_reload && is_external_disk, optional)
 }
 
 /// Resolve a video source to a filesystem path, also returning whether the

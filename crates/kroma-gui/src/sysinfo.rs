@@ -50,9 +50,10 @@ pub(crate) fn read_battery_pct() -> Option<f32> {
     for bat in &["BAT0", "BAT1"] {
         let path = format!("/sys/class/power_supply/{}/capacity", bat);
         if let Ok(contents) = std::fs::read_to_string(&path)
-            && let Ok(pct) = contents.trim().parse::<f32>() {
-                return Some(pct.clamp(0.0, 100.0));
-            }
+            && let Ok(pct) = contents.trim().parse::<f32>()
+        {
+            return Some(pct.clamp(0.0, 100.0));
+        }
     }
     None
 }

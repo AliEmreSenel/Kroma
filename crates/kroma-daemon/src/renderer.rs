@@ -16,23 +16,58 @@ use wgpu::wgt::PollType;
 
 use crate::{
     config::GpuPower,
+    fallback,
     textures::{self, TextureSource, TextureUpdate},
 };
 
 /// Fullscreen triangle vertex shader.
 const FULLSCREEN_VERT_WGSL: &str = include_str!("shaders/fullscreen.vert.wgsl");
 
-/// Fallback fragment shader when no shade is loaded.
-const FALLBACK_NO_SHADE_FRAG_WGSL: &str = include_str!("shaders/fallback_no_shade.frag.wgsl");
-
 /// Fragment shader for image/video mode — samples texture 0.
 const IMAGE_SAMPLER_FRAG_WGSL: &str = include_str!("shaders/image_sampler.frag.wgsl");
+
+/// Fallback fragment shader for error display (text bitmap + GPU background).
+const FALLBACK_ERROR_FRAG_WGSL: &str = include_str!("shaders/fallback_error.frag.wgsl");
+
+/// Minimal solid-color shader used only during GPU init, before the real
+/// fallback (which needs a texture bind group) is set up.
+const INIT_FRAG_WGSL: &str = include_str!("shaders/init.frag.wgsl");
 
 /// The preferred surface texture format.
 const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
 /// Maximum number of custom uniform float slots.
 const MAX_CUSTOM_UNIFORMS: usize = 32;
+
+// ---------------------------------------------------------------------------
+// Shade load outcome
+// ---------------------------------------------------------------------------
+
+/// Outcome of [`RenderState::load_shade`].
+///
+/// The daemon should inspect this to decide what IPC message to send.
+#[derive(Debug)]
+pub enum ShadeLoadOutcome {
+    /// Shade loaded and compiled successfully.
+    Success,
+    /// One or more **required** textures could not be loaded.
+    /// The daemon is now rendering a fallback error image showing the paths.
+    TextureError(Vec<TextureLoadFailure>),
+    /// The GLSL shader failed to compile / translate.
+    /// The daemon is now rendering a fallback error image showing the message.
+    CompileError(String),
+}
+
+/// Describes a single texture that failed to load.
+#[derive(Debug, Clone)]
+pub struct TextureLoadFailure {
+    /// Config key / channel name.
+    pub name: String,
+    /// The `source` path from config (or "<unknown>").
+    pub source: String,
+    /// Human-readable error message.
+    pub error: String,
+}
 
 /// A loaded GPU texture with its sampler.
 #[derive(Debug)]
@@ -137,7 +172,7 @@ impl RenderState {
             texture_sources: Vec::new(),
             texture_bind_group: None,
             texture_bind_group_layout: None,
-            current_frag_wgsl: FALLBACK_NO_SHADE_FRAG_WGSL.to_string(),
+            current_frag_wgsl: INIT_FRAG_WGSL.to_string(),
             buffer_passes: Vec::new(),
         })
     }
@@ -325,7 +360,14 @@ impl RenderState {
     /// If the package has a GLSL shader, translates it to WGSL and builds the
     /// pipeline. If it has image/video assets, loads them as GPU textures.
     /// If there is no shader, uses either a texture sampler or a no-shade fallback.
-    pub fn load_shade(&mut self, pkg: LiveShadePackage) -> Result<()> {
+    ///
+    /// On texture or shader errors the renderer switches to a fallback error
+    /// image (rendered via `font8x8`) instead of propagating the error.
+    pub fn load_shade(
+        &mut self,
+        pkg: LiveShadePackage,
+        shade_path: Option<&str>,
+    ) -> Result<ShadeLoadOutcome> {
         let pkg = Arc::new(pkg);
 
         // Reset texture state
@@ -334,7 +376,25 @@ impl RenderState {
         self.buffer_passes.clear();
 
         // Load all textures from package config
-        self.load_package_textures(&pkg)?;
+        let tex_failures = self.load_package_textures(&pkg)?;
+
+        // If any *required* textures failed, switch to fallback error display.
+        if !tex_failures.is_empty() {
+            let paths: Vec<String> = tex_failures
+                .iter()
+                .map(|f| format!("{}: {} ({})", f.name, f.source, f.error))
+                .collect();
+            self.switch_to_fallback_error(
+                fallback::render_texture_error,
+                &paths,
+            )?;
+            info!(
+                "Shade '{}' loaded with texture errors — showing fallback",
+                pkg.config.meta.name,
+            );
+            self.active_package = Some(pkg);
+            return Ok(ShadeLoadOutcome::TextureError(tex_failures));
+        }
 
         // Initialize custom uniforms (creates storage buffer + rebuilds BGL0).
         // Must happen BEFORE shader compilation so GLSL referencing binding=1 works.
@@ -353,7 +413,21 @@ impl RenderState {
                         for (i, line) in glsl_source.lines().enumerate() {
                             log::debug!("  {:>4}: {}", i + 1, line);
                         }
-                        return Err(e.context("Failed to translate GLSL shader to WGSL"));
+                        let error_msg = format!("{:#}", e);
+                        let display_path = shade_path
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| pkg.config.meta.name.clone());
+                        let paths = vec![display_path];
+                        self.switch_to_fallback_error(
+                            |p, w, h| fallback::render_load_error(&error_msg, p, w, h),
+                            &paths,
+                        )?;
+                        info!(
+                            "Shade '{}' shader failed to compile — showing fallback",
+                            pkg.config.meta.name,
+                        );
+                        self.active_package = Some(pkg);
+                        return Ok(ShadeLoadOutcome::CompileError(error_msg));
                     }
                 };
 
@@ -367,19 +441,18 @@ impl RenderState {
             None => {
                 // No shader — pick a fallback based on available assets.
                 // If there are textures (images, video, fonts), sample the first one.
-                // Otherwise, render the no-shade fallback and wait for a loaded package.
-                let fallback_wgsl = if !self.textures.is_empty() {
+                // Otherwise, show the "no shade" fallback via the error display.
+                if !self.textures.is_empty() {
                     info!(
                         "Using texture sampler fallback ({} textures loaded)",
                         self.textures.len()
                     );
-                    IMAGE_SAMPLER_FRAG_WGSL.to_string()
+                    self.rebuild_pipeline_with_frag(IMAGE_SAMPLER_FRAG_WGSL)?;
+                    self.current_frag_wgsl = IMAGE_SAMPLER_FRAG_WGSL.to_string();
                 } else {
                     info!("No shader or textures in package — using no-shade fallback");
-                    FALLBACK_NO_SHADE_FRAG_WGSL.to_string()
-                };
-                self.rebuild_pipeline_with_frag(&fallback_wgsl)?;
-                self.current_frag_wgsl = fallback_wgsl;
+                    self.show_no_shade_fallback()?;
+                }
             }
         }
 
@@ -389,7 +462,7 @@ impl RenderState {
             self.textures.len()
         );
         self.active_package = Some(pkg);
-        Ok(())
+        Ok(ShadeLoadOutcome::Success)
     }
 
     /// Hot-reload: takes raw Shadertoy-compatible GLSL, translates and loads it.
@@ -712,7 +785,14 @@ impl RenderState {
     /// and corresponding GPU textures. The sources manage their own
     /// lifecycles — call [`update_textures`](RenderState::update_textures)
     /// each frame to advance them.
-    fn load_package_textures(&mut self, pkg: &Arc<LiveShadePackage>) -> Result<()> {
+    ///
+    /// Returns a (possibly empty) list of **required** textures that failed
+    /// to load. Optional textures that fail get a 1×1 transparent placeholder
+    /// so binding indices stay consistent.
+    fn load_package_textures(
+        &mut self,
+        pkg: &Arc<LiveShadePackage>,
+    ) -> Result<Vec<TextureLoadFailure>> {
         let device = self
             .device
             .as_ref()
@@ -721,6 +801,8 @@ impl RenderState {
 
         self.texture_bind_group = None;
         self.texture_bind_group_layout = None;
+
+        let mut required_failures: Vec<TextureLoadFailure> = Vec::new();
 
         // Collect texture defs sorted by binding index
         let mut tex_defs: Vec<_> = pkg.config.textures.iter().collect();
@@ -756,7 +838,47 @@ impl RenderState {
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    warn!("Failed to create texture source '{}': {}", name, e);
+                    let source_path = def
+                        .source
+                        .as_deref()
+                        .unwrap_or("<unknown>")
+                        .to_string();
+
+                    if def.optional {
+                        // Optional texture: push a transparent 1×1 RGBA placeholder
+                        // so binding indices remain consistent.  Image and Video
+                        // optional failures are already handled inside
+                        // `create_texture_source` (they return a degraded source
+                        // with a hot-reload watcher), so this branch only fires
+                        // for other types (Font, Slideshow, AudioSpectrum).
+                        warn!(
+                            "Optional texture '{}' failed to load (using placeholder): {}",
+                            name, e
+                        );
+                        let placeholder_data = vec![0u8; 4]; // transparent black
+                        let placeholder = Self::create_gpu_texture(
+                            device,
+                            queue,
+                            &placeholder_data,
+                            1,
+                            1,
+                            wgpu::TextureFormat::Rgba8UnormSrgb,
+                            name,
+                        );
+                        self.textures.push(placeholder);
+                        self.texture_sources.push(None);
+                    } else {
+                        // Required texture: record the failure.
+                        warn!(
+                            "Required texture '{}' failed to load: {}",
+                            name, e
+                        );
+                        required_failures.push(TextureLoadFailure {
+                            name: name.to_string(),
+                            source: source_path,
+                            error: format!("{:#}", e),
+                        });
+                    }
                 }
             }
         }
@@ -766,7 +888,7 @@ impl RenderState {
             self.build_texture_bind_group()?;
         }
 
-        Ok(())
+        Ok(required_failures)
     }
 
     /// Advance all texture sources and upload changed frames to the GPU.
@@ -923,6 +1045,86 @@ impl RenderState {
             num_textures, entry_count
         );
         Ok(())
+    }
+
+    /// Switch the renderer to a fullscreen error-image fallback.
+    ///
+    /// `render_fn` generates an `Rgba8Unorm` text bitmap given `(paths, width, height)`.
+    /// The R channel encodes the text region type (title / subtitle / path);
+    /// the GPU shader handles all visual rendering (background, colors, shadow).
+    fn switch_to_fallback_error<F>(
+        &mut self,
+        render_fn: F,
+        paths: &[String],
+    ) -> Result<()>
+    where
+        F: FnOnce(&[String], u32, u32) -> Vec<u8>,
+    {
+        let device = self.device.as_ref().context("GPU not initialised")?;
+        let queue = self.queue.as_ref().context("GPU queue not initialised")?;
+
+        let (width, height) = self
+            .surface_config
+            .as_ref()
+            .map(|c| (c.width, c.height))
+            .unwrap_or((1920, 1080));
+
+        let text_bitmap = render_fn(paths, width, height);
+
+        // Replace all textures with the single text-bitmap texture.
+        self.textures.clear();
+        self.texture_sources.clear();
+
+        // Use Rgba8Unorm (linear) so the shader reads exact region codes
+        // without sRGB gamma decoding.
+        let error_tex = Self::create_gpu_texture(
+            device,
+            queue,
+            &text_bitmap,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "fallback-error-text",
+        );
+        self.textures.push(error_tex);
+        self.texture_sources.push(None);
+
+        // Ensure BGL0 exists (uniform buffer + optional custom uniform buffer).
+        if self.bind_group_layout.is_none() {
+            self.rebuild_bind_group_0()?;
+        }
+
+        // Rebuild texture bind group for the single text-bitmap texture.
+        self.build_texture_bind_group()?;
+
+        // Use the dedicated error fallback shader (GPU-rendered background + text).
+        self.rebuild_pipeline_with_frag(FALLBACK_ERROR_FRAG_WGSL)?;
+        self.current_frag_wgsl = FALLBACK_ERROR_FRAG_WGSL.to_string();
+
+        info!("Switched to GPU fallback error display ({}x{})", width, height);
+        Ok(())
+    }
+
+    /// Show the "no shade loaded" fallback via the same font8x8 mechanism.
+    ///
+    /// Called on startup when no shade is configured, or when a package has
+    /// no shader and no textures.
+    pub fn show_no_shade_fallback(&mut self) -> Result<()> {
+        self.switch_to_fallback_error(
+            |_paths, w, h| fallback::render_no_shade(w, h),
+            &[],
+        )
+    }
+
+    /// Show a load-error fallback when a shade package fails to open or load.
+    ///
+    /// `path` is the shade file that was requested, `details` is the error.
+    pub fn switch_to_load_error(&mut self, path: &str, details: &str) -> Result<()> {
+        let detail_str = details.to_string();
+        self.switch_to_fallback_error(
+            move |paths, w, h| fallback::render_load_error(&detail_str, paths, w, h),
+            &[path.to_string()],
+        )
     }
 
     /// Get the audio level from the first audio texture source, if any.

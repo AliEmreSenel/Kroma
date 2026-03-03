@@ -318,36 +318,35 @@ fn draw_node(
         frame.fill_text(port_label);
 
         // Show editable default value for unconnected Float inputs
-        if !is_connected
-            && let Some(def) = node.defaults.get(i) {
-                let val_str = match def {
-                    DefaultValue::Float(v) => format!("{:.2}", v),
-                    DefaultValue::Vec2(v) => format!("{:.1}, {:.1}", v[0], v[1]),
-                    DefaultValue::Vec3(v) => format!("{:.1}, {:.1}, {:.1}", v[0], v[1], v[2]),
-                    DefaultValue::Vec4(v) => {
-                        format!("{:.1},{:.1},{:.1},{:.1}", v[0], v[1], v[2], v[3])
-                    }
-                };
-                // Background pill for the value
-                let val_x = x + 60.0 * zoom;
-                let val_w = w - 65.0 * zoom;
-                let val_h = 14.0 * zoom;
-                let val_y = py - 7.0 * zoom;
-                let pill = Path::rounded_rectangle(
-                    Point::new(val_x, val_y),
-                    Size::new(val_w, val_h),
-                    (3.0 * zoom).into(),
-                );
-                frame.fill(&pill, Color::from_rgba(0.0, 0.0, 0.0, 0.3));
-                let value_text = Text {
-                    content: val_str,
-                    position: Point::new(val_x + 4.0 * zoom, val_y + 1.0 * zoom),
-                    color: Color::from_rgb(0.9, 0.85, 0.6),
-                    size: iced::Pixels(10.0 * zoom),
-                    ..Text::default()
-                };
-                frame.fill_text(value_text);
-            }
+        if !is_connected && let Some(def) = node.defaults.get(i) {
+            let val_str = match def {
+                DefaultValue::Float(v) => format!("{:.2}", v),
+                DefaultValue::Vec2(v) => format!("{:.1}, {:.1}", v[0], v[1]),
+                DefaultValue::Vec3(v) => format!("{:.1}, {:.1}, {:.1}", v[0], v[1], v[2]),
+                DefaultValue::Vec4(v) => {
+                    format!("{:.1},{:.1},{:.1},{:.1}", v[0], v[1], v[2], v[3])
+                }
+            };
+            // Background pill for the value
+            let val_x = x + 60.0 * zoom;
+            let val_w = w - 65.0 * zoom;
+            let val_h = 14.0 * zoom;
+            let val_y = py - 7.0 * zoom;
+            let pill = Path::rounded_rectangle(
+                Point::new(val_x, val_y),
+                Size::new(val_w, val_h),
+                (3.0 * zoom).into(),
+            );
+            frame.fill(&pill, Color::from_rgba(0.0, 0.0, 0.0, 0.3));
+            let value_text = Text {
+                content: val_str,
+                position: Point::new(val_x + 4.0 * zoom, val_y + 1.0 * zoom),
+                color: Color::from_rgb(0.9, 0.85, 0.6),
+                size: iced::Pixels(10.0 * zoom),
+                ..Text::default()
+            };
+            frame.fill_text(value_text);
+        }
     }
 
     // Output ports
@@ -436,46 +435,45 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 // Check if hovering over an input port — adjust default value
                 if let Some((node_id, dir, port_idx, _)) =
                     self.hit_test_port(cursor_pos, offset, zoom)
-                    && dir == PortDirection::Input {
-                        // Check if this port is unconnected
-                        let is_connected = self
-                            .graph
-                            .connections()
-                            .iter()
-                            .any(|c| c.to.node == node_id && c.to.port == port_idx);
-                        if !is_connected
-                            && let Some(node) = self.graph.node(node_id)
-                                && let Some(def) = node.defaults.get(port_idx) {
-                                    let step = 0.1 * scroll_y;
-                                    let clamp = |x: f32| x.clamp(-1000.0, 1000.0);
-                                    let new_def = match def {
-                                        DefaultValue::Float(v) => {
-                                            DefaultValue::Float(clamp(v + step))
-                                        }
-                                        DefaultValue::Vec2(v) => DefaultValue::Vec2([
-                                            clamp(v[0] + step),
-                                            clamp(v[1] + step),
-                                        ]),
-                                        DefaultValue::Vec3(v) => DefaultValue::Vec3([
-                                            clamp(v[0] + step),
-                                            clamp(v[1] + step),
-                                            clamp(v[2] + step),
-                                        ]),
-                                        DefaultValue::Vec4(v) => DefaultValue::Vec4([
-                                            clamp(v[0] + step),
-                                            clamp(v[1] + step),
-                                            clamp(v[2] + step),
-                                            clamp(v[3] + step),
-                                        ]),
-                                    };
-                                    return Some(
-                                        Action::publish(GraphMessage::DefaultChanged(
-                                            node_id, port_idx, new_def,
-                                        ))
-                                        .and_capture(),
-                                    );
-                                }
+                    && dir == PortDirection::Input
+                {
+                    // Check if this port is unconnected
+                    let is_connected = self
+                        .graph
+                        .connections()
+                        .iter()
+                        .any(|c| c.to.node == node_id && c.to.port == port_idx);
+                    if !is_connected
+                        && let Some(node) = self.graph.node(node_id)
+                        && let Some(def) = node.defaults.get(port_idx)
+                    {
+                        let step = 0.1 * scroll_y;
+                        let clamp = |x: f32| x.clamp(-1000.0, 1000.0);
+                        let new_def = match def {
+                            DefaultValue::Float(v) => DefaultValue::Float(clamp(v + step)),
+                            DefaultValue::Vec2(v) => {
+                                DefaultValue::Vec2([clamp(v[0] + step), clamp(v[1] + step)])
+                            }
+                            DefaultValue::Vec3(v) => DefaultValue::Vec3([
+                                clamp(v[0] + step),
+                                clamp(v[1] + step),
+                                clamp(v[2] + step),
+                            ]),
+                            DefaultValue::Vec4(v) => DefaultValue::Vec4([
+                                clamp(v[0] + step),
+                                clamp(v[1] + step),
+                                clamp(v[2] + step),
+                                clamp(v[3] + step),
+                            ]),
+                        };
+                        return Some(
+                            Action::publish(GraphMessage::DefaultChanged(
+                                node_id, port_idx, new_def,
+                            ))
+                            .and_capture(),
+                        );
                     }
+                }
 
                 // Otherwise: zoom
                 let factor = if *scroll_y > 0.0 { 1.1 } else { 1.0 / 1.1 };
@@ -501,27 +499,28 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 if is_double_click
                     && let Some((node_id, port_idx)) =
                         self.hit_test_value_pill(cursor_pos, offset, zoom)
-                    {
-                        return Some(
-                            Action::publish(GraphMessage::StartEditValue(node_id, port_idx))
-                                .and_capture(),
-                        );
-                    }
+                {
+                    return Some(
+                        Action::publish(GraphMessage::StartEditValue(node_id, port_idx))
+                            .and_capture(),
+                    );
+                }
 
                 // Check if clicking on a port first
                 if let Some((node_id, dir, port_idx, port_pos)) =
                     self.hit_test_port(cursor_pos, offset, zoom)
-                    && dir == PortDirection::Output {
-                        state.interaction = Interaction::DraggingWire {
-                            from: PortAddr {
-                                node: node_id,
-                                port: port_idx,
-                            },
-                            from_pos: port_pos,
-                            end: cursor_pos,
-                        };
-                        return Some(Action::capture());
-                    }
+                    && dir == PortDirection::Output
+                {
+                    state.interaction = Interaction::DraggingWire {
+                        from: PortAddr {
+                            node: node_id,
+                            port: port_idx,
+                        },
+                        from_pos: port_pos,
+                        end: cursor_pos,
+                    };
+                    return Some(Action::capture());
+                }
 
                 // Check if clicking on a wire (connection)
                 if let Some(conn_id) = self.hit_test_wire(cursor_pos, offset, zoom) {
@@ -541,13 +540,14 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                     );
                     if is_subgraph_node {
                         if let Some((last_time, last_id)) = state.last_click
-                            && last_id == node_id && last_time.elapsed().as_millis() < 400 {
-                                state.last_click = None;
-                                return Some(
-                                    Action::publish(GraphMessage::EnterSubGraph(node_id))
-                                        .and_capture(),
-                                );
-                            }
+                            && last_id == node_id
+                            && last_time.elapsed().as_millis() < 400
+                        {
+                            state.last_click = None;
+                            return Some(
+                                Action::publish(GraphMessage::EnterSubGraph(node_id)).and_capture(),
+                            );
+                        }
                         state.last_click = Some((std::time::Instant::now(), node_id));
                     } else {
                         state.last_click = None;
@@ -839,39 +839,38 @@ impl<'a> canvas::Program<GraphMessage> for GraphProgram<'a> {
                 if let (Some(from_port), Some(to_port)) = (
                     from_node.outputs().get(conn.from.port),
                     to_node.inputs().get(conn.to.port),
-                )
-                    && from_port.data_type == DataType::Float
-                        && from_port.data_type != to_port.data_type
-                    {
-                        let to_color = data_type_color(to_port.data_type, self.tokens);
-                        // Diamond indicator near the target port
-                        let dx = to_pt.x - 14.0 * zoom;
-                        let dy = to_pt.y;
-                        let ds = 4.0 * zoom;
-                        let diamond = Path::new(|b| {
-                            b.move_to(Point::new(dx, dy - ds));
-                            b.line_to(Point::new(dx + ds, dy));
-                            b.line_to(Point::new(dx, dy + ds));
-                            b.line_to(Point::new(dx - ds, dy));
-                            b.close();
-                        });
-                        frame.fill(&diamond, to_color);
-                        frame.stroke(
-                            &diamond,
-                            Stroke::default()
-                                .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.6))
-                                .with_width(1.0),
-                        );
-                        // Small type label
-                        let type_label = Text {
-                            content: to_port.data_type.glsl_type().to_string(),
-                            position: Point::new(dx - 16.0 * zoom, dy - 8.0 * zoom),
-                            color: Color::from_rgba(to_color.r, to_color.g, to_color.b, 0.7),
-                            size: iced::Pixels(9.0 * zoom),
-                            ..Text::default()
-                        };
-                        frame.fill_text(type_label);
-                    }
+                ) && from_port.data_type == DataType::Float
+                    && from_port.data_type != to_port.data_type
+                {
+                    let to_color = data_type_color(to_port.data_type, self.tokens);
+                    // Diamond indicator near the target port
+                    let dx = to_pt.x - 14.0 * zoom;
+                    let dy = to_pt.y;
+                    let ds = 4.0 * zoom;
+                    let diamond = Path::new(|b| {
+                        b.move_to(Point::new(dx, dy - ds));
+                        b.line_to(Point::new(dx + ds, dy));
+                        b.line_to(Point::new(dx, dy + ds));
+                        b.line_to(Point::new(dx - ds, dy));
+                        b.close();
+                    });
+                    frame.fill(&diamond, to_color);
+                    frame.stroke(
+                        &diamond,
+                        Stroke::default()
+                            .with_color(Color::from_rgba(1.0, 1.0, 1.0, 0.6))
+                            .with_width(1.0),
+                    );
+                    // Small type label
+                    let type_label = Text {
+                        content: to_port.data_type.glsl_type().to_string(),
+                        position: Point::new(dx - 16.0 * zoom, dy - 8.0 * zoom),
+                        color: Color::from_rgba(to_color.r, to_color.g, to_color.b, 0.7),
+                        size: iced::Pixels(9.0 * zoom),
+                        ..Text::default()
+                    };
+                    frame.fill_text(type_label);
+                }
             }
         }
 

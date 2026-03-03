@@ -357,243 +357,238 @@ impl KromaApp {
         let short = asset_name.rsplit('/').next().unwrap_or(asset_name);
         let ext = short.rsplit('.').next().unwrap_or("").to_lowercase();
         if let Some(ref pkg) = self.shade_package
-            && let Some(data) = pkg.read_asset(asset_name) {
-                let size = data.len();
-                let data = data.as_slice();
-                let size_str = if size > 1_048_576 {
-                    format!("{:.1} MB", size as f64 / 1_048_576.0)
-                } else if size > 1024 {
-                    format!("{:.1} KB", size as f64 / 1024.0)
-                } else {
-                    format!("{} bytes", size)
-                };
+            && let Some(data) = pkg.read_asset(asset_name)
+        {
+            let size = data.len();
+            let data = data.as_slice();
+            let size_str = if size > 1_048_576 {
+                format!("{:.1} MB", size as f64 / 1_048_576.0)
+            } else if size > 1024 {
+                format!("{:.1} KB", size as f64 / 1024.0)
+            } else {
+                format!("{} bytes", size)
+            };
 
-                // Build "Bind to Channel" UI for bindable asset types
-                let is_bindable = matches!(
-                    ext.as_str(),
-                    "jpg"
-                        | "jpeg"
-                        | "png"
-                        | "bmp"
-                        | "gif"
-                        | "webp"
-                        | "mp4"
-                        | "webm"
-                        | "avi"
-                        | "mkv"
-                        | "glsl"
-                        | "frag"
-                );
-                let bind_section: Element<'_, Message> = if is_bindable {
-                    // Find which channel this asset is already bound to (if any)
-                    let current_binding: Option<(String, u32)> = self
-                        .shade_config
-                        .textures
-                        .iter()
-                        .find(|(_, t)| t.source.as_deref() == Some(asset_name))
-                        .map(|(name, t)| (name.clone(), t.binding.unwrap_or(0)));
+            // Build "Bind to Channel" UI for bindable asset types
+            let is_bindable = matches!(
+                ext.as_str(),
+                "jpg"
+                    | "jpeg"
+                    | "png"
+                    | "bmp"
+                    | "gif"
+                    | "webp"
+                    | "mp4"
+                    | "webm"
+                    | "avi"
+                    | "mkv"
+                    | "glsl"
+                    | "frag"
+            );
+            let bind_section: Element<'_, Message> = if is_bindable {
+                // Find which channel this asset is already bound to (if any)
+                let current_binding: Option<(String, u32)> = self
+                    .shade_config
+                    .textures
+                    .iter()
+                    .find(|(_, t)| t.source.as_deref() == Some(asset_name))
+                    .map(|(name, t)| (name.clone(), t.binding.unwrap_or(0)));
 
-                    let mut bind_items: Vec<Element<'_, Message>> = Vec::new();
-                    bind_items.push(Space::new().height(12).into());
+                let mut bind_items: Vec<Element<'_, Message>> = Vec::new();
+                bind_items.push(Space::new().height(12).into());
 
-                    if let Some((ref ch_name, _idx)) = current_binding {
-                        bind_items.push(
-                            row![
-                                text(icons::CHECK)
-                                    .font(icons::ICON_FONT)
-                                    .size(13)
-                                    .color(self.theme_tokens.success),
-                                text(format!("Currently bound to: {}", ch_name))
-                                    .size(13)
-                                    .color(self.theme_tokens.success),
-                            ]
-                            .spacing(4)
-                            .align_y(iced::Alignment::Center)
-                            .into(),
-                        );
-                        bind_items.push(Space::new().height(4).into());
-                    }
-
-                    bind_items.push(text("Bind to texture channel:").size(12).into());
-                    let asset_owned = asset_name.to_string();
-                    let mut channel_btns: Vec<Element<'_, Message>> = Vec::new();
-                    for ch in 0u32..4 {
-                        let ch_name = format!("iChannel{}", ch);
-                        let is_current = current_binding
-                            .as_ref()
-                            .map(|(_n, idx)| *idx == ch)
-                            .unwrap_or(false);
-                        let is_occupied =
-                            self.shade_config.textures.contains_key(&ch_name) && !is_current;
-                        let label = if is_current {
-                            format!("[v] Ch{}", ch)
-                        } else if is_occupied {
-                            let occ_src = self
-                                .shade_config
-                                .textures
-                                .get(&ch_name)
-                                .and_then(|t| t.source.as_ref())
-                                .map(|s| s.rsplit('/').next().unwrap_or(s).to_string())
-                                .unwrap_or_else(|| "used".into());
-                            format!("Ch{} ({})", ch, occ_src)
-                        } else {
-                            format!("Ch{}", ch)
-                        };
-                        let a_name = asset_owned.clone();
-                        let msg = Message::ShadeBindAssetToTexture(a_name, ch);
-                        // Build button inline to avoid lifetime issue with owned label
-                        if is_current {
-                            let bg = self.theme_tokens.button_primary;
-                            let txt = self.theme_tokens.text_primary;
-                            let hover = self.theme_tokens.button_hover;
-                            channel_btns.push(
-                                button(text(label).size(12))
-                                    .padding(Padding::from([6, 12]))
-                                    .on_press(msg)
-                                    .style(move |_theme: &Theme, status| match status {
-                                        button::Status::Hovered => button::Style {
-                                            background: Some(hover.into()),
-                                            text_color: txt,
-                                            border: Border::default().rounded(6),
-                                            ..Default::default()
-                                        },
-                                        _ => button::Style {
-                                            background: Some(bg.into()),
-                                            text_color: txt,
-                                            border: Border::default().rounded(6),
-                                            ..Default::default()
-                                        },
-                                    })
-                                    .into(),
-                            );
-                        } else {
-                            let bg = self.theme_tokens.bg_tertiary;
-                            let txt = self.theme_tokens.text_primary;
-                            let bdr = self.theme_tokens.border_default;
-                            let hover = self.theme_tokens.bg_secondary;
-                            channel_btns.push(
-                                button(text(label).size(12))
-                                    .padding(Padding::from([6, 12]))
-                                    .on_press(msg)
-                                    .style(move |_theme: &Theme, status| match status {
-                                        button::Status::Hovered => button::Style {
-                                            background: Some(hover.into()),
-                                            text_color: txt,
-                                            border: Border::default()
-                                                .rounded(6)
-                                                .width(1)
-                                                .color(bdr),
-                                            ..Default::default()
-                                        },
-                                        _ => button::Style {
-                                            background: Some(bg.into()),
-                                            text_color: txt,
-                                            border: Border::default()
-                                                .rounded(6)
-                                                .width(1)
-                                                .color(bdr),
-                                            ..Default::default()
-                                        },
-                                    })
-                                    .into(),
-                            );
-                        }
-                    }
+                if let Some((ref ch_name, _idx)) = current_binding {
                     bind_items.push(
-                        row(channel_btns)
-                            .spacing(6)
-                            .align_y(iced::Alignment::Center)
-                            .into(),
+                        row![
+                            text(icons::CHECK)
+                                .font(icons::ICON_FONT)
+                                .size(13)
+                                .color(self.theme_tokens.success),
+                            text(format!("Currently bound to: {}", ch_name))
+                                .size(13)
+                                .color(self.theme_tokens.success),
+                        ]
+                        .spacing(4)
+                        .align_y(iced::Alignment::Center)
+                        .into(),
                     );
+                    bind_items.push(Space::new().height(4).into());
+                }
 
-                    column(bind_items).spacing(4).into()
-                } else {
-                    Space::new().height(0).into()
-                };
-
-                let content: Element<'_, Message> = match ext.as_str() {
-                    "glsl" | "frag" | "vert" => {
-                        let source = String::from_utf8_lossy(data);
-                        column![
-                            scrollable(text(source.to_string()).size(12))
-                                .width(Fill)
-                                .height(Fill),
-                            bind_section,
-                        ]
-                        .spacing(4)
-                        .into()
+                bind_items.push(text("Bind to texture channel:").size(12).into());
+                let asset_owned = asset_name.to_string();
+                let mut channel_btns: Vec<Element<'_, Message>> = Vec::new();
+                for ch in 0u32..4 {
+                    let ch_name = format!("iChannel{}", ch);
+                    let is_current = current_binding
+                        .as_ref()
+                        .map(|(_n, idx)| *idx == ch)
+                        .unwrap_or(false);
+                    let is_occupied =
+                        self.shade_config.textures.contains_key(&ch_name) && !is_current;
+                    let label = if is_current {
+                        format!("[v] Ch{}", ch)
+                    } else if is_occupied {
+                        let occ_src = self
+                            .shade_config
+                            .textures
+                            .get(&ch_name)
+                            .and_then(|t| t.source.as_ref())
+                            .map(|s| s.rsplit('/').next().unwrap_or(s).to_string())
+                            .unwrap_or_else(|| "used".into());
+                        format!("Ch{} ({})", ch, occ_src)
+                    } else {
+                        format!("Ch{}", ch)
+                    };
+                    let a_name = asset_owned.clone();
+                    let msg = Message::ShadeBindAssetToTexture(a_name, ch);
+                    // Build button inline to avoid lifetime issue with owned label
+                    if is_current {
+                        let bg = self.theme_tokens.button_primary;
+                        let txt = self.theme_tokens.text_primary;
+                        let hover = self.theme_tokens.button_hover;
+                        channel_btns.push(
+                            button(text(label).size(12))
+                                .padding(Padding::from([6, 12]))
+                                .on_press(msg)
+                                .style(move |_theme: &Theme, status| match status {
+                                    button::Status::Hovered => button::Style {
+                                        background: Some(hover.into()),
+                                        text_color: txt,
+                                        border: Border::default().rounded(6),
+                                        ..Default::default()
+                                    },
+                                    _ => button::Style {
+                                        background: Some(bg.into()),
+                                        text_color: txt,
+                                        border: Border::default().rounded(6),
+                                        ..Default::default()
+                                    },
+                                })
+                                .into(),
+                        );
+                    } else {
+                        let bg = self.theme_tokens.bg_tertiary;
+                        let txt = self.theme_tokens.text_primary;
+                        let bdr = self.theme_tokens.border_default;
+                        let hover = self.theme_tokens.bg_secondary;
+                        channel_btns.push(
+                            button(text(label).size(12))
+                                .padding(Padding::from([6, 12]))
+                                .on_press(msg)
+                                .style(move |_theme: &Theme, status| match status {
+                                    button::Status::Hovered => button::Style {
+                                        background: Some(hover.into()),
+                                        text_color: txt,
+                                        border: Border::default().rounded(6).width(1).color(bdr),
+                                        ..Default::default()
+                                    },
+                                    _ => button::Style {
+                                        background: Some(bg.into()),
+                                        text_color: txt,
+                                        border: Border::default().rounded(6).width(1).color(bdr),
+                                        ..Default::default()
+                                    },
+                                })
+                                .into(),
+                        );
                     }
-                    "jpg" | "jpeg" | "png" | "bmp" | "gif" | "webp" => column![
-                        row![
-                            text(icons::IMAGE).font(icons::ICON_FONT).size(16),
-                            text(format!("Image Asset: {}", short)).size(16),
-                        ]
-                        .spacing(4)
-                        .align_y(iced::Alignment::Center),
-                        text(format!("Size: {}", size_str)).size(13),
-                        Space::new().height(8),
-                        text("Image preview not available in editor").size(11),
+                }
+                bind_items.push(
+                    row(channel_btns)
+                        .spacing(6)
+                        .align_y(iced::Alignment::Center)
+                        .into(),
+                );
+
+                column(bind_items).spacing(4).into()
+            } else {
+                Space::new().height(0).into()
+            };
+
+            let content: Element<'_, Message> = match ext.as_str() {
+                "glsl" | "frag" | "vert" => {
+                    let source = String::from_utf8_lossy(data);
+                    column![
+                        scrollable(text(source.to_string()).size(12))
+                            .width(Fill)
+                            .height(Fill),
                         bind_section,
                     ]
-                    .spacing(6)
-                    .into(),
-                    "mp4" | "webm" | "avi" | "mkv" => column![
-                        row![
-                            text(icons::VIDEO).font(icons::ICON_FONT).size(16),
-                            text(format!("Video Asset: {}", short)).size(16),
-                        ]
-                        .spacing(4)
-                        .align_y(iced::Alignment::Center),
-                        text(format!("Size: {}", size_str)).size(13),
-                        Space::new().height(8),
-                        text("Video preview not available in editor").size(11),
-                        bind_section,
+                    .spacing(4)
+                    .into()
+                }
+                "jpg" | "jpeg" | "png" | "bmp" | "gif" | "webp" => column![
+                    row![
+                        text(icons::IMAGE).font(icons::ICON_FONT).size(16),
+                        text(format!("Image Asset: {}", short)).size(16),
                     ]
-                    .spacing(6)
-                    .into(),
-                    "ttf" | "otf" | "woff" | "woff2" => column![
-                        row![
-                            text(icons::FONT).font(icons::ICON_FONT).size(16),
-                            text(format!("Font Asset: {}", short)).size(16),
-                        ]
-                        .spacing(4)
-                        .align_y(iced::Alignment::Center),
-                        text(format!("Size: {}", size_str)).size(13),
-                        Space::new().height(8),
-                        text("Font preview not available in editor").size(11),
-                        text("Use this font in textures with type = \"font\"").size(11),
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
+                    text(format!("Size: {}", size_str)).size(13),
+                    Space::new().height(8),
+                    text("Image preview not available in editor").size(11),
+                    bind_section,
+                ]
+                .spacing(6)
+                .into(),
+                "mp4" | "webm" | "avi" | "mkv" => column![
+                    row![
+                        text(icons::VIDEO).font(icons::ICON_FONT).size(16),
+                        text(format!("Video Asset: {}", short)).size(16),
                     ]
-                    .spacing(6)
-                    .into(),
-                    "mp3" | "wav" | "ogg" | "flac" => column![
-                        row![
-                            text(icons::AUDIO).font(icons::ICON_FONT).size(16),
-                            text(format!("Audio Asset: {}", short)).size(16),
-                        ]
-                        .spacing(4)
-                        .align_y(iced::Alignment::Center),
-                        text(format!("Size: {}", size_str)).size(13),
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
+                    text(format!("Size: {}", size_str)).size(13),
+                    Space::new().height(8),
+                    text("Video preview not available in editor").size(11),
+                    bind_section,
+                ]
+                .spacing(6)
+                .into(),
+                "ttf" | "otf" | "woff" | "woff2" => column![
+                    row![
+                        text(icons::FONT).font(icons::ICON_FONT).size(16),
+                        text(format!("Font Asset: {}", short)).size(16),
                     ]
-                    .spacing(6)
-                    .into(),
-                    _ => column![
-                        row![
-                            text(icons::FILE).font(icons::ICON_FONT).size(16),
-                            text(format!("File: {}", short)).size(16),
-                        ]
-                        .spacing(4)
-                        .align_y(iced::Alignment::Center),
-                        text(format!("Size: {}", size_str)).size(13),
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
+                    text(format!("Size: {}", size_str)).size(13),
+                    Space::new().height(8),
+                    text("Font preview not available in editor").size(11),
+                    text("Use this font in textures with type = \"font\"").size(11),
+                ]
+                .spacing(6)
+                .into(),
+                "mp3" | "wav" | "ogg" | "flac" => column![
+                    row![
+                        text(icons::AUDIO).font(icons::ICON_FONT).size(16),
+                        text(format!("Audio Asset: {}", short)).size(16),
                     ]
-                    .spacing(6)
-                    .into(),
-                };
-                return container(content)
-                    .width(Fill)
-                    .height(Fill)
-                    .padding(16)
-                    .into();
-            }
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
+                    text(format!("Size: {}", size_str)).size(13),
+                ]
+                .spacing(6)
+                .into(),
+                _ => column![
+                    row![
+                        text(icons::FILE).font(icons::ICON_FONT).size(16),
+                        text(format!("File: {}", short)).size(16),
+                    ]
+                    .spacing(4)
+                    .align_y(iced::Alignment::Center),
+                    text(format!("Size: {}", size_str)).size(13),
+                ]
+                .spacing(6)
+                .into(),
+            };
+            return container(content)
+                .width(Fill)
+                .height(Fill)
+                .padding(16)
+                .into();
+        }
         container(text(format!("Asset not found: {}", asset_name)).size(13))
             .width(Fill)
             .height(Fill)
@@ -654,17 +649,14 @@ impl KromaApp {
         );
 
         // Audio section
-        let audio =
-            self.card(
-                "Audio",
-                column![
-                text("Audio is now configured as a texture type.")
-                    .size(13),
-                text("Add an 'audio_spectrum' texture in the Textures section below.")
-                    .size(11),
+        let audio = self.card(
+            "Audio",
+            column![
+                text("Audio is now configured as a texture type.").size(13),
+                text("Add an 'audio_spectrum' texture in the Textures section below.").size(11),
             ]
-                .spacing(8),
-            );
+            .spacing(8),
+        );
 
         // Uniforms section
         let mut uniform_items: Vec<Element<'_, Message>> = Vec::new();
@@ -765,7 +757,12 @@ impl KromaApp {
                 .size(10)
                 .into(),
         );
-        if self.shade_config.textures.values().any(|t| t.ty == kroma_shared::types::TextureType::Image) {
+        if self
+            .shade_config
+            .textures
+            .values()
+            .any(|t| t.ty == kroma_shared::types::TextureType::Image)
+        {
             texture_items.push(
                 row![
                     text(icons::INFO).font(icons::ICON_FONT).size(10).color(self.theme_tokens.info),
@@ -776,7 +773,12 @@ impl KromaApp {
                 .into(),
             );
         }
-        if self.shade_config.textures.values().any(|t| t.ty == kroma_shared::types::TextureType::Font) {
+        if self
+            .shade_config
+            .textures
+            .values()
+            .any(|t| t.ty == kroma_shared::types::TextureType::Font)
+        {
             texture_items.push(
                 row![
                     text(icons::INFO).font(icons::ICON_FONT).size(10).color(self.theme_tokens.text_accent),
@@ -923,10 +925,8 @@ pub fn view_shade_settings_inline<'a>(ctx: crate::panels::AppContext<'a>) -> Ele
     let audio = card(
         "Audio",
         column![
-            text("Audio is now configured as a texture type.")
-                .size(13),
-            text("Add an 'audio_spectrum' texture in the Textures section.")
-                .size(11),
+            text("Audio is now configured as a texture type.").size(13),
+            text("Add an 'audio_spectrum' texture in the Textures section.").size(11),
         ]
         .spacing(8),
         t,

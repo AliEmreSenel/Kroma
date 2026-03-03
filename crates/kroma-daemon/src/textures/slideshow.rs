@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use log::info;
+use log::{info, warn};
 
 use kroma_shared::shade::LiveShadePackage;
 use kroma_shared::types::{SlideSource, SlideSourceType, TextureFilter, TextureWrap};
@@ -82,6 +82,7 @@ fn load_slide_child(
                 &TextureWrap::Clamp,
                 disk_path.as_deref(),
                 hot_reload,
+                false, // slideshow sub-children are not optional
             )?;
             Ok(SlideChild::Image(tex))
         }
@@ -90,7 +91,7 @@ fn load_slide_child(
                 .video_path
                 .as_ref()
                 .context("Video slide has no file path")?;
-            let tex = VideoTexture::load(path, true, hot_reload && entry.video_external)?;
+            let tex = VideoTexture::load(path, true, hot_reload && entry.video_external, false)?;
             Ok(SlideChild::Video(tex))
         }
     }
@@ -128,71 +129,96 @@ impl SlideshowTexture {
     /// Only resolves video paths (temp-extraction if embedded). Image data
     /// is NOT read at this point — it is decompressed from the mmap on
     /// demand when the slide becomes active.
+    ///
+    /// When `optional` is `true` and construction fails (e.g. no valid
+    /// sources, or the first child cannot be loaded), the texture degrades
+    /// to an empty slideshow that emits [`TextureUpdate::Unchanged`].
     pub fn load(
         pkg: Arc<LiveShadePackage>,
         sources: &[SlideSource],
         interval: f64,
         shuffle: bool,
         hot_reload: bool,
+        optional: bool,
     ) -> Result<Self> {
-        anyhow::ensure!(!sources.is_empty(), "Slideshow requires at least one source");
+        let pkg_fallback = if optional { Some(Arc::clone(&pkg)) } else { None };
+        let inner = || -> Result<Self> {
+            anyhow::ensure!(!sources.is_empty(), "Slideshow requires at least one source");
 
-        let mut entries = Vec::with_capacity(sources.len());
+            let mut entries = Vec::with_capacity(sources.len());
 
-        for slide in sources {
-            let entry = match slide.ty {
-                SlideSourceType::Image => SlideEntry {
-                    source: slide.source.clone(),
-                    video_path: None,
-                    video_external: false,
-                    ty: SlideSourceType::Image,
-                },
-                SlideSourceType::Video => {
-                    let (path, video_external) = resolve_video_path_with_origin(&pkg, &slide.source)
-                        .with_context(|| format!("Slideshow video '{}'", slide.source))?;
-                    SlideEntry {
+            for slide in sources {
+                let entry = match slide.ty {
+                    SlideSourceType::Image => SlideEntry {
                         source: slide.source.clone(),
-                        video_path: Some(path),
-                        video_external,
-                        ty: SlideSourceType::Video,
+                        video_path: None,
+                        video_external: false,
+                        ty: SlideSourceType::Image,
+                    },
+                    SlideSourceType::Video => {
+                        let (path, video_external) = resolve_video_path_with_origin(&pkg, &slide.source)
+                            .with_context(|| format!("Slideshow video '{}'", slide.source))?;
+                        SlideEntry {
+                            source: slide.source.clone(),
+                            video_path: Some(path),
+                            video_external,
+                            ty: SlideSourceType::Video,
+                        }
                     }
-                }
-            };
-            entries.push(entry);
-        }
-
-        // Shuffle if requested
-        if shuffle && entries.len() > 1 {
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as usize;
-            for i in (1..entries.len()).rev() {
-                let j = (seed.wrapping_mul(i).wrapping_add(7)) % (i + 1);
-                entries.swap(i, j);
+                };
+                entries.push(entry);
             }
+
+            // Shuffle if requested
+            if shuffle && entries.len() > 1 {
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos() as usize;
+                for i in (1..entries.len()).rev() {
+                    let j = (seed.wrapping_mul(i).wrapping_add(7)) % (i + 1);
+                    entries.swap(i, j);
+                }
+            }
+
+            // Load only the first child eagerly
+            let first_child = load_slide_child(&entries[0], &pkg, hot_reload)
+                .context("Failed to load first slideshow child")?;
+
+            info!(
+                "SlideshowTexture loaded: {} slides, {:.1}s interval, shuffle={}",
+                entries.len(),
+                interval,
+                shuffle
+            );
+
+            Ok(Self {
+                pkg,
+                entries,
+                current: 0,
+                current_child: Some(first_child),
+                timer: 0.0,
+                interval,
+                hot_reload,
+            })
+        };
+
+        match inner() {
+            Ok(tex) => Ok(tex),
+            Err(e) if optional => {
+                warn!("Optional slideshow failed to load (using placeholder): {}", e);
+                Ok(Self {
+                    pkg: pkg_fallback.expect("optional=true but no fallback pkg"),
+                    entries: Vec::new(),
+                    current: 0,
+                    current_child: None,
+                    timer: 0.0,
+                    interval,
+                    hot_reload,
+                })
+            }
+            Err(e) => Err(e),
         }
-
-        // Load only the first child eagerly
-        let first_child = load_slide_child(&entries[0], &pkg, hot_reload)
-            .context("Failed to load first slideshow child")?;
-
-        info!(
-            "SlideshowTexture loaded: {} slides, {:.1}s interval, shuffle={}",
-            entries.len(),
-            interval,
-            shuffle
-        );
-
-        Ok(Self {
-            pkg,
-            entries,
-            current: 0,
-            current_child: Some(first_child),
-            timer: 0.0,
-            interval,
-            hot_reload,
-        })
     }
 }
 

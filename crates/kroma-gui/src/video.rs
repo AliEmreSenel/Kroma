@@ -97,7 +97,6 @@ impl VideoPlayerState {
 
         // Build format info string from container format and codec
         let container = {
-            
             temp_path
                 .extension()
                 .and_then(|e| e.to_str())

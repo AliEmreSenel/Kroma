@@ -203,7 +203,8 @@ impl VideoDecoder for FfmpegVideoDecoder {
 
 /// A video texture that decodes frames on its own schedule.
 pub struct VideoTexture {
-    decoder: FfmpegVideoDecoder,
+    /// `None` for placeholder sources (optional textures whose file is missing).
+    decoder: Option<FfmpegVideoDecoder>,
     /// Frame-rate accumulator (seconds).
     accum: f64,
     /// Whether to loop the video on EOF.
@@ -227,7 +228,7 @@ impl VideoTexture {
     fn reload_decoder_from_path(&mut self, path: &Path) -> Result<()> {
         let (decoder, w, h) = Self::load_decoder(path)
             .with_context(|| format!("Failed to reload video decoder '{}'", path.display()))?;
-        self.decoder = decoder;
+        self.decoder = Some(decoder);
         self.last_width = w;
         self.last_height = h;
         self.accum = 0.0;
@@ -237,7 +238,12 @@ impl VideoTexture {
     }
 
     /// Open a video file and prepare the decoder.
-    pub fn load(path: &Path, looping: bool, hot_reload: bool) -> Result<Self> {
+    ///
+    /// When `optional` is `true` and the decoder fails to initialise, the
+    /// texture degrades to a 1×1 transparent placeholder instead of
+    /// returning an error. The hot-reload watcher (if enabled) stays active
+    /// so the decoder is created once the file appears/changes.
+    pub fn load(path: &Path, looping: bool, hot_reload: bool, optional: bool) -> Result<Self> {
         let hot_reload = if hot_reload {
             match SourceHotReload::from_source(Some(path)) {
                 Ok(hot_reload) => hot_reload,
@@ -251,46 +257,63 @@ impl VideoTexture {
         };
 
         let decoder_path = hot_reload.source_path().unwrap_or(path);
-        let (decoder, w, h) = Self::load_decoder(decoder_path)
-            .with_context(|| format!("Failed to load video decoder '{}'", decoder_path.display()))?;
-
-        if let Some(watch_path) = hot_reload.source_path() {
-            info!(
-                "VideoTexture loaded: {}x{}, looping={}, watcher={}",
-                w,
-                h,
-                looping,
-                watch_path.display()
-            );
-        } else {
-            info!("VideoTexture loaded: {}x{}, looping={}", w, h, looping);
+        match Self::load_decoder(decoder_path) {
+            Ok((decoder, w, h)) => {
+                if let Some(watch_path) = hot_reload.source_path() {
+                    info!(
+                        "VideoTexture loaded: {}x{}, looping={}, watcher={}",
+                        w, h, looping, watch_path.display()
+                    );
+                } else {
+                    info!("VideoTexture loaded: {}x{}, looping={}", w, h, looping);
+                }
+                Ok(Self {
+                    decoder: Some(decoder),
+                    accum: 0.0,
+                    looping,
+                    first_frame: true,
+                    last_width: w,
+                    last_height: h,
+                    hot_reload,
+                })
+            }
+            Err(e) if optional => {
+                warn!(
+                    "Optional video '{}' failed to load (using placeholder): {}",
+                    path.display(), e
+                );
+                Ok(Self {
+                    decoder: None,
+                    accum: 0.0,
+                    looping,
+                    first_frame: true,
+                    last_width: 1,
+                    last_height: 1,
+                    hot_reload,
+                })
+            }
+            Err(e) => Err(e.context(format!(
+                "Failed to load video decoder '{}'",
+                decoder_path.display()
+            ))),
         }
-
-        Ok(Self {
-            decoder,
-            accum: 0.0,
-            looping,
-            first_frame: true,
-            last_width: w,
-            last_height: h,
-            hot_reload,
-        })
     }
 
     /// Decode one frame, handling looping.
     fn decode_one_frame(&mut self) -> Option<Vec<u8>> {
-        let (w, h) = self.decoder.dimensions();
+        let decoder = self.decoder.as_mut()?;
+        let (w, h) = decoder.dimensions();
         self.last_width = w;
         self.last_height = h;
-        match self.decoder.next_frame() {
+        match decoder.next_frame() {
             Some(data) => Some(data.to_vec()),
             None => {
                 if self.looping {
-                    if let Err(e) = self.decoder.seek(0.0) {
+                    if let Err(e) = decoder.seek(0.0) {
                         log::warn!("Video seek-to-start failed: {}", e);
                     }
                     // Try again after seeking
-                    self.decoder.next_frame().map(|d| d.to_vec())
+                    decoder.next_frame().map(|d| d.to_vec())
                 } else {
                     None
                 }
@@ -299,7 +322,11 @@ impl VideoTexture {
     }
 
     fn frame_interval(&self) -> f64 {
-        let raw = self.decoder.frame_interval();
+        let raw = self
+            .decoder
+            .as_ref()
+            .map(|d| d.frame_interval())
+            .unwrap_or(1.0 / 30.0);
         if raw.is_finite() && raw > 0.0 {
             raw
         } else {

@@ -346,6 +346,7 @@ layout(location = 0) out vec4 kroma_out_color;
                 shuffle: false,
                 fft_bands: None,
                 hot_reload: false,
+                optional: false,
             },
         );
     }
