@@ -6,7 +6,14 @@
 
 use std::path::Path;
 
+use anyhow::anyhow;
 use anyhow::{Context, Result};
+use ffmpeg_next::codec;
+use ffmpeg_next::format;
+use ffmpeg_next::format::Pixel;
+use ffmpeg_next::frame;
+use ffmpeg_next::media;
+use ffmpeg_next::software::scaling;
 use log::{info, warn};
 
 use kroma_shared::traits::VideoDecoder;
@@ -33,7 +40,7 @@ impl FfmpegVideoDecoder {
     fn decode_next_packet(&mut self) -> Option<()> {
         loop {
             // Try to receive a decoded frame first
-            let mut decoded = ffmpeg_next::util::frame::Video::empty();
+            let mut decoded = frame::Video::empty();
             if self.decoder.receive_frame(&mut decoded).is_ok() {
                 return self.scale_frame(&decoded);
             }
@@ -53,7 +60,7 @@ impl FfmpegVideoDecoder {
             if !found_video {
                 // End of stream — flush decoder
                 let _ = self.decoder.send_eof();
-                let mut decoded = ffmpeg_next::util::frame::Video::empty();
+                let mut decoded = frame::Video::empty();
                 if self.decoder.receive_frame(&mut decoded).is_ok() {
                     return self.scale_frame(&decoded);
                 }
@@ -63,7 +70,7 @@ impl FfmpegVideoDecoder {
     }
 
     /// Scale a decoded frame to RGBA and store in `frame_buffer`.
-    fn scale_frame(&mut self, decoded: &ffmpeg_next::util::frame::Video) -> Option<()> {
+    fn scale_frame(&mut self, decoded: &frame::Video) -> Option<()> {
         // Calculate variable frame duration
         // decoded.duration() returns duration in stream time_base units
         /*let duration = decoded.duration();
@@ -110,13 +117,13 @@ impl VideoDecoder for FfmpegVideoDecoder {
     {
         ffmpeg_next::init().map_err(|e| anyhow::anyhow!("Failed to initialize FFmpeg: {}", e))?;
 
-        let input = ffmpeg_next::format::input(&path)
-            .map_err(|e| anyhow::anyhow!("Failed to open video '{}': {}", path.display(), e))?;
+        let input = format::input(&path)
+            .map_err(|e| anyhow!("Failed to open video '{}': {}", path.display(), e))?;
 
         let video_stream = input
             .streams()
-            .best(ffmpeg_next::media::Type::Video)
-            .ok_or_else(|| anyhow::anyhow!("No video stream found in '{}'", path.display()))?;
+            .best(media::Type::Video)
+            .ok_or_else(|| anyhow!("No video stream found in '{}'", path.display()))?;
 
         let video_stream_index = video_stream.index();
         let time_base = f64::from(video_stream.time_base());
@@ -127,38 +134,31 @@ impl VideoDecoder for FfmpegVideoDecoder {
             raw_duration as f64 * time_base
         };
 
-        let context_decoder =
-            ffmpeg_next::codec::context::Context::from_parameters(video_stream.parameters())?;
+        let stream_parameters = video_stream.parameters();
+
+        let context_decoder = codec::Context::from_parameters(stream_parameters)?;
         let decoder = context_decoder.decoder().video()?;
 
         let width = decoder.width();
         let height = decoder.height();
 
         // Calculate average frame interval for fallback
-        let frame_rate = decoder.frame_rate().unwrap_or(ffmpeg_next::Rational(1, 1));
-        let avg_frame_interval = if frame_rate.numerator() > 0 {
-            frame_rate.denominator() as f64 / frame_rate.numerator() as f64
-        } else {
-            1.0 / 30.0 // Default to 30fps if completely unknown
-        };
+        let frame_rate = video_stream.rate();
+        let avg_frame_interval = frame_rate.denominator() as f64 / frame_rate.numerator() as f64;
 
-        let scaler = ffmpeg_next::software::scaling::Context::get(
+        let scaler = scaling::Context::get(
             decoder.format(),
             width,
             height,
-            ffmpeg_next::format::Pixel::RGBA,
+            Pixel::RGBA,
             width,
             height,
-            ffmpeg_next::software::scaling::Flags::BILINEAR,
+            scaling::Flags::BILINEAR,
         )?;
 
-        log::info!(
+        info!(
             "FFmpeg video decoder: {}x{}, {:.1}s duration, {} FPS (avg), stream {}",
-            width,
-            height,
-            duration,
-            frame_rate,
-            video_stream_index
+            width, height, duration, frame_rate, video_stream_index
         );
 
         Ok(Self {
@@ -233,7 +233,12 @@ impl VideoTexture {
         self.last_height = h;
         self.accum = 0.0;
         self.first_frame = true;
-        info!("VideoTexture reloaded from disk: {} ({}x{})", path.display(), w, h);
+        info!(
+            "VideoTexture reloaded from disk: {} ({}x{})",
+            path.display(),
+            w,
+            h
+        );
         Ok(())
     }
 
@@ -248,7 +253,11 @@ impl VideoTexture {
             match SourceHotReload::from_source(Some(path)) {
                 Ok(hot_reload) => hot_reload,
                 Err(e) => {
-                    warn!("VideoTexture watcher disabled for {}: {}", path.display(), e);
+                    warn!(
+                        "VideoTexture watcher disabled for {}: {}",
+                        path.display(),
+                        e
+                    );
                     SourceHotReload::disabled()
                 }
             }
@@ -262,7 +271,10 @@ impl VideoTexture {
                 if let Some(watch_path) = hot_reload.source_path() {
                     info!(
                         "VideoTexture loaded: {}x{}, looping={}, watcher={}",
-                        w, h, looping, watch_path.display()
+                        w,
+                        h,
+                        looping,
+                        watch_path.display()
                     );
                 } else {
                     info!("VideoTexture loaded: {}x{}, looping={}", w, h, looping);
@@ -280,7 +292,8 @@ impl VideoTexture {
             Err(e) if optional => {
                 warn!(
                     "Optional video '{}' failed to load (using placeholder): {}",
-                    path.display(), e
+                    path.display(),
+                    e
                 );
                 Ok(Self {
                     decoder: None,
