@@ -4,7 +4,7 @@
 //! code editing, asset management, live preview, and more.
 //! Communicates with `kroma-daemon` over Unix IPC.
 //!
-//! CLI fallback: pass any subcommand (import, download, load, pause, …).
+//! For CLI usage, see the `kroma-cli` crate (`kroma` binary).
 
 mod audio;
 mod commands;
@@ -17,7 +17,6 @@ mod graph_handler;
 pub(crate) mod icons;
 mod importer;
 mod ipc;
-mod ipc_client;
 mod message;
 mod panels;
 mod shade_handler;
@@ -38,12 +37,6 @@ use log::info;
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let args: Vec<String> = std::env::args().collect();
-
-    if args.len() > 1 && args[1] != "--gui" {
-        return cli_main(&args);
-    }
-
     info!("Kroma GUI v{}", env!("CARGO_PKG_VERSION"));
     iced::application(KromaApp::new, KromaApp::update, KromaApp::view)
         .title("Kroma")
@@ -53,89 +46,6 @@ fn main() -> Result<()> {
         .run()
         .map_err(|e| anyhow::anyhow!("GUI error: {}", e))?;
 
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// CLI mode
-// ---------------------------------------------------------------------------
-
-fn cli_main(args: &[String]) -> Result<()> {
-    info!("Kroma GUI v{} (CLI mode)", env!("CARGO_PKG_VERSION"));
-
-    match args.get(1).map(|s| s.as_str()) {
-        Some("import") => {
-            let source_path = args.get(2).map(PathBuf::from);
-            let name = args.get(3).map(|s| s.as_str()).unwrap_or("Imported Shader");
-            let author = args.get(4).map(|s| s.as_str()).unwrap_or("Unknown");
-            if let Some(path) = source_path {
-                info!("Importing shader from: {}", path.display());
-                let output = importer::import_shadertoy_file(&path, name, author)?;
-                info!("Created shade package: {}", output.display());
-            } else {
-                eprintln!("Usage: kroma-gui import <shader.glsl> [name] [author]");
-            }
-        }
-        Some("load") => {
-            let shade_path = args.get(2).map(|s| s.as_str()).unwrap_or("");
-            if shade_path.is_empty() {
-                eprintln!("Usage: kroma-gui load <path.shade>");
-            } else {
-                ipc_client::send_load(shade_path)?;
-                info!("Sent load command to daemon: {}", shade_path);
-            }
-        }
-        Some("pause") => {
-            ipc_client::send_pause()?;
-            info!("Sent pause command");
-        }
-        Some("resume") => {
-            ipc_client::send_resume()?;
-            info!("Sent resume command");
-        }
-        Some("shutdown") => {
-            ipc_client::send_shutdown()?;
-            info!("Sent shutdown command");
-        }
-        Some("status") => match ipc_client::query_status() {
-            Ok(response) => println!("{}", response),
-            Err(e) => eprintln!("Failed: {}", e),
-        },
-        Some("download") => {
-            let url_or_id = args.get(2).map(|s| s.as_str()).unwrap_or("");
-            if url_or_id.is_empty() {
-                eprintln!("Usage: kroma-gui download <shadertoy-url-or-id> [output-dir]");
-            } else {
-                let output_dir = args
-                    .get(3)
-                    .map(PathBuf::from)
-                    .unwrap_or_else(utils::dirs_output_dir);
-                let rt = tokio::runtime::Runtime::new()?;
-                match rt.block_on(importer::download_shadertoy(url_or_id, &output_dir, None)) {
-                    Ok((shade_path, name)) => {
-                        info!("Downloaded '{}': {}", name, shade_path.display())
-                    }
-                    Err(e) => eprintln!("Download failed: {}", e),
-                }
-            }
-        }
-        _ => {
-            println!("Kroma GUI v{}", env!("CARGO_PKG_VERSION"));
-            println!();
-            println!("Usage:");
-            println!(
-                "  kroma-gui                                           Launch graphical interface"
-            );
-            println!(
-                "  kroma-gui import <shader.glsl> [name] [author]      Import Shadertoy shader"
-            );
-            println!(
-                "  kroma-gui download <url-or-id> [output-dir]         Download from Shadertoy"
-            );
-            println!("  kroma-gui load <path.shade>                         Load shade package");
-            println!("  kroma-gui pause / resume / shutdown / status        Control daemon");
-        }
-    }
     Ok(())
 }
 

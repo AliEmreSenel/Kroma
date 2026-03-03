@@ -5,6 +5,7 @@ members = [
     "crates/kroma-daemon",
     "crates/kroma-gui",
     "crates/kroma-graph",
+    "crates/kroma-cli",
 ]
 
 [workspace.package]
@@ -78,6 +79,10 @@ font8x8 = "0.3"
 
 # File watching for hot-reload
 notify = "6"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
 # GUI
 iced = { version = "0.14", features = ["tokio", "canvas", "image"] }

@@ -1,0 +1,25 @@
+[package]
+name = "kroma-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CLI tool for controlling the Kroma wallpaper engine daemon"
+
+[[bin]]
+name = "kroma"
+path = "src/main.rs"
+
+[dependencies]
+kroma-shared = { path = "../kroma-shared" }
+anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+regex.workspace = true
+zip.workspace = true
