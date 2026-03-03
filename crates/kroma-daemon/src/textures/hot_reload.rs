@@ -26,33 +26,42 @@ impl SourceHotReload {
     }
 
     /// Create a watcher for a specific source path.
+    ///
+    /// Works even when the file does not exist yet — watches the parent
+    /// directory so the texture resolves when the file appears.
     pub fn from_source(source_path: Option<&Path>) -> Result<Self> {
         let Some(source_path) = source_path else {
             return Ok(Self::disabled());
         };
 
-        let canonical_source = source_path
-            .canonicalize()
-            .unwrap_or_else(|_| source_path.to_path_buf());
+        // Resolve to an absolute path.  canonicalize() requires the file to
+        // exist, so fall back to making the path absolute manually.
+        let abs_source = if let Ok(canon) = source_path.canonicalize() {
+            canon
+        } else {
+            // File doesn't exist yet — make it absolute relative to cwd.
+            std::env::current_dir()
+                .unwrap_or_default()
+                .join(source_path)
+        };
 
         let (tx, rx) = mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         })?;
 
-        let watch_target = if canonical_source.is_file() {
-            canonical_source
-                .parent()
-                .unwrap_or(&canonical_source)
-                .to_path_buf()
-        } else {
-            canonical_source.clone()
-        };
+        // Always watch the parent directory (non-recursively).  This handles
+        // both existing files (parent exists) and not-yet-created files
+        // (parent usually exists even when the file itself doesn't).
+        let watch_target = abs_source
+            .parent()
+            .unwrap_or(&abs_source)
+            .to_path_buf();
 
         watcher.watch(&watch_target, RecursiveMode::NonRecursive)?;
 
         Ok(Self {
-            source_path: Some(canonical_source),
+            source_path: Some(abs_source),
             _watch_target: Some(watch_target),
             _watcher: Some(watcher),
             watch_rx: Some(rx),

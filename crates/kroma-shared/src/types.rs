@@ -344,6 +344,16 @@ pub struct TextureDef {
     /// disk paths outside the package. Default: false.
     #[serde(default)]
     pub hot_reload: bool,
+
+    /// Whether this texture is optional.
+    ///
+    /// If `true`, failure to load the texture will not trigger a fallback
+    /// error display — a transparent 1×1 placeholder is used instead and
+    /// rendering continues normally. If `false` (the default), a load failure
+    /// switches the daemon to a full-screen error shader showing the
+    /// problematic path.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 /// A render buffer pass definition (multi-pass rendering).

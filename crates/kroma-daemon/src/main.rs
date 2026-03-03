@@ -6,6 +6,7 @@
 mod backend;
 mod config;
 mod data;
+mod fallback;
 mod ipc_server;
 mod renderer;
 mod textures;
@@ -33,7 +34,7 @@ use crate::{
         wayland::{WaylandBackend, hyprland::HyprlandEvent},
     },
     data::SystemDataProvider,
-    renderer::RenderState,
+    renderer::{RenderState, ShadeLoadOutcome},
 };
 
 enum LoopControl {
@@ -127,6 +128,7 @@ impl Daemon {
             daemon.load_shade(&shade_path, None)?;
         } else {
             info!("No startup shade configured. Load a .shade file to start.");
+            daemon.render_state.show_no_shade_fallback()?;
         }
 
         info!(
@@ -311,8 +313,8 @@ impl Daemon {
         match LiveShadePackage::load(Path::new(path)) {
             Ok(pkg) => {
                 let pkg_name = pkg.config.meta.name.clone();
-                match self.render_state.load_shade(pkg) {
-                    Ok(_) => {
+                match self.render_state.load_shade(pkg, Some(path)) {
+                    Ok(ShadeLoadOutcome::Success) => {
                         info!("Loaded: {}", pkg_name);
                         loaded_successfully = true;
                         maybe_send(
@@ -324,8 +326,54 @@ impl Daemon {
                             },
                         )?;
                     }
+                    Ok(ShadeLoadOutcome::TextureError(failures)) => {
+                        let msgs: Vec<CompileError> = failures
+                            .iter()
+                            .map(|f| CompileError {
+                                message: format!(
+                                    "Required texture '{}' ({}): {}",
+                                    f.name, f.source, f.error
+                                ),
+                                line: None,
+                                column: None,
+                            })
+                            .collect();
+                        log::error!(
+                            "Shade '{}' loaded with {} texture error(s) — fallback displayed",
+                            pkg_name,
+                            msgs.len()
+                        );
+                        // Consider it "loaded" so the package stays active;
+                        // the daemon renders the fallback error image.
+                        loaded_successfully = true;
+                        maybe_send(
+                            tx,
+                            DaemonEvent::CompileResult {
+                                success: false,
+                                errors: msgs,
+                                warnings: vec![],
+                            },
+                        )?;
+                    }
+                    Ok(ShadeLoadOutcome::CompileError(msg)) => {
+                        log::error!("Shade '{}' shader compile error — fallback displayed", pkg_name);
+                        loaded_successfully = true;
+                        maybe_send(
+                            tx,
+                            DaemonEvent::CompileResult {
+                                success: false,
+                                errors: vec![CompileError {
+                                    message: msg,
+                                    line: None,
+                                    column: None,
+                                }],
+                                warnings: vec![],
+                            },
+                        )?;
+                    }
                     Err(e) => {
-                        log::error!("Failed to compile shader: {}", e);
+                        log::error!("Failed to load shade '{}': {}", pkg_name, e);
+                        self.render_state.switch_to_load_error(path, &format!("{:#}", e))?;
                         maybe_send(
                             tx,
                             DaemonEvent::CompileResult {
@@ -343,6 +391,7 @@ impl Daemon {
             }
             Err(e) => {
                 log::error!("Failed to load shade: {}", e);
+                self.render_state.switch_to_load_error(path, &format!("{:#}", e))?;
                 maybe_send(
                     tx,
                     DaemonEvent::CompileResult {

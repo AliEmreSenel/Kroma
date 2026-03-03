@@ -11,6 +11,8 @@ use std::{
     thread,
 };
 
+use log::warn;
+
 use anyhow::{Context, Result, anyhow};
 use cpal::{
     Device, Stream,
@@ -383,16 +385,30 @@ impl AudioTexture {
     /// `source` is an audio device identifier: `"desktop"`, `"microphone"`,
     /// or a specific device name substring.
     /// `bands` is the number of FFT frequency bands (e.g. 512, 1024).
-    pub fn load(source: &str, bands: usize) -> Result<Self> {
+    ///
+    /// When `optional` is `true` and audio initialisation fails, the texture
+    /// degrades to a silent zero-spectrum source instead of returning an error.
+    pub fn load(source: &str, bands: usize, optional: bool) -> Result<Self> {
         let mut provider = CpalAudioProvider::new();
         let audio_conf = AudioConfig {
             enabled: true,
             source: source.to_string(),
             fft_bands: bands,
         };
-        provider.switch(&audio_conf)?;
-        info!("AudioTexture loaded: source='{}', bands={}", source, bands);
-        Ok(Self { provider, bands })
+        match provider.switch(&audio_conf) {
+            Ok(()) => {
+                info!("AudioTexture loaded: source='{}', bands={}", source, bands);
+                Ok(Self { provider, bands })
+            }
+            Err(e) if optional => {
+                warn!(
+                    "Optional audio '{}' failed to load (using silent placeholder): {}",
+                    source, e
+                );
+                Ok(Self { provider, bands })
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
