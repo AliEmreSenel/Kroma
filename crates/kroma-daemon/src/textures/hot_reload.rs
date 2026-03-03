@@ -53,10 +53,7 @@ impl SourceHotReload {
         // Always watch the parent directory (non-recursively).  This handles
         // both existing files (parent exists) and not-yet-created files
         // (parent usually exists even when the file itself doesn't).
-        let watch_target = abs_source
-            .parent()
-            .unwrap_or(&abs_source)
-            .to_path_buf();
+        let watch_target = abs_source.parent().unwrap_or(&abs_source).to_path_buf();
 
         watcher.watch(&watch_target, RecursiveMode::NonRecursive)?;
 

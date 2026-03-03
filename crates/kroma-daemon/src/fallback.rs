@@ -197,10 +197,10 @@ fn draw_glyph(
                         if px < img_w && py < img_h {
                             let idx = ((py * img_w + px) * 4) as usize;
                             if idx + 3 < pixels.len() {
-                                pixels[idx] = region;   // R = region code
-                                pixels[idx + 1] = 0;    // G (unused)
-                                pixels[idx + 2] = 0;    // B (unused)
-                                pixels[idx + 3] = 255;  // A
+                                pixels[idx] = region; // R = region code
+                                pixels[idx + 1] = 0; // G (unused)
+                                pixels[idx + 2] = 0; // B (unused)
+                                pixels[idx + 3] = 255; // A
                             }
                         }
                     }

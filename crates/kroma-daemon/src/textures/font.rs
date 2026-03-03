@@ -204,7 +204,7 @@ pub fn rasterize_font8x8_atlas() -> FontAtlas {
                                 let py = base_y + (gy as u32) * F8_SCALE + sy;
                                 let idx = ((py * atlas_w + px) * 4) as usize;
                                 if idx + 3 < rgba.len() {
-                                    rgba[idx] = 255;     // R
+                                    rgba[idx] = 255; // R
                                     rgba[idx + 1] = 255; // G
                                     rgba[idx + 2] = 255; // B
                                     rgba[idx + 3] = 255; // A
@@ -287,7 +287,10 @@ impl FontTexture {
                 })
             }
             Err(e) if optional => {
-                warn!("Optional font failed to load (using font8x8 fallback): {}", e);
+                warn!(
+                    "Optional font failed to load (using font8x8 fallback): {}",
+                    e
+                );
                 let atlas = rasterize_font8x8_atlas();
                 Ok(Self {
                     width: atlas.width,

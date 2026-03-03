@@ -230,13 +230,15 @@ impl KromaApp {
                 self.shade_selected_file = Some(file);
             }
             Message::ShadeEditMode(mode) => {
-                if self.shade_edit_mode == "nodes" && mode == "code"
-                    && let Ok(glsl) = self.shade_graph.compile_glsl() {
-                        self.shade_shader_content = text_editor::Content::with_text(&glsl);
-                        if let Some(ref mut pkg) = self.shade_package {
-                            pkg.shader_source = Some(glsl);
-                        }
+                if self.shade_edit_mode == "nodes"
+                    && mode == "code"
+                    && let Ok(glsl) = self.shade_graph.compile_glsl()
+                {
+                    self.shade_shader_content = text_editor::Content::with_text(&glsl);
+                    if let Some(ref mut pkg) = self.shade_package {
+                        pkg.shader_source = Some(glsl);
                     }
+                }
                 if self.shade_edit_mode == "code" && mode == "nodes" {
                     let glsl = self.shade_shader_content.text();
                     if !glsl.trim().is_empty() {
