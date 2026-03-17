@@ -1188,7 +1188,17 @@ impl RenderState {
                 return Ok(());
             }
             Err(wgpu::SurfaceError::Timeout) => {
-                warn!("Surface timeout — skipping frame");
+                warn!("Surface timeout — skipping frame and polling GPU cleanup");
+
+                // No frame is being presented while the output is asleep.
+                // Kick the queue/device so dropped textures and staging data
+                // are reclaimed promptly instead of accumulating.
+                queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
+                if let Some(device) = self.device.as_ref() {
+                    if let Err(e) = device.poll(PollType::wait_indefinitely()) {
+                        warn!("GPU poll during timeout failed: {}", e);
+                    }
+                }
                 return Ok(());
             }
             Err(e) => {
