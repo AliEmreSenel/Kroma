@@ -346,6 +346,11 @@ layout(location = 0) out vec4 kroma_out_color;
                 fft_bands: None,
                 hot_reload: false,
                 optional: false,
+                shader: None,
+                width: None,
+                height: None,
+                textures: std::collections::HashMap::new(),
+                uniforms: std::collections::HashMap::new(),
             },
         );
     }

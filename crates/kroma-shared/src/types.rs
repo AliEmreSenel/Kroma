@@ -261,6 +261,13 @@ pub enum TextureType {
     Slideshow,
     /// Audio FFT spectrum data (512×1 R32Float).
     AudioSpectrum,
+    /// A shader rendered to an offscreen texture.
+    ///
+    /// Supports the full feature set of the root shader: custom uniforms,
+    /// nested textures (including other shader textures), and all system
+    /// uniforms. The shader runs each frame at the configured resolution
+    /// and produces RGBA8 pixel data.
+    Shader,
 }
 
 impl TextureType {
@@ -272,6 +279,7 @@ impl TextureType {
             Self::Font => "font",
             Self::Slideshow => "slideshow",
             Self::AudioSpectrum => "audio_spectrum",
+            Self::Shader => "shader",
         }
     }
 }
@@ -354,6 +362,30 @@ pub struct TextureDef {
     /// problematic path.
     #[serde(default)]
     pub optional: bool,
+
+    // ---- Shader texture fields (type = "shader") ----
+
+    /// GLSL fragment shader source path (for shader textures).
+    /// Relative to the shade package root.
+    #[serde(default)]
+    pub shader: Option<String>,
+
+    /// Render width for shader textures (default: 512).
+    #[serde(default)]
+    pub width: Option<u32>,
+
+    /// Render height for shader textures (default: 512).
+    #[serde(default)]
+    pub height: Option<u32>,
+
+    /// Sub-textures for shader textures — same format as the root `textures`
+    /// map. Supports all texture types including nested shader textures.
+    #[serde(default)]
+    pub textures: HashMap<String, Box<TextureDef>>,
+
+    /// Custom uniforms for shader textures — same format as the root `uniforms`.
+    #[serde(default)]
+    pub uniforms: HashMap<String, UniformDef>,
 }
 
 /// A render buffer pass definition (multi-pass rendering).

@@ -9,6 +9,7 @@ pub mod audio;
 pub mod font;
 pub mod hot_reload;
 pub mod image;
+pub mod shader;
 pub mod slideshow;
 pub mod video;
 
@@ -20,6 +21,23 @@ use anyhow::{Context, Result};
 
 use kroma_shared::shade::LiveShadePackage;
 use kroma_shared::types::{TextureDef, TextureType};
+
+// ---------------------------------------------------------------------------
+// GpuContext — shared GPU resources for texture sources that need them
+// ---------------------------------------------------------------------------
+
+/// Shared GPU context for texture sources that perform their own rendering.
+///
+/// Passed to the factory when creating shader textures. Other texture types
+/// don't need this and will simply ignore it.
+#[derive(Clone)]
+pub struct GpuContext {
+    pub device: Arc<wgpu::Device>,
+    pub queue: Arc<wgpu::Queue>,
+    /// Output format of the parent surface (used by shader textures to
+    /// create compatible render targets).
+    pub surface_format: wgpu::TextureFormat,
+}
 
 // ---------------------------------------------------------------------------
 // TextureFormat — pixel format of the texture data
@@ -99,6 +117,43 @@ pub trait TextureSource {
 
     /// Human-readable type name (for logging).
     fn texture_type(&self) -> &'static str;
+
+    /// Whether this source manages its own GPU texture (zero-copy path).
+    ///
+    /// When `true`, the renderer will call [`gpu_texture_view`] and
+    /// [`gpu_sampler`] instead of uploading CPU pixel data. This is used
+    /// by shader textures that render to an offscreen target.
+    fn is_gpu_managed(&self) -> bool {
+        false
+    }
+
+    /// GPU texture view for zero-copy sources.
+    ///
+    /// Only called when [`is_gpu_managed`] returns `true`.
+    fn gpu_texture_view(&self) -> Option<&wgpu::TextureView> {
+        None
+    }
+
+    /// GPU sampler for zero-copy sources.
+    ///
+    /// Only called when [`is_gpu_managed`] returns `true`.
+    fn gpu_sampler(&self) -> Option<&wgpu::Sampler> {
+        None
+    }
+
+    /// Update system uniforms for GPU-managed sources (shader textures).
+    ///
+    /// Called once per frame so that sub-shaders receive the same system
+    /// data (time, resolution, mouse, CPU, RAM, etc.) as the root shader.
+    fn update_uniforms(&mut self, _uniforms: &kroma_shared::types::ShaderUniforms) {}
+
+    /// Perform the GPU render pass for GPU-managed sources.
+    ///
+    /// Called once per frame after [`update`] and [`update_uniforms`].
+    /// The source should submit its own command buffers.
+    fn gpu_render(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -112,9 +167,13 @@ pub trait TextureSource {
 /// instead of returning an error. Types with hot-reload support (Image,
 /// Video) keep their filesystem watcher active so the texture resolves
 /// automatically when the file appears.
+///
+/// `gpu` must be provided when shader textures may be present; it is
+/// ignored for all other texture types.
 pub fn create_texture_source(
     pkg: &Arc<LiveShadePackage>,
     def: &TextureDef,
+    gpu: Option<&GpuContext>,
 ) -> Result<Option<Box<dyn TextureSource>>> {
     match def.ty {
         TextureType::Image => {
@@ -178,6 +237,33 @@ pub fn create_texture_source(
             let source = def.source.as_deref().unwrap_or("desktop");
             let bands = def.fft_bands.unwrap_or(512);
             let tex = self::audio::AudioTexture::load(source, bands, def.optional)?;
+            Ok(Some(Box::new(tex)))
+        }
+        TextureType::Shader => {
+            let gpu = gpu.context(
+                "Shader texture requires GPU context — cannot create shader texture \
+                 without a GpuContext",
+            )?;
+            let shader_path = def
+                .shader
+                .as_ref()
+                .context("Shader texture requires a `shader` path")?;
+            let glsl_source = read_asset_or_disk(pkg, shader_path)
+                .with_context(|| format!("Failed to read shader source '{}'", shader_path))?;
+            let glsl_str = String::from_utf8(glsl_source)
+                .context("Shader source is not valid UTF-8")?;
+            let width = def.width.unwrap_or(512);
+            let height = def.height.unwrap_or(512);
+            let tex = self::shader::ShaderTexture::load(
+                gpu,
+                Arc::clone(pkg),
+                &glsl_str,
+                width,
+                height,
+                &def.textures,
+                &def.uniforms,
+                def.optional,
+            )?;
             Ok(Some(Box::new(tex)))
         }
     }

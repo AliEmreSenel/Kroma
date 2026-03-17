@@ -17,7 +17,7 @@ use wgpu::wgt::PollType;
 use crate::{
     config::GpuPower,
     fallback,
-    textures::{self, TextureSource, TextureUpdate},
+    textures::{self, GpuContext, TextureSource, TextureUpdate},
 };
 
 /// Fullscreen triangle vertex shader.
@@ -122,8 +122,8 @@ pub struct RenderState {
     // wgpu resources
     instance: Option<wgpu::Instance>,
     surface: Option<wgpu::Surface<'static>>,
-    device: Option<wgpu::Device>,
-    queue: Option<wgpu::Queue>,
+    device: Option<Arc<wgpu::Device>>,
+    queue: Option<Arc<wgpu::Queue>>,
     pipeline: Option<wgpu::RenderPipeline>,
     uniform_buffer: Option<wgpu::Buffer>,
     bind_group: Option<wgpu::BindGroup>,
@@ -230,6 +230,8 @@ impl RenderState {
             ..Default::default()
         }))
         .context("Failed to create GPU device")?;
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
 
         let mut format = wgpu::TextureFormat::Rgba8UnormSrgb;
 
@@ -796,6 +798,19 @@ impl RenderState {
             .context("GPU not initialised — cannot load textures")?;
         let queue = self.queue.as_ref().context("GPU queue not initialised")?;
 
+        // Build a GpuContext for texture sources that need GPU access
+        // (shader textures).
+        let surface_format = self
+            .surface_config
+            .as_ref()
+            .map(|c| c.format)
+            .unwrap_or(SURFACE_FORMAT);
+        let gpu_ctx = GpuContext {
+            device: Arc::clone(device),
+            queue: Arc::clone(queue),
+            surface_format,
+        };
+
         self.texture_bind_group = None;
         self.texture_bind_group_layout = None;
 
@@ -806,8 +821,8 @@ impl RenderState {
         tex_defs.sort_by_key(|(_, def)| def.binding.unwrap_or(u32::MAX));
 
         for (name, def) in &tex_defs {
-            // Create the texture source (all types including AudioSpectrum)
-            match textures::create_texture_source(pkg, def) {
+            // Create the texture source (all types including AudioSpectrum, Shader)
+            match textures::create_texture_source(pkg, def, Some(&gpu_ctx)) {
                 Ok(Some(source)) => {
                     let (w, h) = source.dimensions();
                     let gpu_format = source.format().wgpu_format();
@@ -900,6 +915,12 @@ impl RenderState {
             let Some(source) = source_opt.as_mut() else {
                 continue;
             };
+
+            // Propagate system uniforms to GPU-managed sources (shader textures)
+            if source.is_gpu_managed() {
+                source.update_uniforms(&self.uniforms);
+            }
+
             match source.update(dt)? {
                 TextureUpdate::Unchanged => {}
                 TextureUpdate::NewFrame {
@@ -907,6 +928,11 @@ impl RenderState {
                     width,
                     height,
                 } => {
+                    // GPU-managed sources handle their own textures
+                    if source.is_gpu_managed() {
+                        continue;
+                    }
+
                     if i >= self.textures.len() {
                         continue;
                     }
@@ -953,6 +979,11 @@ impl RenderState {
                         );
                     }
                 }
+            }
+
+            // GPU-managed sources render their own offscreen targets
+            if source.is_gpu_managed() {
+                source.gpu_render()?;
             }
         }
 
@@ -1001,17 +1032,37 @@ impl RenderState {
             entries: &layout_entries,
         });
 
-        // Now build the actual bind group entries referencing our textures
+        // Now build the actual bind group entries referencing our textures.
+        // For GPU-managed sources (shader textures), use their native
+        // texture views and samplers directly instead of the LoadedTexture.
         for i in 0..num_textures {
             let tex_binding = (i * 2) as u32;
             let samp_binding = (i * 2 + 1) as u32;
+
+            let (view, sampler) =
+                if let Some(Some(source)) = self.texture_sources.get(i) {
+                    if source.is_gpu_managed() {
+                        if let (Some(v), Some(s)) =
+                            (source.gpu_texture_view(), source.gpu_sampler())
+                        {
+                            (v as &wgpu::TextureView, s as &wgpu::Sampler)
+                        } else {
+                            (&self.textures[i].view, &self.textures[i].sampler)
+                        }
+                    } else {
+                        (&self.textures[i].view, &self.textures[i].sampler)
+                    }
+                } else {
+                    (&self.textures[i].view, &self.textures[i].sampler)
+                };
+
             group_entries.push(wgpu::BindGroupEntry {
                 binding: tex_binding,
-                resource: wgpu::BindingResource::TextureView(&self.textures[i].view),
+                resource: wgpu::BindingResource::TextureView(view),
             });
             group_entries.push(wgpu::BindGroupEntry {
                 binding: samp_binding,
-                resource: wgpu::BindingResource::Sampler(&self.textures[i].sampler),
+                resource: wgpu::BindingResource::Sampler(sampler),
             });
         }
 
@@ -1453,7 +1504,7 @@ impl RenderState {
 /// then **naga** for SPIR-V → WGSL.  This is far more robust than naga's
 /// own GLSL frontend, which cannot handle many real-world Shadertoy patterns
 /// (mat2-from-vec4, struct arrays, preprocessor macros, etc.).
-fn glsl_to_wgsl(glsl_source: &str) -> Result<String> {
+pub fn glsl_to_wgsl(glsl_source: &str) -> Result<String> {
     use naga::back::wgsl;
     use naga::valid::{Capabilities, ValidationFlags, Validator};
 

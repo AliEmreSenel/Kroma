@@ -181,6 +181,11 @@ impl KromaApp {
                             fft_bands: None,
                             hot_reload: false,
                             optional: false,
+                            shader: None,
+                            width: None,
+                            height: None,
+                            textures: std::collections::HashMap::new(),
+                            uniforms: std::collections::HashMap::new(),
                         },
                     );
                     self.shade_new_texture_name.clear();
@@ -393,6 +398,11 @@ impl KromaApp {
                         fft_bands: None,
                         hot_reload: false,
                         optional: false,
+                        shader: None,
+                        width: None,
+                        height: None,
+                        textures: std::collections::HashMap::new(),
+                        uniforms: std::collections::HashMap::new(),
                     },
                 );
                 self.sync_shade_toml();
