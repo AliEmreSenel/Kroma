@@ -242,7 +242,7 @@ impl TextureSource for SlideshowTexture {
         // Advance timer and swap if needed
         self.timer += dt;
         if self.timer >= self.interval && self.entries.len() > 1 {
-            self.timer -= self.interval;
+            self.timer %= self.interval;
             let next = (self.current + 1) % self.entries.len();
 
             info!(
