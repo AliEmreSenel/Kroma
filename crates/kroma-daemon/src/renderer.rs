@@ -177,6 +177,138 @@ impl RenderState {
         })
     }
 
+    fn active_surface_format(&self) -> wgpu::TextureFormat {
+        self.surface_config
+            .as_ref()
+            .map(|c| c.format)
+            .unwrap_or(SURFACE_FORMAT)
+    }
+
+    fn create_fullscreen_pipeline(
+        device: &wgpu::Device,
+        pipeline_layout: &wgpu::PipelineLayout,
+        vert_module: &wgpu::ShaderModule,
+        frag_module: &wgpu::ShaderModule,
+        format: wgpu::TextureFormat,
+        label: &str,
+    ) -> wgpu::RenderPipeline {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
+            layout: Some(pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: vert_module,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: frag_module,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
+    fn encode_fullscreen_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target_view: &wgpu::TextureView,
+        label: &str,
+        require_pipeline: bool,
+    ) -> Result<()> {
+        let pipeline = self.pipeline.as_ref();
+        let bind_group = self.bind_group.as_ref();
+
+        if require_pipeline {
+            let _ = pipeline.context("No render pipeline")?;
+            let _ = bind_group.context("No bind group")?;
+        }
+
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        if let (Some(pipeline), Some(bind_group)) = (pipeline, bind_group) {
+            render_pass.set_pipeline(pipeline);
+            render_pass.set_bind_group(0, bind_group, &[]);
+            if let Some(ref tex_bg) = self.texture_bind_group {
+                render_pass.set_bind_group(1, tex_bg, &[]);
+            }
+            render_pass.draw(0..3, 0..1);
+        }
+
+        Ok(())
+    }
+
+    fn write_uniform_buffer(&self, uniforms: &ShaderUniforms) {
+        if let (Some(queue), Some(buf)) = (self.queue.as_ref(), self.uniform_buffer.as_ref()) {
+            queue.write_buffer(buf, 0, bytemuck::bytes_of(uniforms));
+        }
+    }
+
+    fn upload_frame_uniforms(&self) {
+        self.write_uniform_buffer(&self.uniforms);
+        self.upload_custom_uniforms();
+    }
+
+    fn upload_preview_uniforms(&self, width: u32, height: u32) {
+        let mut preview_uniforms = self.uniforms;
+        preview_uniforms.u_resolution = [width as f32, height as f32];
+        self.write_uniform_buffer(&preview_uniforms);
+        self.upload_custom_uniforms();
+    }
+
+    fn create_offscreen_render_target(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        label: &str,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        (tex, view)
+    }
+
     pub fn init_gpu_with_surface(
         &mut self,
         gpu_pref: &GpuPower,
@@ -309,35 +441,14 @@ impl RenderState {
             source: wgpu::ShaderSource::Wgsl(self.current_frag_wgsl.clone().into()),
         });
 
-        // Render pipeline
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("kroma-pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &vert_module,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &frag_module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = Self::create_fullscreen_pipeline(
+            &device,
+            &pipeline_layout,
+            &vert_module,
+            &frag_module,
+            format,
+            "kroma-pipeline",
+        );
 
         self.instance = Some(instance);
         self.surface = wgpu_surface;
@@ -508,45 +619,21 @@ impl RenderState {
             .as_ref()
             .context("Vertex shader not available")?;
 
-        let format = self
-            .surface_config
-            .as_ref()
-            .map(|c| c.format)
-            .unwrap_or(SURFACE_FORMAT);
+        let format = self.active_surface_format();
 
         let frag_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("kroma-frag-custom"),
             source: wgpu::ShaderSource::Wgsl(frag_wgsl.into()),
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("kroma-pipeline-custom"),
-            layout: Some(pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: vert_module,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &frag_module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = Self::create_fullscreen_pipeline(
+            device,
+            pipeline_layout,
+            vert_module,
+            &frag_module,
+            format,
+            "kroma-pipeline-custom",
+        );
 
         self.pipeline = Some(pipeline);
         info!("Render pipeline rebuilt with new fragment shader");
@@ -800,11 +887,7 @@ impl RenderState {
 
         // Build a GpuContext for texture sources that need GPU access
         // (shader textures).
-        let surface_format = self
-            .surface_config
-            .as_ref()
-            .map(|c| c.format)
-            .unwrap_or(SURFACE_FORMAT);
+        let surface_format = self.active_surface_format();
         let gpu_ctx = GpuContext {
             device: Arc::clone(device),
             queue: Arc::clone(queue),
@@ -1213,13 +1296,7 @@ impl RenderState {
             return Ok(());
         };
 
-        // Upload uniforms
-        if let Some(buf) = self.uniform_buffer.as_ref() {
-            queue.write_buffer(buf, 0, bytemuck::bytes_of(&self.uniforms));
-        }
-
-        // Upload custom uniforms
-        self.upload_custom_uniforms();
+        self.upload_frame_uniforms();
 
         // Get the current surface texture to render to
         let Some(surface) = self.surface.as_ref() else {
@@ -1265,48 +1342,13 @@ impl RenderState {
             .device
             .as_ref()
             .context("GPU not initialised — cannot render frame")?;
-        let pipeline = self.pipeline.as_ref();
-        let bind_group = self.bind_group.as_ref();
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("kroma-frame"),
         });
 
         // TODO: render buffer passes here (multi-pass Buffer A/B/C/D)
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("kroma-render-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            if let (Some(pipeline), Some(bind_group)) = (pipeline, bind_group) {
-                render_pass.set_pipeline(pipeline);
-                render_pass.set_bind_group(0, bind_group, &[]);
-                // Also bind textures if available (group 1)
-                if let Some(ref tex_bg) = self.texture_bind_group {
-                    render_pass.set_bind_group(1, tex_bg, &[]);
-                }
-                render_pass.draw(0..3, 0..1); // Fullscreen triangle
-            }
-        }
+        self.encode_fullscreen_pass(&mut encoder, &view, "kroma-render-pass", false)?;
 
         queue.submit(std::iter::once(encoder.finish()));
         frame.present();
@@ -1327,40 +1369,15 @@ impl RenderState {
             .queue
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No GPU queue"))?;
-        let pipeline = self
-            .pipeline
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No render pipeline"))?;
-        let bind_group = self
-            .bind_group
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No bind group"))?;
 
         let w = width.max(1);
         let h = height.max(1);
 
         // Use the same format as the active pipeline to avoid format mismatch
-        let format = self
-            .surface_config
-            .as_ref()
-            .map(|c| c.format)
-            .unwrap_or(SURFACE_FORMAT);
+        let format = self.active_surface_format();
 
-        let tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("preview-capture"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let tex_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let (tex, tex_view) =
+            Self::create_offscreen_render_target(device, w, h, format, "preview-capture");
 
         // Bytes per row must be aligned to 256 for buffer copy
         let bytes_per_pixel = 4u32;
@@ -1375,41 +1392,13 @@ impl RenderState {
         });
 
         // Upload uniforms with preview resolution
-        let mut preview_uniforms = self.uniforms;
-        preview_uniforms.u_resolution = [w as f32, h as f32];
-        if let Some(buf) = self.uniform_buffer.as_ref() {
-            queue.write_buffer(buf, 0, bytemuck::bytes_of(&preview_uniforms));
-        }
+        self.upload_preview_uniforms(w, h);
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("preview-capture-encoder"),
         });
 
-        // Render pass
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("preview-render-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &tex_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bind_group, &[]);
-            if let Some(ref tex_bg) = self.texture_bind_group {
-                pass.set_bind_group(1, tex_bg, &[]);
-            }
-            pass.draw(0..3, 0..1);
-        }
+        self.encode_fullscreen_pass(&mut encoder, &tex_view, "preview-render-pass", true)?;
 
         // Copy texture to buffer
         encoder.copy_texture_to_buffer(
@@ -1476,9 +1465,7 @@ impl RenderState {
         output_buffer.unmap();
 
         // Restore original resolution in uniform buffer
-        if let Some(buf) = self.uniform_buffer.as_ref() {
-            queue.write_buffer(buf, 0, bytemuck::bytes_of(&self.uniforms));
-        }
+        self.upload_frame_uniforms();
 
         // Encode as JPEG — convert RGBA to RGB first (JPEG doesn't support alpha)
         let mut rgb = Vec::with_capacity((w * h * 3) as usize);
