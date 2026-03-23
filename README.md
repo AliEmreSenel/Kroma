@@ -152,6 +152,7 @@ examples/
 contrib/
 └── kroma-daemon.service  # systemd user service
 docs/
+├── TEXTURES.md       # Texture types, nesting, and composition patterns
 └── PRD.md            # Product Requirements Document
 ```
 

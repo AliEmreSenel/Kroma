@@ -230,6 +230,7 @@ pub fn create_texture_source(
                 def.shuffle,
                 def.hot_reload,
                 def.optional,
+                gpu,
             )?;
             Ok(Some(Box::new(tex)))
         }

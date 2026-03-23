@@ -284,28 +284,6 @@ impl TextureType {
     }
 }
 
-/// A single source entry within a slideshow texture.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlideSource {
-    /// Path to the asset file.
-    pub source: String,
-    /// Type of this slide entry: "image" or "video".
-    #[serde(rename = "type", default = "default_slide_type")]
-    pub ty: SlideSourceType,
-}
-
-/// The type of a slide within a slideshow.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SlideSourceType {
-    Image,
-    Video,
-}
-
-fn default_slide_type() -> SlideSourceType {
-    SlideSourceType::Image
-}
-
 /// A texture channel binding.
 ///
 /// Unified definition for all texture types: image, video, font,
@@ -319,9 +297,22 @@ pub struct TextureDef {
     /// Path to the asset file (for image, video, font types).
     #[serde(default)]
     pub source: Option<String>,
-    /// Array of sources (for slideshow type).
+    /// Special input selector for shader textures.
+    ///
+    /// Currently supported value:
+    /// - `"t-1"`: bind the shader's own previous frame output.
+    ///
+    /// This is only meaningful for nested `textures` inside
+    /// `type = "shader"` texture definitions.
     #[serde(default)]
-    pub sources: Vec<SlideSource>,
+    pub input: Option<String>,
+    /// Array of sources (for slideshow type).
+    ///
+    /// Each slideshow source is a full texture definition, so slides can be
+    /// any texture type (image, video, shader, audio_spectrum, font,
+    /// slideshow), including nested shader compositions.
+    #[serde(default)]
+    pub sources: Vec<TextureDef>,
     /// Whether video textures loop (default: true).
     #[serde(default = "bool_true", rename = "loop")]
     pub looping: bool,

@@ -335,6 +335,7 @@ layout(location = 0) out vec4 kroma_out_color;
             TextureDef {
                 ty: TextureType::Image,
                 source: Some(format!("assets/channel{}.png", idx)),
+                input: None,
                 sources: Vec::new(),
                 looping: true,
                 filter: Default::default(),
