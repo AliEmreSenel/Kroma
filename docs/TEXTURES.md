@@ -49,8 +49,9 @@ All texture entries use the same `TextureDef` schema.
 
 Common fields:
 
-- `type`: Texture type (`image`, `video`, `font`, `slideshow`, `audio_spectrum`, `shader`)
+- `type`: Texture type (`image`, `video`, `font`, `slideshow`, `audio_spectrum`, `noise`, `shader`)
 - `source`: File path or source id (used by several types)
+- `seed`: Explicit seed for `noise` textures
 - `binding`: Preferred channel order index
 - `optional`: If `true`, load failures degrade to placeholders instead of hard failing
 - `hot_reload`: Enable filesystem reload for external disk sources
@@ -259,6 +260,39 @@ type = "float"
 min = 0.0
 max = 1.0
 default = 0.25
+```
+
+### 4.7 `noise`
+
+Purpose:
+- Procedural RGBA noise texture generated from a seed
+
+Relevant fields:
+- `seed` (optional)
+- `width` (default `512`)
+- `height` (default `512`)
+- `binding`, `filter`, `wrap`
+
+Runtime behavior:
+- Generated once on load and uploaded once
+- If `seed` is omitted, a process-wide default seed is initialized once and reused
+- Omitted-seed noise remains stable across repeated loads in the same daemon process
+
+Example:
+
+```toml
+[textures.grain]
+type = "noise"
+width = 1920
+height = 1080
+binding = 5
+
+[textures.grain_alt]
+type = "noise"
+seed = 1337
+width = 1920
+height = 1080
+binding = 6
 ```
 
 ## 5. Nesting Rules
