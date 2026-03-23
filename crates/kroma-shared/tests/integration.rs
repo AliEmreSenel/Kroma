@@ -257,3 +257,34 @@ loop = true
         Some("t-1")
     );
 }
+
+#[test]
+fn parse_noise_texture_with_and_without_seed() {
+    let toml_str = r#"
+[meta]
+name = "Noise"
+author = "Tester"
+
+[textures.base]
+type = "noise"
+width = 320
+height = 180
+
+[textures.detail]
+type = "noise"
+seed = 1337
+width = 320
+height = 180
+"#;
+
+    let config: ShadeConfig = toml::from_str(toml_str).unwrap();
+    let base = config.textures.get("base").unwrap();
+    let detail = config.textures.get("detail").unwrap();
+
+    assert_eq!(base.ty.as_str(), "noise");
+    assert_eq!(detail.ty.as_str(), "noise");
+    assert_eq!(base.seed, None);
+    assert_eq!(detail.seed, Some(1337));
+    assert_eq!(base.width, Some(320));
+    assert_eq!(base.height, Some(180));
+}

@@ -1,6 +1,6 @@
 //! Texture source system for Kroma.
 //!
-//! Each texture type (image, video, font, slideshow, audio) implements the
+//! Each texture type (image, video, font, slideshow, audio, noise) implements the
 //! [`TextureSource`] trait, which provides a self-contained lifecycle:
 //! loading from a shade package, advancing state each frame, and
 //! yielding new pixel data when the GPU texture needs updating.
@@ -9,6 +9,7 @@ pub mod audio;
 pub mod font;
 pub mod hot_reload;
 pub mod image;
+pub mod noise;
 pub mod shader;
 pub mod slideshow;
 pub mod video;
@@ -238,6 +239,12 @@ pub fn create_texture_source(
             let source = def.source.as_deref().unwrap_or("desktop");
             let bands = def.fft_bands.unwrap_or(512);
             let tex = self::audio::AudioTexture::load(source, bands, def.optional)?;
+            Ok(Some(Box::new(tex)))
+        }
+        TextureType::Noise => {
+            let width = def.width.unwrap_or(512).max(1);
+            let height = def.height.unwrap_or(512).max(1);
+            let tex = self::noise::NoiseTexture::load(width, height, def.seed)?;
             Ok(Some(Box::new(tex)))
         }
         TextureType::Shader => {

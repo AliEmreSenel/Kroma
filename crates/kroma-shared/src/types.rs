@@ -261,6 +261,8 @@ pub enum TextureType {
     Slideshow,
     /// Audio FFT spectrum data (512×1 R32Float).
     AudioSpectrum,
+    /// Procedural RGBA noise texture generated from a seed.
+    Noise,
     /// A shader rendered to an offscreen texture.
     ///
     /// Supports the full feature set of the root shader: custom uniforms,
@@ -279,6 +281,7 @@ impl TextureType {
             Self::Font => "font",
             Self::Slideshow => "slideshow",
             Self::AudioSpectrum => "audio_spectrum",
+            Self::Noise => "noise",
             Self::Shader => "shader",
         }
     }
@@ -286,8 +289,7 @@ impl TextureType {
 
 /// A texture channel binding.
 ///
-/// Unified definition for all texture types: image, video, font,
-/// slideshow, and audio spectrum. The `type` field determines which
+/// Unified definition for all texture types. The `type` field determines which
 /// fields are relevant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextureDef {
@@ -297,6 +299,12 @@ pub struct TextureDef {
     /// Path to the asset file (for image, video, font types).
     #[serde(default)]
     pub source: Option<String>,
+    /// Explicit seed for procedural noise textures.
+    ///
+    /// When omitted, noise textures use a process-wide default seed that is
+    /// initialized once and then reused for later omitted-seed loads.
+    #[serde(default)]
+    pub seed: Option<u64>,
     /// Special input selector for shader textures.
     ///
     /// Currently supported value:
@@ -361,11 +369,11 @@ pub struct TextureDef {
     #[serde(default)]
     pub shader: Option<String>,
 
-    /// Render width for shader textures (default: 512).
+    /// Render width for shader/noise textures (default: 512).
     #[serde(default)]
     pub width: Option<u32>,
 
-    /// Render height for shader textures (default: 512).
+    /// Render height for shader/noise textures (default: 512).
     #[serde(default)]
     pub height: Option<u32>,
 
