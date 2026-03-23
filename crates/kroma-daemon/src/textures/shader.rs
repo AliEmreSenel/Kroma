@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use log::{info, warn};
+use anyhow::Result;
+use log::warn;
 
 use kroma_shared::shade::LiveShadePackage;
 use kroma_shared::types::{ShaderUniforms, TextureDef, UniformDef};
@@ -42,6 +42,11 @@ pub struct ShaderTexture {
     /// Sampler for the output texture.
     sampler: wgpu::Sampler,
 
+    /// Previous frame snapshot used by `input = "t-1"` channels.
+    prev_frame_texture: wgpu::Texture,
+    prev_frame_view: wgpu::TextureView,
+    prev_frame_sampler: wgpu::Sampler,
+
     /// Output dimensions.
     width: u32,
     height: u32,
@@ -60,11 +65,7 @@ pub struct ShaderTexture {
 
     // -- Uniform state --
     uniforms: ShaderUniforms,
-    custom_uniform_indices: HashMap<String, usize>,
     custom_uniform_data: Vec<f32>,
-
-    /// Output format.
-    output_format: wgpu::TextureFormat,
 }
 
 /// A loaded sub-texture within a shader texture.
@@ -78,6 +79,8 @@ struct SubTexture {
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
+    /// True when this channel should bind the shader's own previous frame.
+    uses_prev_frame: bool,
 }
 
 impl ShaderTexture {
@@ -119,6 +122,8 @@ impl ShaderTexture {
         // -- Offscreen render target --
         let (render_texture, render_view, sample_view, sampler) =
             Self::create_render_target(device, width, height, output_format);
+        let (prev_frame_texture, _prev_frame_render_view, prev_frame_view, prev_frame_sampler) =
+            Self::create_render_target(device, width, height, output_format);
 
         // -- Uniform buffer (ShaderUniforms) --
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -138,13 +143,12 @@ impl ShaderTexture {
         });
 
         // -- Map custom uniform names to indices --
-        let mut custom_uniform_indices = HashMap::new();
         let mut custom_uniform_data = vec![0.0f32; MAX_CUSTOM_UNIFORMS];
-        for (idx, (name, def)) in uniform_defs.iter().enumerate() {
+        for (idx, (_name, def)) in uniform_defs.iter().enumerate() {
             if idx >= MAX_CUSTOM_UNIFORMS {
                 warn!(
                     "Shader texture: max {} custom uniforms reached, ignoring '{}'",
-                    MAX_CUSTOM_UNIFORMS, name
+                    MAX_CUSTOM_UNIFORMS, _name
                 );
                 break;
             }
@@ -156,7 +160,6 @@ impl ShaderTexture {
                     _ => 0.0,
                 };
             }
-            custom_uniform_indices.insert(name.clone(), idx);
         }
 
         // -- Bind group 0 (uniforms + custom uniforms) --
@@ -210,6 +213,11 @@ impl ShaderTexture {
         sorted_defs.sort_by_key(|(_, def)| def.binding.unwrap_or(u32::MAX));
 
         for (name, def) in &sorted_defs {
+            if Self::is_t_minus_one_input(def) {
+                sub_textures.push(Self::create_prev_frame_sub_texture(device, queue, name));
+                continue;
+            }
+
             match super::create_texture_source(&pkg, def, Some(gpu)) {
                 Ok(Some(source)) => {
                     let sub = Self::create_sub_texture(device, queue, source, name);
@@ -242,7 +250,7 @@ impl ShaderTexture {
 
         // -- Build texture bind group (group 1) --
         let texture_bind_group = if !sub_textures.is_empty() {
-            for (i, sub) in sub_textures.iter().enumerate() {
+            for (i, _sub) in sub_textures.iter().enumerate() {
                 let tex_binding = (i * 2) as u32;
                 let samp_binding = (i * 2 + 1) as u32;
                 tex_bgl_entries.push(wgpu::BindGroupLayoutEntry {
@@ -272,13 +280,18 @@ impl ShaderTexture {
             let mut bg_entries = Vec::new();
             for (i, sub) in sub_textures.iter().enumerate() {
                 let (tex_b, samp_b) = tex_bg_entries_data[i];
+                let (view, sampler) = if sub.uses_prev_frame {
+                    (&prev_frame_view, &prev_frame_sampler)
+                } else {
+                    (&sub.gpu_view, &sub.gpu_sampler)
+                };
                 bg_entries.push(wgpu::BindGroupEntry {
                     binding: tex_b,
-                    resource: wgpu::BindingResource::TextureView(&sub.gpu_view),
+                    resource: wgpu::BindingResource::TextureView(view),
                 });
                 bg_entries.push(wgpu::BindGroupEntry {
                     binding: samp_b,
-                    resource: wgpu::BindingResource::Sampler(&sub.gpu_sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 });
             }
 
@@ -307,6 +320,9 @@ impl ShaderTexture {
                 render_view,
                 sample_view,
                 sampler,
+                prev_frame_texture,
+                prev_frame_view,
+                prev_frame_sampler,
                 width,
                 height,
                 pipeline,
@@ -315,10 +331,11 @@ impl ShaderTexture {
                 bind_group_0,
                 sub_textures,
                 texture_bind_group: Some(tex_bg),
-                uniforms: ShaderUniforms::default(),
-                custom_uniform_indices,
+                uniforms: ShaderUniforms {
+                    u_resolution: [width as f32, height as f32],
+                    ..ShaderUniforms::default()
+                },
                 custom_uniform_data,
-                output_format,
             });
         } else {
             None
@@ -343,6 +360,9 @@ impl ShaderTexture {
             render_view,
             sample_view,
             sampler,
+            prev_frame_texture,
+            prev_frame_view,
+            prev_frame_sampler,
             width,
             height,
             pipeline,
@@ -352,9 +372,7 @@ impl ShaderTexture {
             sub_textures,
             texture_bind_group,
             uniforms: initial_uniforms,
-            custom_uniform_indices,
             custom_uniform_data,
-            output_format,
         })
     }
 
@@ -377,7 +395,8 @@ impl ShaderTexture {
             format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
@@ -455,22 +474,7 @@ impl ShaderTexture {
         label: &str,
     ) -> SubTexture {
         if source.is_gpu_managed() {
-            // GPU-managed source (e.g., nested shader texture) — use its
-            // texture view and sampler directly.
-            let view = source.gpu_texture_view().unwrap();
-            let sampler = source.gpu_sampler().unwrap();
-            let (w, h) = source.dimensions();
-            // We can't borrow from the source and store alongside it, so
-            // we create a dummy texture/view and will rebuild the bind group
-            // after the source is stored. Actually, for GPU-managed sources
-            // we need to handle this differently in the bind group rebuild.
-            // For now, create a placeholder and we'll fix up the bind group
-            // during rendering.
-
-            // Actually, let's create the sub-texture with the source's
-            // GPU resources. The source owns the texture, so we need the
-            // source stored first. Let's use a placeholder initially and
-            // fix up after.
+            // GPU-managed sources provide views/samplers at bind-group rebuild time.
             let placeholder_data = vec![0u8; 4]; // 1x1 transparent
             let format = wgpu::TextureFormat::Rgba8UnormSrgb;
             let (gpu_texture, gpu_view, gpu_sampler) =
@@ -481,13 +485,14 @@ impl ShaderTexture {
                 gpu_texture: Some(gpu_texture),
                 gpu_view,
                 gpu_sampler,
-                width: w,
-                height: h,
+                // Tracks the currently allocated GPU texture size.
+                width: 1,
+                height: 1,
                 format,
+                uses_prev_frame: false,
             }
         } else {
             // CPU-managed source — create a GPU texture for uploading frames.
-            let (w, h) = source.dimensions();
             let format = source.format().wgpu_format();
             let placeholder_data = vec![0u8; source.format().bytes_per_pixel() as usize];
             let (gpu_texture, gpu_view, gpu_sampler) =
@@ -498,10 +503,35 @@ impl ShaderTexture {
                 gpu_texture: Some(gpu_texture),
                 gpu_view,
                 gpu_sampler,
-                width: w,
-                height: h,
+                // Start at placeholder size so the first decoded frame always
+                // triggers a proper resize before write_texture.
+                width: 1,
+                height: 1,
                 format,
+                uses_prev_frame: false,
             }
+        }
+    }
+
+    fn create_prev_frame_sub_texture(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &str,
+    ) -> SubTexture {
+        let placeholder_data = vec![0u8; 4];
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let (gpu_texture, gpu_view, gpu_sampler) =
+            Self::create_sub_gpu_texture(device, queue, &placeholder_data, 1, 1, format, label);
+
+        SubTexture {
+            source: None,
+            gpu_texture: Some(gpu_texture),
+            gpu_view,
+            gpu_sampler,
+            width: 1,
+            height: 1,
+            format,
+            uses_prev_frame: true,
         }
     }
 
@@ -523,7 +553,15 @@ impl ShaderTexture {
             width: 1,
             height: 1,
             format,
+            uses_prev_frame: false,
         }
+    }
+
+    fn is_t_minus_one_input(def: &TextureDef) -> bool {
+        def.input
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case("t-1"))
+            .unwrap_or(false)
     }
 
     fn create_sub_gpu_texture(
@@ -593,6 +631,8 @@ impl ShaderTexture {
         let device = &gpu.device;
 
         let (render_texture, render_view, sample_view, sampler) =
+            Self::create_render_target(device, width, height, output_format);
+        let (prev_frame_texture, _prev_frame_render_view, prev_frame_view, prev_frame_sampler) =
             Self::create_render_target(device, width, height, output_format);
 
         // Minimal pass-through shader
@@ -706,6 +746,9 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             render_view,
             sample_view,
             sampler,
+            prev_frame_texture,
+            prev_frame_view,
+            prev_frame_sampler,
             width,
             height,
             pipeline,
@@ -715,9 +758,7 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             sub_textures: Vec::new(),
             texture_bind_group: None,
             uniforms: ShaderUniforms::default(),
-            custom_uniform_indices: HashMap::new(),
             custom_uniform_data: vec![0.0; MAX_CUSTOM_UNIFORMS],
-            output_format,
         })
     }
 
@@ -733,7 +774,7 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let mut layout_entries = Vec::new();
         let mut group_entries = Vec::new();
 
-        for (i, sub) in self.sub_textures.iter().enumerate() {
+        for (i, _sub) in self.sub_textures.iter().enumerate() {
             let tex_binding = (i * 2) as u32;
             let samp_binding = (i * 2 + 1) as u32;
 
@@ -763,6 +804,18 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         for (i, sub) in self.sub_textures.iter().enumerate() {
             let tex_binding = (i * 2) as u32;
             let samp_binding = (i * 2 + 1) as u32;
+
+            if sub.uses_prev_frame {
+                group_entries.push(wgpu::BindGroupEntry {
+                    binding: tex_binding,
+                    resource: wgpu::BindingResource::TextureView(&self.prev_frame_view),
+                });
+                group_entries.push(wgpu::BindGroupEntry {
+                    binding: samp_binding,
+                    resource: wgpu::BindingResource::Sampler(&self.prev_frame_sampler),
+                });
+                continue;
+            }
 
             // For GPU-managed sub-textures, use their native views
             let (view, sampler) = if let Some(ref source) = sub.source {
@@ -814,6 +867,8 @@ impl TextureSource for ShaderTexture {
             let Some(source) = sub.source.as_mut() else {
                 continue;
             };
+
+            let was_gpu_managed = source.is_gpu_managed();
 
             // Propagate uniforms to GPU-managed sub-textures (recursive)
             source.update_uniforms(&self.uniforms);
@@ -876,8 +931,13 @@ impl TextureSource for ShaderTexture {
                 }
             }
 
+            let is_gpu_managed = source.is_gpu_managed();
+            if was_gpu_managed != is_gpu_managed {
+                needs_bind_rebuild = true;
+            }
+
             // GPU-managed sub-textures render themselves
-            if source.is_gpu_managed() {
+            if is_gpu_managed {
                 source.gpu_render()?;
             }
         }
@@ -972,6 +1032,26 @@ impl TextureSource for ShaderTexture {
             }
             pass.draw(0..3, 0..1);
         }
+
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.render_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.prev_frame_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
+        );
 
         queue.submit(std::iter::once(encoder.finish()));
 

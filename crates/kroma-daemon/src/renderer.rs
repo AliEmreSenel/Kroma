@@ -12,7 +12,10 @@ use log::{info, warn};
 
 use kroma_shared::shade::LiveShadePackage;
 use kroma_shared::types::ShaderUniforms;
-use wgpu::wgt::PollType;
+
+mod preview;
+mod render_flow;
+mod shader_translation;
 
 use crate::{
     config::GpuPower,
@@ -43,7 +46,7 @@ const MAX_CUSTOM_UNIFORMS: usize = 32;
 // Shade load outcome
 // ---------------------------------------------------------------------------
 
-/// Outcome of [`RenderState::load_shade`].
+/// Outcome of [`Renderer::load_shade`].
 ///
 /// The daemon should inspect this to decide what IPC message to send.
 #[derive(Debug)]
@@ -103,8 +106,29 @@ struct BufferPassState {
     feedback: bool,
 }
 
-/// Holds the entire wgpu render state.
-pub struct RenderState {
+/// GPU-bound resources owned by the renderer.
+///
+/// This struct groups low-level wgpu handles away from orchestration state,
+/// which keeps [`Renderer`] easier to reason about.
+#[derive(Default)]
+pub(crate) struct GpuResources {
+    instance: Option<wgpu::Instance>,
+    surface: Option<wgpu::Surface<'static>>,
+    device: Option<Arc<wgpu::Device>>,
+    queue: Option<Arc<wgpu::Queue>>,
+    pipeline: Option<wgpu::RenderPipeline>,
+    uniform_buffer: Option<wgpu::Buffer>,
+    bind_group: Option<wgpu::BindGroup>,
+    bind_group_layout: Option<wgpu::BindGroupLayout>,
+    pipeline_layout: Option<wgpu::PipelineLayout>,
+    vert_module: Option<wgpu::ShaderModule>,
+    surface_config: Option<wgpu::SurfaceConfiguration>,
+    texture_bind_group: Option<wgpu::BindGroup>,
+    texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
+}
+
+/// Orchestrates rendering, shader loading, uniforms, and texture updates.
+pub struct Renderer {
     /// Current shader uniforms (CPU side).
     pub uniforms: ShaderUniforms,
 
@@ -119,27 +143,14 @@ pub struct RenderState {
     /// GPU storage buffer for custom uniform values.
     custom_uniform_buffer: Option<wgpu::Buffer>,
 
-    // wgpu resources
-    instance: Option<wgpu::Instance>,
-    surface: Option<wgpu::Surface<'static>>,
-    device: Option<Arc<wgpu::Device>>,
-    queue: Option<Arc<wgpu::Queue>>,
-    pipeline: Option<wgpu::RenderPipeline>,
-    uniform_buffer: Option<wgpu::Buffer>,
-    bind_group: Option<wgpu::BindGroup>,
-    bind_group_layout: Option<wgpu::BindGroupLayout>,
-    pipeline_layout: Option<wgpu::PipelineLayout>,
-    vert_module: Option<wgpu::ShaderModule>,
-    surface_config: Option<wgpu::SurfaceConfiguration>,
+    /// Low-level GPU handles and pipeline objects.
+    gpu: GpuResources,
 
     // Texture resources (bind group 1)
     textures: Vec<LoadedTexture>,
     /// Self-contained texture sources (image, video, font, slideshow, audio).
     /// Parallel to `textures` — `texture_sources[i]` drives `textures[i]`.
     texture_sources: Vec<Option<Box<dyn TextureSource>>>,
-    texture_bind_group: Option<wgpu::BindGroup>,
-    texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
-
     /// Current fragment shader source (WGSL).
     current_frag_wgsl: String,
 
@@ -147,8 +158,8 @@ pub struct RenderState {
     buffer_passes: Vec<BufferPassState>,
 }
 
-impl RenderState {
-    /// Create a new render state. Does NOT initialise the GPU yet.
+impl Renderer {
+    /// Creates a renderer instance without initializing GPU resources.
     pub fn new() -> Result<Self> {
         Ok(Self {
             active_package: None,
@@ -157,33 +168,20 @@ impl RenderState {
             custom_uniform_indices: std::collections::HashMap::new(),
             custom_uniform_data: vec![0.0; MAX_CUSTOM_UNIFORMS],
             custom_uniform_buffer: None,
-            instance: None,
-            surface: None,
-            device: None,
-            queue: None,
-            pipeline: None,
-            uniform_buffer: None,
-            bind_group: None,
-            bind_group_layout: None,
-            pipeline_layout: None,
-            vert_module: None,
-            surface_config: None,
+            gpu: GpuResources::default(),
             textures: Vec::new(),
             texture_sources: Vec::new(),
-            texture_bind_group: None,
-            texture_bind_group_layout: None,
             current_frag_wgsl: INIT_FRAG_WGSL.to_string(),
             buffer_passes: Vec::new(),
         })
     }
 
+    /// Returns the active surface format used for pipeline and texture setup.
     fn active_surface_format(&self) -> wgpu::TextureFormat {
-        self.surface_config
-            .as_ref()
-            .map(|c| c.format)
-            .unwrap_or(SURFACE_FORMAT)
+        render_flow::active_surface_format(self)
     }
 
+    /// Creates the fullscreen render pipeline for the current shader pair.
     fn create_fullscreen_pipeline(
         device: &wgpu::Device,
         pipeline_layout: &wgpu::PipelineLayout,
@@ -192,36 +190,17 @@ impl RenderState {
         format: wgpu::TextureFormat,
         label: &str,
     ) -> wgpu::RenderPipeline {
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
-            layout: Some(pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: vert_module,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: frag_module,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        })
+        render_flow::create_fullscreen_pipeline(
+            device,
+            pipeline_layout,
+            vert_module,
+            frag_module,
+            format,
+            label,
+        )
     }
 
+    /// Encodes a fullscreen pass against a target view.
     fn encode_fullscreen_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -229,61 +208,25 @@ impl RenderState {
         label: &str,
         require_pipeline: bool,
     ) -> Result<()> {
-        let pipeline = self.pipeline.as_ref();
-        let bind_group = self.bind_group.as_ref();
-
-        if require_pipeline {
-            let _ = pipeline.context("No render pipeline")?;
-            let _ = bind_group.context("No bind group")?;
-        }
-
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some(label),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-
-        if let (Some(pipeline), Some(bind_group)) = (pipeline, bind_group) {
-            render_pass.set_pipeline(pipeline);
-            render_pass.set_bind_group(0, bind_group, &[]);
-            if let Some(ref tex_bg) = self.texture_bind_group {
-                render_pass.set_bind_group(1, tex_bg, &[]);
-            }
-            render_pass.draw(0..3, 0..1);
-        }
-
-        Ok(())
+        render_flow::encode_fullscreen_pass(self, encoder, target_view, label, require_pipeline)
     }
 
+    /// Writes one uniform block into GPU uniform memory.
     fn write_uniform_buffer(&self, uniforms: &ShaderUniforms) {
-        if let (Some(queue), Some(buf)) = (self.queue.as_ref(), self.uniform_buffer.as_ref()) {
-            queue.write_buffer(buf, 0, bytemuck::bytes_of(uniforms));
-        }
+        render_flow::write_uniform_buffer(self, uniforms)
     }
 
+    /// Uploads per-frame uniforms and custom uniform storage.
     fn upload_frame_uniforms(&self) {
-        self.write_uniform_buffer(&self.uniforms);
-        self.upload_custom_uniforms();
+        render_flow::upload_frame_uniforms(self)
     }
 
+    /// Uploads preview uniforms with a temporary resolution override.
     fn upload_preview_uniforms(&self, width: u32, height: u32) {
-        let mut preview_uniforms = self.uniforms;
-        preview_uniforms.u_resolution = [width as f32, height as f32];
-        self.write_uniform_buffer(&preview_uniforms);
-        self.upload_custom_uniforms();
+        render_flow::upload_preview_uniforms(self, width, height)
     }
 
+    /// Creates an offscreen color target and view for preview rendering.
     fn create_offscreen_render_target(
         device: &wgpu::Device,
         width: u32,
@@ -291,22 +234,7 @@ impl RenderState {
         format: wgpu::TextureFormat,
         label: &str,
     ) -> (wgpu::Texture, wgpu::TextureView) {
-        let tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-        (tex, view)
+        render_flow::create_offscreen_render_target(device, width, height, format, label)
     }
 
     pub fn init_gpu_with_surface(
@@ -387,9 +315,9 @@ impl RenderState {
                 desired_maximum_frame_latency: 2,
             };
             s.configure(&device, &surface_config);
-            self.surface_config = Some(surface_config);
+            self.gpu.surface_config = Some(surface_config);
         } else {
-            self.surface_config = None;
+            self.gpu.surface_config = None;
         }
         // Create uniform buffer
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -450,16 +378,16 @@ impl RenderState {
             "kroma-pipeline",
         );
 
-        self.instance = Some(instance);
-        self.surface = wgpu_surface;
-        self.device = Some(device);
-        self.queue = Some(queue);
-        self.pipeline = Some(pipeline);
-        self.uniform_buffer = Some(uniform_buffer);
-        self.bind_group = Some(bind_group);
-        self.bind_group_layout = Some(bind_group_layout);
-        self.pipeline_layout = Some(pipeline_layout);
-        self.vert_module = Some(vert_module);
+        self.gpu.instance = Some(instance);
+        self.gpu.surface = wgpu_surface;
+        self.gpu.device = Some(device);
+        self.gpu.queue = Some(queue);
+        self.gpu.pipeline = Some(pipeline);
+        self.gpu.uniform_buffer = Some(uniform_buffer);
+        self.gpu.bind_group = Some(bind_group);
+        self.gpu.bind_group_layout = Some(bind_group_layout);
+        self.gpu.pipeline_layout = Some(pipeline_layout);
+        self.gpu.vert_module = Some(vert_module);
 
         info!(
             "GPU pipeline initialised with real surface ({}x{})",
@@ -587,7 +515,7 @@ impl RenderState {
         // Ensure the custom uniform buffer + BGL0 binding exists so the
         // pipeline layout matches the shader's expected bindings.
         if self.custom_uniform_buffer.is_none() {
-            let device = self.device.as_ref().context("GPU not initialised")?;
+            let device = self.gpu.device.as_ref().context("GPU not initialised")?;
             let buffer_size = (MAX_CUSTOM_UNIFORMS * std::mem::size_of::<f32>()) as u64;
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("kroma-custom-uniforms"),
@@ -597,7 +525,7 @@ impl RenderState {
             });
             self.custom_uniform_buffer = Some(buffer);
             self.rebuild_bind_group_0()?;
-        } else if self.texture_bind_group_layout.is_some() {
+        } else if self.gpu.texture_bind_group_layout.is_some() {
             // Ensure pipeline layout includes texture bind groups if present
             self.rebuild_pipeline_layout()?;
         }
@@ -609,35 +537,7 @@ impl RenderState {
 
     /// Rebuild the render pipeline with a new fragment shader.
     fn rebuild_pipeline_with_frag(&mut self, frag_wgsl: &str) -> Result<()> {
-        let device = self.device.as_ref().context("GPU not initialised")?;
-        let pipeline_layout = self
-            .pipeline_layout
-            .as_ref()
-            .context("Pipeline layout not available")?;
-        let vert_module = self
-            .vert_module
-            .as_ref()
-            .context("Vertex shader not available")?;
-
-        let format = self.active_surface_format();
-
-        let frag_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("kroma-frag-custom"),
-            source: wgpu::ShaderSource::Wgsl(frag_wgsl.into()),
-        });
-
-        let pipeline = Self::create_fullscreen_pipeline(
-            device,
-            pipeline_layout,
-            vert_module,
-            &frag_module,
-            format,
-            "kroma-pipeline-custom",
-        );
-
-        self.pipeline = Some(pipeline);
-        info!("Render pipeline rebuilt with new fragment shader");
-        Ok(())
+        render_flow::rebuild_pipeline_with_frag(self, frag_wgsl)
     }
 
     /// Set a custom uniform value from the IPC command.
@@ -673,7 +573,7 @@ impl RenderState {
         &mut self,
         config: &kroma_shared::types::ShadeConfig,
     ) -> Result<()> {
-        let device = self.device.as_ref().context("GPU not initialised")?;
+        let device = self.gpu.device.as_ref().context("GPU not initialised")?;
 
         // Map uniform names to indices
         self.custom_uniform_indices.clear();
@@ -729,8 +629,9 @@ impl RenderState {
 
     /// Rebuild bind group 0 to include both the main uniform buffer and custom uniform storage buffer.
     fn rebuild_bind_group_0(&mut self) -> Result<()> {
-        let device = self.device.as_ref().context("GPU not initialised")?;
+        let device = self.gpu.device.as_ref().context("GPU not initialised")?;
         let uniform_buf = self
+            .gpu
             .uniform_buffer
             .as_ref()
             .context("Uniform buffer missing")?;
@@ -779,8 +680,8 @@ impl RenderState {
             entries: &group_entries,
         });
 
-        self.bind_group_layout = Some(layout);
-        self.bind_group = Some(bind_group);
+        self.gpu.bind_group_layout = Some(layout);
+        self.gpu.bind_group = Some(bind_group);
 
         // Pipeline layout needs rebuilding since BGL changed
         self.rebuild_pipeline_layout()?;
@@ -790,7 +691,7 @@ impl RenderState {
 
     /// Upload custom uniform data to the GPU (called each frame).
     pub fn upload_custom_uniforms(&self) {
-        if let (Some(buf), Some(queue)) = (&self.custom_uniform_buffer, self.queue.as_ref()) {
+        if let (Some(buf), Some(queue)) = (&self.custom_uniform_buffer, self.gpu.queue.as_ref()) {
             queue.write_buffer(buf, 0, bytemuck::cast_slice(&self.custom_uniform_data));
         }
     }
@@ -869,7 +770,7 @@ impl RenderState {
     ///
     /// Creates [`TextureSource`] instances for each texture definition
     /// and corresponding GPU textures. The sources manage their own
-    /// lifecycles — call [`update_textures`](RenderState::update_textures)
+    /// lifecycles — call [`update_textures`](Renderer::update_textures)
     /// each frame to advance them.
     ///
     /// Returns a (possibly empty) list of **required** textures that failed
@@ -880,10 +781,11 @@ impl RenderState {
         pkg: &Arc<LiveShadePackage>,
     ) -> Result<Vec<TextureLoadFailure>> {
         let device = self
+            .gpu
             .device
             .as_ref()
             .context("GPU not initialised — cannot load textures")?;
-        let queue = self.queue.as_ref().context("GPU queue not initialised")?;
+        let queue = self.gpu.queue.as_ref().context("GPU queue not initialised")?;
 
         // Build a GpuContext for texture sources that need GPU access
         // (shader textures).
@@ -894,8 +796,8 @@ impl RenderState {
             surface_format,
         };
 
-        self.texture_bind_group = None;
-        self.texture_bind_group_layout = None;
+        self.gpu.texture_bind_group = None;
+        self.gpu.texture_bind_group_layout = None;
 
         let mut required_failures: Vec<TextureLoadFailure> = Vec::new();
 
@@ -983,11 +885,11 @@ impl RenderState {
     ///
     /// Called once per frame from the render loop.
     pub fn update_textures(&mut self, dt: f64) -> Result<()> {
-        let queue = match self.queue.as_ref() {
+        let queue = match self.gpu.queue.as_ref() {
             Some(q) => q,
             None => return Ok(()),
         };
-        let device = match self.device.as_ref() {
+        let device = match self.gpu.device.as_ref() {
             Some(d) => d,
             None => return Ok(()),
         };
@@ -999,8 +901,10 @@ impl RenderState {
                 continue;
             };
 
+            let was_gpu_managed = source.is_gpu_managed();
+
             // Propagate system uniforms to GPU-managed sources (shader textures)
-            if source.is_gpu_managed() {
+            if was_gpu_managed {
                 source.update_uniforms(&self.uniforms);
             }
 
@@ -1013,60 +917,66 @@ impl RenderState {
                 } => {
                     // GPU-managed sources handle their own textures
                     if source.is_gpu_managed() {
-                        continue;
-                    }
-
-                    if i >= self.textures.len() {
-                        continue;
-                    }
-                    let tex_format = self.textures[i].format;
-                    let bpp = match tex_format {
-                        wgpu::TextureFormat::R32Float => 4u32,
-                        _ => 4u32, // Rgba8UnormSrgb
-                    };
-
-                    // Check if we need to resize the GPU texture
-                    if self.textures[i].width != width || self.textures[i].height != height {
-                        // Recreate the GPU texture at the new size
-                        let new_tex = Self::create_gpu_texture(
-                            device,
-                            queue,
-                            &data,
-                            width,
-                            height,
-                            tex_format,
-                            &format!("texture-{}", i),
-                        );
-                        self.textures[i] = new_tex;
-                        needs_rebuild = true;
+                        // No CPU upload path for GPU-managed sources.
                     } else {
-                        // Just upload new data to the existing texture
-                        queue.write_texture(
-                            wgpu::TexelCopyTextureInfo {
-                                texture: &self.textures[i].texture,
-                                mip_level: 0,
-                                origin: wgpu::Origin3d::ZERO,
-                                aspect: wgpu::TextureAspect::All,
-                            },
-                            &data,
-                            wgpu::TexelCopyBufferLayout {
-                                offset: 0,
-                                bytes_per_row: Some(bpp * width),
-                                rows_per_image: Some(height),
-                            },
-                            wgpu::Extent3d {
+                        if i >= self.textures.len() {
+                            continue;
+                        }
+                        let tex_format = self.textures[i].format;
+                        let bpp = match tex_format {
+                            wgpu::TextureFormat::R32Float => 4u32,
+                            _ => 4u32, // Rgba8UnormSrgb
+                        };
+
+                        // Check if we need to resize the GPU texture
+                        if self.textures[i].width != width || self.textures[i].height != height {
+                            // Recreate the GPU texture at the new size
+                            let new_tex = Self::create_gpu_texture(
+                                device,
+                                queue,
+                                &data,
                                 width,
                                 height,
-                                depth_or_array_layers: 1,
-                            },
-                        );
+                                tex_format,
+                                &format!("texture-{}", i),
+                            );
+                            self.textures[i] = new_tex;
+                            needs_rebuild = true;
+                        } else {
+                            // Just upload new data to the existing texture
+                            queue.write_texture(
+                                wgpu::TexelCopyTextureInfo {
+                                    texture: &self.textures[i].texture,
+                                    mip_level: 0,
+                                    origin: wgpu::Origin3d::ZERO,
+                                    aspect: wgpu::TextureAspect::All,
+                                },
+                                &data,
+                                wgpu::TexelCopyBufferLayout {
+                                    offset: 0,
+                                    bytes_per_row: Some(bpp * width),
+                                    rows_per_image: Some(height),
+                                },
+                                wgpu::Extent3d {
+                                    width,
+                                    height,
+                                    depth_or_array_layers: 1,
+                                },
+                            );
+                        }
                     }
                 }
             }
 
+            let is_gpu_managed = source.is_gpu_managed();
+
             // GPU-managed sources render their own offscreen targets
-            if source.is_gpu_managed() {
+            if is_gpu_managed {
                 source.gpu_render()?;
+            }
+
+            if was_gpu_managed != is_gpu_managed {
+                needs_rebuild = true;
             }
         }
 
@@ -1079,7 +989,7 @@ impl RenderState {
 
     /// Build the bind group layout and bind group for loaded textures.
     fn build_texture_bind_group(&mut self) -> Result<()> {
-        let device = self.device.as_ref().context("GPU not initialised")?;
+        let device = self.gpu.device.as_ref().context("GPU not initialised")?;
         let num_textures = self.textures.len();
 
         // Build layout entries: each texture gets (texture_view, sampler) pair of bindings
@@ -1155,8 +1065,8 @@ impl RenderState {
             entries: &group_entries,
         });
 
-        self.texture_bind_group_layout = Some(layout);
-        self.texture_bind_group = Some(bind_group);
+        self.gpu.texture_bind_group_layout = Some(layout);
+        self.gpu.texture_bind_group = Some(bind_group);
 
         let entry_count = group_entries.len();
         drop(group_entries);
@@ -1180,10 +1090,11 @@ impl RenderState {
     where
         F: FnOnce(&[String], u32, u32) -> Vec<u8>,
     {
-        let device = self.device.as_ref().context("GPU not initialised")?;
-        let queue = self.queue.as_ref().context("GPU queue not initialised")?;
+        let device = self.gpu.device.as_ref().context("GPU not initialised")?;
+        let queue = self.gpu.queue.as_ref().context("GPU queue not initialised")?;
 
         let (width, height) = self
+            .gpu
             .surface_config
             .as_ref()
             .map(|c| (c.width, c.height))
@@ -1210,7 +1121,7 @@ impl RenderState {
         self.texture_sources.push(None);
 
         // Ensure BGL0 exists (uniform buffer + optional custom uniform buffer).
-        if self.bind_group_layout.is_none() {
+        if self.gpu.bind_group_layout.is_none() {
             self.rebuild_bind_group_0()?;
         }
 
@@ -1266,94 +1177,12 @@ impl RenderState {
 
     /// Rebuild the pipeline layout to include both uniform and texture bind groups.
     fn rebuild_pipeline_layout(&mut self) -> Result<()> {
-        let device = self.device.as_ref().context("GPU not initialised")?;
-        let bgl0 = self
-            .bind_group_layout
-            .as_ref()
-            .context("Uniform BGL missing")?;
-
-        let layouts: Vec<&wgpu::BindGroupLayout> =
-            if let Some(ref tex_bgl) = self.texture_bind_group_layout {
-                vec![bgl0, tex_bgl]
-            } else {
-                vec![bgl0]
-            };
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("kroma-pl"),
-            bind_group_layouts: &layouts,
-            immediate_size: 0,
-        });
-
-        self.pipeline_layout = Some(pipeline_layout);
-
-        Ok(())
+        render_flow::rebuild_pipeline_layout(self)
     }
 
     /// Render a single frame to the surface.
     pub fn render_frame(&mut self) -> Result<()> {
-        let Some(queue) = self.queue.as_ref() else {
-            return Ok(());
-        };
-
-        self.upload_frame_uniforms();
-
-        // Get the current surface texture to render to
-        let Some(surface) = self.surface.as_ref() else {
-            // No surface — headless mode, skip rendering
-            return Ok(());
-        };
-
-        let frame = match surface.get_current_texture() {
-            Ok(frame) => frame,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                // Reconfigure the surface
-                if let (Some(device), Some(config)) =
-                    (self.device.as_ref(), self.surface_config.as_ref())
-                {
-                    surface.configure(device, config);
-                }
-                return Ok(());
-            }
-            Err(wgpu::SurfaceError::Timeout) => {
-                warn!("Surface timeout — skipping frame and polling GPU cleanup");
-
-                // No frame is being presented while the output is asleep.
-                // Kick the queue/device so dropped textures and staging data
-                // are reclaimed promptly instead of accumulating.
-                queue.submit(std::iter::empty::<wgpu::CommandBuffer>());
-                if let Some(device) = self.device.as_ref() {
-                    if let Err(e) = device.poll(PollType::wait_indefinitely()) {
-                        warn!("GPU poll during timeout failed: {}", e);
-                    }
-                }
-                return Ok(());
-            }
-            Err(e) => {
-                return Err(anyhow::anyhow!("Surface error: {}", e));
-            }
-        };
-
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let device = self
-            .device
-            .as_ref()
-            .context("GPU not initialised — cannot render frame")?;
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("kroma-frame"),
-        });
-
-        // TODO: render buffer passes here (multi-pass Buffer A/B/C/D)
-        self.encode_fullscreen_pass(&mut encoder, &view, "kroma-render-pass", false)?;
-
-        queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
-
-        Ok(())
+        render_flow::render_frame(self)
     }
 
     /// Render the current shader to an offscreen texture and return JPEG bytes.
@@ -1361,127 +1190,7 @@ impl RenderState {
     /// This is used for the live preview stream — renders at a small resolution
     /// and returns base64-encoded JPEG data.
     pub fn capture_preview_frame(&mut self, width: u32, height: u32) -> Result<Vec<u8>> {
-        let device = self
-            .device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No GPU device"))?;
-        let queue = self
-            .queue
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("No GPU queue"))?;
-
-        let w = width.max(1);
-        let h = height.max(1);
-
-        // Use the same format as the active pipeline to avoid format mismatch
-        let format = self.active_surface_format();
-
-        let (tex, tex_view) =
-            Self::create_offscreen_render_target(device, w, h, format, "preview-capture");
-
-        // Bytes per row must be aligned to 256 for buffer copy
-        let bytes_per_pixel = 4u32;
-        let unpadded_bytes_per_row = w * bytes_per_pixel;
-        let padded_bytes_per_row = (unpadded_bytes_per_row + 255) & !255;
-
-        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("preview-readback"),
-            size: (padded_bytes_per_row * h) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        // Upload uniforms with preview resolution
-        self.upload_preview_uniforms(w, h);
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("preview-capture-encoder"),
-        });
-
-        self.encode_fullscreen_pass(&mut encoder, &tex_view, "preview-render-pass", true)?;
-
-        // Copy texture to buffer
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &output_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(h),
-                },
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        queue.submit(std::iter::once(encoder.finish()));
-
-        // Map the buffer and read back pixels
-        let buffer_slice = output_buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        let _ = device.poll(PollType::wait_indefinitely())?;
-
-        rx.recv()
-            .map_err(|_| anyhow::anyhow!("Buffer map channel closed"))?
-            .map_err(|e| anyhow::anyhow!("Buffer map failed: {:?}", e))?;
-
-        // Copy pixel data, removing row padding and converting BGRA → RGBA
-        let data = buffer_slice.get_mapped_range();
-        let mut rgba = Vec::with_capacity((w * h * bytes_per_pixel) as usize);
-        let is_bgra = matches!(
-            format,
-            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-        );
-        for row in 0..h {
-            let start = (row * padded_bytes_per_row) as usize;
-            let end = start + unpadded_bytes_per_row as usize;
-            let row_data = &data[start..end];
-            for pixel in row_data.chunks_exact(4) {
-                if is_bgra {
-                    rgba.push(pixel[2]); // R (was B)
-                    rgba.push(pixel[1]); // G
-                    rgba.push(pixel[0]); // B (was R)
-                } else {
-                    rgba.push(pixel[0]); // R
-                    rgba.push(pixel[1]); // G
-                    rgba.push(pixel[2]); // B
-                }
-                rgba.push(pixel[3]); // A
-            }
-        }
-        drop(data);
-        output_buffer.unmap();
-
-        // Restore original resolution in uniform buffer
-        self.upload_frame_uniforms();
-
-        // Encode as JPEG — convert RGBA to RGB first (JPEG doesn't support alpha)
-        let mut rgb = Vec::with_capacity((w * h * 3) as usize);
-        for pixel in rgba.chunks_exact(4) {
-            rgb.push(pixel[0]); // R
-            rgb.push(pixel[1]); // G
-            rgb.push(pixel[2]); // B
-        }
-        let img = image::RgbImage::from_raw(w, h, rgb)
-            .ok_or_else(|| anyhow::anyhow!("Failed to create image from pixels"))?;
-        let mut jpeg_bytes = Vec::new();
-        let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
-        img.write_to(&mut cursor, image::ImageFormat::Jpeg)
-            .context("JPEG encode failed")?;
-
-        Ok(jpeg_bytes)
+        preview::capture_preview_frame(self, width, height)
     }
 }
 
@@ -1492,138 +1201,11 @@ impl RenderState {
 /// own GLSL frontend, which cannot handle many real-world Shadertoy patterns
 /// (mat2-from-vec4, struct arrays, preprocessor macros, etc.).
 pub fn glsl_to_wgsl(glsl_source: &str) -> Result<String> {
-    use naga::back::wgsl;
-    use naga::valid::{Capabilities, ValidationFlags, Validator};
-
-    // Inject the custom uniform storage buffer declaration if not already present.
-    // This lets hand-written .shade shaders reference custom_data[N] without
-    // needing to include the declaration manually.
-    let glsl_source = if !glsl_source.contains("CustomUniforms") {
-        // Insert after the Globals uniform block if present, otherwise after #version
-        if let Some(pos) = glsl_source.find("layout(location = 0) out vec4") {
-            // Insert before the output declaration
-            let (before, after) = glsl_source.split_at(pos);
-            format!(
-                "{}// Custom uniform storage buffer — access via custom_data[index]\nlayout(set = 0, binding = 1) readonly buffer CustomUniforms {{\n    float custom_data[32];\n}};\n\n{}",
-                before, after
-            )
-        } else {
-            // Fallback: prepend after #version line
-            let mut lines = glsl_source.lines();
-            let first_line = lines.next().unwrap_or("");
-            if first_line.starts_with("#version") {
-                format!(
-                    "{}\n\n// Custom uniform storage buffer — access via custom_data[index]\nlayout(set = 0, binding = 1) readonly buffer CustomUniforms {{\n    float custom_data[32];\n}};\n\n{}",
-                    first_line,
-                    lines.collect::<Vec<_>>().join("\n")
-                )
-            } else {
-                // No version directive — just prepend
-                format!(
-                    "// Custom uniform storage buffer — access via custom_data[index]\nlayout(set = 0, binding = 1) readonly buffer CustomUniforms {{\n    float custom_data[32];\n}};\n\n{}",
-                    glsl_source
-                )
-            }
-        }
-    } else {
-        glsl_source.to_string()
-    };
-
-    // --- Step 1: GLSL → SPIR-V via shaderc -----------------------------------
-    let compiler = shaderc::Compiler::new()
-        .map_err(|_| anyhow::anyhow!("Failed to create shaderc compiler"))?;
-    let mut options = shaderc::CompileOptions::new()
-        .map_err(|_| anyhow::anyhow!("Failed to create shaderc compile options"))?;
-    options.set_target_env(
-        shaderc::TargetEnv::Vulkan,
-        shaderc::EnvVersion::Vulkan1_0 as u32,
-    );
-    options.set_source_language(shaderc::SourceLanguage::GLSL);
-    options.set_target_spirv(shaderc::SpirvVersion::V1_0);
-    // Auto-set bindings for naga compatibility
-    options.set_auto_bind_uniforms(false);
-
-    let binary = compiler
-        .compile_into_spirv(
-            &glsl_source,
-            shaderc::ShaderKind::Fragment,
-            "shader.frag",
-            "main",
-            Some(&options),
-        )
-        .map_err(|e| {
-            log::error!("shaderc GLSL compile error:\n{}", e);
-            anyhow::anyhow!("shaderc GLSL compile error: {}", e)
-        })?;
-
-    if binary.get_num_warnings() > 0 {
-        log::warn!("shaderc warnings:\n{}", binary.get_warning_messages());
-    }
-
-    let spirv_bytes = binary.as_binary();
-
-    // --- Step 2: SPIR-V → naga Module ----------------------------------------
-    let spv_options = naga::front::spv::Options {
-        adjust_coordinate_space: false,
-        strict_capabilities: false,
-        block_ctx_dump_prefix: None,
-    };
-
-    let module = naga::front::spv::parse_u8_slice(bytemuck::cast_slice(spirv_bytes), &spv_options)
-        .map_err(|e| {
-            log::error!("SPIR-V parse error: {}", e);
-            anyhow::anyhow!("SPIR-V parse error: {}", e)
-        })?;
-
-    // --- Step 3: Validate & write WGSL ---------------------------------------
-    let mut validator = Validator::new(ValidationFlags::all(), Capabilities::all());
-    let info = validator.validate(&module).map_err(|e| {
-        log::error!("Shader validation error: {}", e);
-        anyhow::anyhow!("Shader validation error: {}", e)
-    })?;
-
-    let mut wgsl_source = wgsl::write_string(&module, &info, wgsl::WriterFlags::empty())
-        .map_err(|e| anyhow::anyhow!("WGSL write error: {}", e))?;
-
-    // Rename the fragment entry point from "main" to "fs_main"
-    // Only rename the entry point `fn main(`, not any helper function
-    // containing "main" in its name. Replace just the first occurrence.
-    if let Some(pos) = wgsl_source.find("fn main(") {
-        wgsl_source.replace_range(pos..pos + 8, "fn fs_main(");
-    }
-
-    Ok(wgsl_source)
+    shader_translation::glsl_to_wgsl(glsl_source)
 }
 
 /// Tiny helper to block on an async wgpu future (wgpu's async is usually
 /// instant on native backends).
 fn pollster_block<F: std::future::Future>(f: F) -> F::Output {
-    futures_lite_block_on(f)
-}
-
-/// Minimal single-threaded executor for wgpu futures.
-fn futures_lite_block_on<F: std::future::Future>(f: F) -> F::Output {
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
-    fn raw_waker() -> RawWaker {
-        fn no_op(_: *const ()) {}
-        fn clone(_: *const ()) -> RawWaker {
-            raw_waker()
-        }
-        let vtable = &RawWakerVTable::new(clone, no_op, no_op, no_op);
-        RawWaker::new(std::ptr::null(), vtable)
-    }
-
-    let waker = unsafe { Waker::from_raw(raw_waker()) };
-    let mut cx = Context::from_waker(&waker);
-    let mut f = std::pin::pin!(f);
-
-    loop {
-        match f.as_mut().poll(&mut cx) {
-            Poll::Ready(val) => return val,
-            Poll::Pending => {
-                std::hint::spin_loop();
-            }
-        }
-    }
+    shader_translation::pollster_block(f)
 }

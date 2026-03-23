@@ -34,7 +34,7 @@ use crate::{
         wayland::{WaylandBackend, hyprland::HyprlandEvent},
     },
     data::SystemDataProvider,
-    renderer::{RenderState, ShadeLoadOutcome},
+    renderer::{Renderer, ShadeLoadOutcome},
 };
 
 enum LoopControl {
@@ -46,7 +46,7 @@ struct Daemon {
     config: config::DaemonConfig,
     backend: Backend,
     data_provider: SystemDataProvider,
-    render_state: RenderState,
+    renderer: Renderer,
     cmd_rx: mpsc::Receiver<ipc_server::InternalCommand>,
     ipc_status: Arc<Mutex<ipc_server::DaemonStatus>>,
     preview_stream: Arc<Mutex<ipc_server::PreviewStreamState>>,
@@ -75,13 +75,13 @@ impl Daemon {
 
         let backend = Backend::new(&session_type, &desktop_env)?;
         let data_provider = SystemDataProvider::new()?;
-        let mut render_state = RenderState::new()?;
+        let mut renderer = Renderer::new()?;
 
         let (surf_w, surf_h) = {
             let surface = backend.surface().context("A surface must exist")?;
             info!("Initializing GPU with surface...");
 
-            if let Err(e) = render_state.init_gpu_with_surface(&config.gpu_power, surface) {
+            if let Err(e) = renderer.init_gpu_with_surface(&config.gpu_power, surface) {
                 log::error!("GPU init with surface failed: {}", e);
             } else {
                 info!("GPU initialized with surface");
@@ -96,7 +96,7 @@ impl Daemon {
             surface.size(primary_monitor.id)?
         };
 
-        render_state.uniforms.u_resolution = [surf_w as f32, surf_h as f32];
+        renderer.uniforms.u_resolution = [surf_w as f32, surf_h as f32];
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (ipc_handle, ipc_status, preview_stream) =
@@ -108,7 +108,7 @@ impl Daemon {
             config,
             backend,
             data_provider,
-            render_state,
+            renderer,
             cmd_rx,
             ipc_status,
             preview_stream,
@@ -128,7 +128,7 @@ impl Daemon {
             daemon.load_shade(&shade_path, None)?;
         } else {
             info!("No startup shade configured. Load a .shade file to start.");
-            daemon.render_state.show_no_shade_fallback()?;
+            daemon.renderer.show_no_shade_fallback()?;
         }
 
         info!(
@@ -229,7 +229,7 @@ impl Daemon {
                 }
                 DaemonCommand::SetUniform { name, value } => {
                     log::debug!("Setting uniform {} = {:?}", name, value);
-                    self.render_state.set_custom_uniform(&name, &value);
+                    self.renderer.set_custom_uniform(&name, &value);
                 }
                 DaemonCommand::StatusQuery => {
                     // Handled inline in ipc_server, shouldn't reach here
@@ -238,7 +238,7 @@ impl Daemon {
                     // Handled inline in ipc_server, shouldn't reach here
                 }
                 DaemonCommand::RequestPreviewFrame { width, height } => {
-                    match self.render_state.capture_preview_frame(width, height) {
+                    match self.renderer.capture_preview_frame(width, height) {
                         Ok(jpeg_bytes) => {
                             maybe_send(
                                 response_tx,
@@ -275,7 +275,7 @@ impl Daemon {
                         log::warn!("Translation warning: {}", w);
                     }
 
-                    match self.render_state.load_glsl_source(&result.shader_source) {
+                    match self.renderer.load_glsl_source(&result.shader_source) {
                         Ok(()) => {
                             self.current_shade_path = Some("live-preview".to_string());
                             maybe_send(
@@ -313,7 +313,7 @@ impl Daemon {
         match LiveShadePackage::load(Path::new(path)) {
             Ok(pkg) => {
                 let pkg_name = pkg.config.meta.name.clone();
-                match self.render_state.load_shade(pkg, Some(path)) {
+                match self.renderer.load_shade(pkg, Some(path)) {
                     Ok(ShadeLoadOutcome::Success) => {
                         info!("Loaded: {}", pkg_name);
                         loaded_successfully = true;
@@ -375,8 +375,8 @@ impl Daemon {
                         )?;
                     }
                     Err(e) => {
-                        log::error!("Failed to load shade '{}': {}", pkg_name, e);
-                        self.render_state
+                        log::error!("Failed to load shade '{}': {:#}", pkg_name, e);
+                        self.renderer
                             .switch_to_load_error(path, &format!("{:#}", e))?;
                         maybe_send(
                             tx,
@@ -394,8 +394,8 @@ impl Daemon {
                 }
             }
             Err(e) => {
-                log::error!("Failed to load shade: {}", e);
-                self.render_state
+                log::error!("Failed to load shade: {:#}", e);
+                self.renderer
                     .switch_to_load_error(path, &format!("{:#}", e))?;
                 maybe_send(
                     tx,
@@ -414,7 +414,7 @@ impl Daemon {
 
         if loaded_successfully {
             // Force initial texture update (first frame decode for videos, etc.)
-            self.render_state.update_textures(0.0)?;
+            self.renderer.update_textures(0.0)?;
             self.current_shade_path = Some(path.to_string());
 
             if self.config.runtime.persist_current_shade {
@@ -441,25 +441,25 @@ impl Daemon {
             .as_secs_f32();
         self.last_frame_time = frame_start;
 
-        self.render_state.uniforms.u_time = self.start_time.elapsed().as_secs_f32();
-        self.render_state.uniforms.u_delta_time = dt;
-        self.render_state.uniforms.u_frame = self.frame;
+        self.renderer.uniforms.u_time = self.start_time.elapsed().as_secs_f32();
+        self.renderer.uniforms.u_delta_time = dt;
+        self.renderer.uniforms.u_frame = self.frame;
 
         let stats = self.data_provider.get_system_stats();
-        self.render_state.uniforms.apply_system_stats(&stats);
+        self.renderer.uniforms.apply_system_stats(&stats);
         let cursor = self
             .backend
             .cursor_pos()
             .unwrap_or_else(|| self.data_provider.get_cursor_pos());
-        self.render_state.uniforms.apply_cursor(cursor);
+        self.renderer.uniforms.apply_cursor(cursor);
 
         // Advance all texture sources (video decoding, slideshow timers, audio, etc.)
-        self.render_state.update_textures(dt as f64)?;
+        self.renderer.update_textures(dt as f64)?;
 
         // Derive audio level from audio texture sources
-        self.render_state.uniforms.u_audio_level = self.render_state.get_audio_level();
+        self.renderer.uniforms.u_audio_level = self.renderer.get_audio_level();
 
-        self.render_state.render_frame()?;
+        self.renderer.render_frame()?;
         self.frame = self.frame.wrapping_add(1);
 
         self.maybe_stream_preview_frame();
@@ -481,7 +481,7 @@ impl Daemon {
             if ps.last_frame_time.elapsed() >= interval {
                 let pw = ps.width;
                 let ph = ps.height;
-                match self.render_state.capture_preview_frame(pw, ph) {
+                match self.renderer.capture_preview_frame(pw, ph) {
                     Ok(jpeg_bytes) => {
                         let event = DaemonEvent::PreviewFrame {
                             jpeg: jpeg_bytes,
@@ -534,16 +534,16 @@ impl Daemon {
                 status.fps = current_fps;
                 status.paused = self.paused;
                 status.loaded_shade = self.current_shade_path.clone();
-                status.cpu_usage = self.render_state.uniforms.u_cpu * 100.0;
-                status.ram_usage = self.render_state.uniforms.u_ram * 100.0;
-                status.battery = if self.render_state.uniforms.u_battery >= 0.0 {
-                    Some(self.render_state.uniforms.u_battery * 100.0)
+                status.cpu_usage = self.renderer.uniforms.u_cpu * 100.0;
+                status.ram_usage = self.renderer.uniforms.u_ram * 100.0;
+                status.battery = if self.renderer.uniforms.u_battery >= 0.0 {
+                    Some(self.renderer.uniforms.u_battery * 100.0)
                 } else {
                     None
                 };
-                status.audio_level = self.render_state.uniforms.u_audio_level;
-                status.cursor_x = self.render_state.uniforms.u_mouse[0];
-                status.cursor_y = self.render_state.uniforms.u_mouse[1];
+                status.audio_level = self.renderer.uniforms.u_audio_level;
+                status.cursor_x = self.renderer.uniforms.u_mouse[0];
+                status.cursor_y = self.renderer.uniforms.u_mouse[1];
             }
         }
     }

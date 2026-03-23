@@ -170,6 +170,7 @@ impl KromaApp {
                                 _ => kroma_shared::types::TextureType::Image,
                             },
                             source: None,
+                            input: None,
                             sources: Vec::new(),
                             looping: false,
                             filter: Default::default(),
@@ -387,6 +388,7 @@ impl KromaApp {
                     kroma_shared::types::TextureDef {
                         ty: tex_type,
                         source: Some(asset_name.clone()),
+                        input: None,
                         sources: Vec::new(),
                         looping: is_video,
                         filter: Default::default(),
