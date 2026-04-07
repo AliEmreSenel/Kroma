@@ -261,6 +261,15 @@ pub enum TextureType {
     Slideshow,
     /// Audio FFT spectrum data (512×1 R32Float).
     AudioSpectrum,
+    /// Procedural RGBA noise texture generated from a seed.
+    Noise,
+    /// A shader rendered to an offscreen texture.
+    ///
+    /// Supports the full feature set of the root shader: custom uniforms,
+    /// nested textures (including other shader textures), and all system
+    /// uniforms. The shader runs each frame at the configured resolution
+    /// and produces RGBA8 pixel data.
+    Shader,
 }
 
 impl TextureType {
@@ -272,36 +281,15 @@ impl TextureType {
             Self::Font => "font",
             Self::Slideshow => "slideshow",
             Self::AudioSpectrum => "audio_spectrum",
+            Self::Noise => "noise",
+            Self::Shader => "shader",
         }
     }
 }
 
-/// A single source entry within a slideshow texture.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SlideSource {
-    /// Path to the asset file.
-    pub source: String,
-    /// Type of this slide entry: "image" or "video".
-    #[serde(rename = "type", default = "default_slide_type")]
-    pub ty: SlideSourceType,
-}
-
-/// The type of a slide within a slideshow.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SlideSourceType {
-    Image,
-    Video,
-}
-
-fn default_slide_type() -> SlideSourceType {
-    SlideSourceType::Image
-}
-
 /// A texture channel binding.
 ///
-/// Unified definition for all texture types: image, video, font,
-/// slideshow, and audio spectrum. The `type` field determines which
+/// Unified definition for all texture types. The `type` field determines which
 /// fields are relevant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextureDef {
@@ -311,9 +299,28 @@ pub struct TextureDef {
     /// Path to the asset file (for image, video, font types).
     #[serde(default)]
     pub source: Option<String>,
-    /// Array of sources (for slideshow type).
+    /// Explicit seed for procedural noise textures.
+    ///
+    /// When omitted, noise textures use a process-wide default seed that is
+    /// initialized once and then reused for later omitted-seed loads.
     #[serde(default)]
-    pub sources: Vec<SlideSource>,
+    pub seed: Option<u64>,
+    /// Special input selector for shader textures.
+    ///
+    /// Currently supported value:
+    /// - `"t-1"`: bind the shader's own previous frame output.
+    ///
+    /// This is only meaningful for nested `textures` inside
+    /// `type = "shader"` texture definitions.
+    #[serde(default)]
+    pub input: Option<String>,
+    /// Array of sources (for slideshow type).
+    ///
+    /// Each slideshow source is a full texture definition, so slides can be
+    /// any texture type (image, video, shader, audio_spectrum, font,
+    /// slideshow), including nested shader compositions.
+    #[serde(default)]
+    pub sources: Vec<TextureDef>,
     /// Whether video textures loop (default: true).
     #[serde(default = "bool_true", rename = "loop")]
     pub looping: bool,
@@ -354,6 +361,30 @@ pub struct TextureDef {
     /// problematic path.
     #[serde(default)]
     pub optional: bool,
+
+    // ---- Shader texture fields (type = "shader") ----
+
+    /// GLSL fragment shader source path (for shader textures).
+    /// Relative to the shade package root.
+    #[serde(default)]
+    pub shader: Option<String>,
+
+    /// Render width for shader/noise textures (default: 512).
+    #[serde(default)]
+    pub width: Option<u32>,
+
+    /// Render height for shader/noise textures (default: 512).
+    #[serde(default)]
+    pub height: Option<u32>,
+
+    /// Sub-textures for shader textures — same format as the root `textures`
+    /// map. Supports all texture types including nested shader textures.
+    #[serde(default)]
+    pub textures: HashMap<String, Box<TextureDef>>,
+
+    /// Custom uniforms for shader textures — same format as the root `uniforms`.
+    #[serde(default)]
+    pub uniforms: HashMap<String, UniformDef>,
 }
 
 /// A render buffer pass definition (multi-pass rendering).
