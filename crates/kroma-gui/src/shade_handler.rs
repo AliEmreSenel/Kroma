@@ -167,9 +167,12 @@ impl KromaApp {
                                 "font" => kroma_shared::types::TextureType::Font,
                                 "slideshow" => kroma_shared::types::TextureType::Slideshow,
                                 "audio_spectrum" => kroma_shared::types::TextureType::AudioSpectrum,
+                                "noise" => kroma_shared::types::TextureType::Noise,
                                 _ => kroma_shared::types::TextureType::Image,
                             },
                             source: None,
+                            seed: None,
+                            input: None,
                             sources: Vec::new(),
                             looping: false,
                             filter: Default::default(),
@@ -181,6 +184,11 @@ impl KromaApp {
                             fft_bands: None,
                             hot_reload: false,
                             optional: false,
+                            shader: None,
+                            width: None,
+                            height: None,
+                            textures: std::collections::HashMap::new(),
+                            uniforms: std::collections::HashMap::new(),
                         },
                     );
                     self.shade_new_texture_name.clear();
@@ -382,6 +390,8 @@ impl KromaApp {
                     kroma_shared::types::TextureDef {
                         ty: tex_type,
                         source: Some(asset_name.clone()),
+                        seed: None,
+                        input: None,
                         sources: Vec::new(),
                         looping: is_video,
                         filter: Default::default(),
@@ -393,6 +403,11 @@ impl KromaApp {
                         fft_bands: None,
                         hot_reload: false,
                         optional: false,
+                        shader: None,
+                        width: None,
+                        height: None,
+                        textures: std::collections::HashMap::new(),
+                        uniforms: std::collections::HashMap::new(),
                     },
                 );
                 self.sync_shade_toml();

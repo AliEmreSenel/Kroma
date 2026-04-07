@@ -743,7 +743,7 @@ impl KromaApp {
                 text_input("channel name", &self.shade_new_texture_name)
                     .on_input(Message::ShadeNewTextureName)
                     .width(120),
-                text_input("type (image/video/glsl/font)", &self.shade_new_texture_type)
+                text_input("type (image/video/font/slideshow/audio_spectrum/noise)", &self.shade_new_texture_type)
                     .on_input(Message::ShadeNewTextureType)
                     .width(160),
                 self.btn_secondary("Add Texture", Message::ShadeAddTexture),
@@ -753,7 +753,7 @@ impl KromaApp {
             .into(),
         );
         texture_items.push(
-            text("Types: image, video, glsl (programmatic texture from shader), font (font file)")
+            text("Types: image, video, font, slideshow, audio_spectrum, noise")
                 .size(10)
                 .into(),
         );

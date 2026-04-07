@@ -189,3 +189,102 @@ channel0 = { type = "video", source = "assets/loop.mp4", loop = true }
     assert!(config.textures.contains_key("channel0"));
     assert!(config.textures["channel0"].looping);
 }
+
+#[test]
+fn parse_shader_texture_t_minus_one_input() {
+    let toml_str = r#"
+[meta]
+name = "Feedback"
+author = "Tester"
+
+[textures.main]
+type = "shader"
+shader = "assets/main.glsl"
+width = 512
+height = 512
+
+[textures.main.textures.history]
+type = "image"
+input = "t-1"
+"#;
+
+    let config: ShadeConfig = toml::from_str(toml_str).unwrap();
+    let main_tex = config.textures.get("main").unwrap();
+    let history = main_tex.textures.get("history").unwrap();
+
+    assert_eq!(history.input.as_deref(), Some("t-1"));
+}
+
+#[test]
+fn parse_slideshow_sources_with_shader_entries() {
+    let toml_str = r#"
+[meta]
+name = "Slideshow Shader Mix"
+author = "Tester"
+
+[textures.wallpaper]
+type = "slideshow"
+interval = 5.0
+
+[[textures.wallpaper.sources]]
+type = "image"
+source = "assets/base.png"
+
+[[textures.wallpaper.sources]]
+type = "shader"
+shader = "assets/fx.frag"
+width = 1280
+height = 720
+
+[textures.wallpaper.sources.textures.history]
+type = "image"
+input = "t-1"
+
+[textures.wallpaper.sources.textures.motion]
+type = "video"
+source = "assets/motion.mp4"
+loop = true
+"#;
+
+    let config: ShadeConfig = toml::from_str(toml_str).unwrap();
+    let slideshow = config.textures.get("wallpaper").unwrap();
+
+    assert_eq!(slideshow.sources.len(), 2);
+    assert_eq!(slideshow.sources[1].ty.as_str(), "shader");
+    assert!(slideshow.sources[1].textures.contains_key("history"));
+    assert_eq!(
+        slideshow.sources[1].textures["history"].input.as_deref(),
+        Some("t-1")
+    );
+}
+
+#[test]
+fn parse_noise_texture_with_and_without_seed() {
+    let toml_str = r#"
+[meta]
+name = "Noise"
+author = "Tester"
+
+[textures.base]
+type = "noise"
+width = 320
+height = 180
+
+[textures.detail]
+type = "noise"
+seed = 1337
+width = 320
+height = 180
+"#;
+
+    let config: ShadeConfig = toml::from_str(toml_str).unwrap();
+    let base = config.textures.get("base").unwrap();
+    let detail = config.textures.get("detail").unwrap();
+
+    assert_eq!(base.ty.as_str(), "noise");
+    assert_eq!(detail.ty.as_str(), "noise");
+    assert_eq!(base.seed, None);
+    assert_eq!(detail.seed, Some(1337));
+    assert_eq!(base.width, Some(320));
+    assert_eq!(base.height, Some(180));
+}
