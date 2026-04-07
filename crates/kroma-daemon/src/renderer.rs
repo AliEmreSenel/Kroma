@@ -785,7 +785,11 @@ impl Renderer {
             .device
             .as_ref()
             .context("GPU not initialised — cannot load textures")?;
-        let queue = self.gpu.queue.as_ref().context("GPU queue not initialised")?;
+        let queue = self
+            .gpu
+            .queue
+            .as_ref()
+            .context("GPU queue not initialised")?;
 
         // Build a GpuContext for texture sources that need GPU access
         // (shader textures).
@@ -1032,22 +1036,19 @@ impl Renderer {
             let tex_binding = (i * 2) as u32;
             let samp_binding = (i * 2 + 1) as u32;
 
-            let (view, sampler) =
-                if let Some(Some(source)) = self.texture_sources.get(i) {
-                    if source.is_gpu_managed() {
-                        if let (Some(v), Some(s)) =
-                            (source.gpu_texture_view(), source.gpu_sampler())
-                        {
-                            (v as &wgpu::TextureView, s as &wgpu::Sampler)
-                        } else {
-                            (&self.textures[i].view, &self.textures[i].sampler)
-                        }
+            let (view, sampler) = if let Some(Some(source)) = self.texture_sources.get(i) {
+                if source.is_gpu_managed() {
+                    if let (Some(v), Some(s)) = (source.gpu_texture_view(), source.gpu_sampler()) {
+                        (v as &wgpu::TextureView, s as &wgpu::Sampler)
                     } else {
                         (&self.textures[i].view, &self.textures[i].sampler)
                     }
                 } else {
                     (&self.textures[i].view, &self.textures[i].sampler)
-                };
+                }
+            } else {
+                (&self.textures[i].view, &self.textures[i].sampler)
+            };
 
             group_entries.push(wgpu::BindGroupEntry {
                 binding: tex_binding,
@@ -1091,7 +1092,11 @@ impl Renderer {
         F: FnOnce(&[String], u32, u32) -> Vec<u8>,
     {
         let device = self.gpu.device.as_ref().context("GPU not initialised")?;
-        let queue = self.gpu.queue.as_ref().context("GPU queue not initialised")?;
+        let queue = self
+            .gpu
+            .queue
+            .as_ref()
+            .context("GPU queue not initialised")?;
 
         let (width, height) = self
             .gpu

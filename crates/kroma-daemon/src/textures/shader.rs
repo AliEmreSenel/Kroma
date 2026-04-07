@@ -156,7 +156,13 @@ impl ShaderTexture {
                 custom_uniform_data[idx] = match default {
                     toml::Value::Float(v) => *v as f32,
                     toml::Value::Integer(v) => *v as f32,
-                    toml::Value::Boolean(v) => if *v { 1.0 } else { 0.0 },
+                    toml::Value::Boolean(v) => {
+                        if *v {
+                            1.0
+                        } else {
+                            0.0
+                        }
+                    }
                     _ => 0.0,
                 };
             }
@@ -302,14 +308,14 @@ impl ShaderTexture {
             });
 
             // Build pipeline layout with both bind groups
-            let pipeline_layout =
-                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("shader-tex-pl"),
-                    bind_group_layouts: &[&bgl0, &tex_bgl],
-                    immediate_size: 0,
-                });
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("shader-tex-pl"),
+                bind_group_layouts: &[&bgl0, &tex_bgl],
+                immediate_size: 0,
+            });
 
-            let pipeline = Self::create_pipeline(device, &pipeline_layout, &wgsl_source, output_format)?;
+            let pipeline =
+                Self::create_pipeline(device, &pipeline_layout, &wgsl_source, output_format)?;
 
             // Store pipeline; we'll set it below
             // Actually, we need to return a struct with the pipeline from here
@@ -348,7 +354,8 @@ impl ShaderTexture {
             immediate_size: 0,
         });
 
-        let pipeline = Self::create_pipeline(device, &pipeline_layout, &wgsl_source, output_format)?;
+        let pipeline =
+            Self::create_pipeline(device, &pipeline_layout, &wgsl_source, output_format)?;
 
         // -- Initial uniform upload --
         let mut initial_uniforms = ShaderUniforms::default();
@@ -381,7 +388,12 @@ impl ShaderTexture {
         width: u32,
         height: u32,
         format: wgpu::TextureFormat,
-    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView, wgpu::Sampler) {
+    ) -> (
+        wgpu::Texture,
+        wgpu::TextureView,
+        wgpu::TextureView,
+        wgpu::Sampler,
+    ) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("shader-tex-rt"),
             size: wgpu::Extent3d {

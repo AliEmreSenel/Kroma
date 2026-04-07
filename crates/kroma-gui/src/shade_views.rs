@@ -743,9 +743,12 @@ impl KromaApp {
                 text_input("channel name", &self.shade_new_texture_name)
                     .on_input(Message::ShadeNewTextureName)
                     .width(120),
-                text_input("type (image/video/font/slideshow/audio_spectrum/noise)", &self.shade_new_texture_type)
-                    .on_input(Message::ShadeNewTextureType)
-                    .width(160),
+                text_input(
+                    "type (image/video/font/slideshow/audio_spectrum/noise)",
+                    &self.shade_new_texture_type
+                )
+                .on_input(Message::ShadeNewTextureType)
+                .width(160),
                 self.btn_secondary("Add Texture", Message::ShadeAddTexture),
             ]
             .spacing(8)

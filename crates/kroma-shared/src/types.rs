@@ -363,7 +363,6 @@ pub struct TextureDef {
     pub optional: bool,
 
     // ---- Shader texture fields (type = "shader") ----
-
     /// GLSL fragment shader source path (for shader textures).
     /// Relative to the shade package root.
     #[serde(default)]
