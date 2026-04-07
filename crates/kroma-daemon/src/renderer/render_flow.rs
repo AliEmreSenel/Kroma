@@ -4,8 +4,8 @@ use wgpu::wgt::PollType;
 /// Returns the active render target format, falling back to a safe default.
 pub(super) fn active_surface_format(state: &Renderer) -> wgpu::TextureFormat {
     state
-    .gpu
-    .surface_config
+        .gpu
+        .surface_config
         .as_ref()
         .map(|c| c.format)
         .unwrap_or(SURFACE_FORMAT)
@@ -100,7 +100,8 @@ pub(super) fn encode_fullscreen_pass(
 
 /// Uploads a uniform block into the global uniform buffer, if initialized.
 pub(super) fn write_uniform_buffer(state: &Renderer, uniforms: &ShaderUniforms) {
-    if let (Some(queue), Some(buf)) = (state.gpu.queue.as_ref(), state.gpu.uniform_buffer.as_ref()) {
+    if let (Some(queue), Some(buf)) = (state.gpu.queue.as_ref(), state.gpu.uniform_buffer.as_ref())
+    {
         queue.write_buffer(buf, 0, bytemuck::bytes_of(uniforms));
     }
 }
@@ -189,11 +190,12 @@ pub(super) fn rebuild_pipeline_layout(state: &mut Renderer) -> Result<()> {
         .as_ref()
         .context("Uniform BGL missing")?;
 
-    let layouts: Vec<&wgpu::BindGroupLayout> = if let Some(ref tex_bgl) = state.gpu.texture_bind_group_layout {
-        vec![bgl0, tex_bgl]
-    } else {
-        vec![bgl0]
-    };
+    let layouts: Vec<&wgpu::BindGroupLayout> =
+        if let Some(ref tex_bgl) = state.gpu.texture_bind_group_layout {
+            vec![bgl0, tex_bgl]
+        } else {
+            vec![bgl0]
+        };
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("kroma-pl"),
@@ -221,7 +223,9 @@ pub(super) fn render_frame(state: &mut Renderer) -> Result<()> {
     let frame = match surface.get_current_texture() {
         Ok(frame) => frame,
         Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-            if let (Some(device), Some(config)) = (state.gpu.device.as_ref(), state.gpu.surface_config.as_ref()) {
+            if let (Some(device), Some(config)) =
+                (state.gpu.device.as_ref(), state.gpu.surface_config.as_ref())
+            {
                 surface.configure(device, config);
             }
             return Ok(());

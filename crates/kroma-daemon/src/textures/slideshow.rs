@@ -39,7 +39,12 @@ fn load_slide_child(
     def.hot_reload = def.hot_reload || hot_reload;
 
     let source = super::create_texture_source(pkg, &def, gpu)
-        .with_context(|| format!("Failed to create slideshow source of type '{}'", def.ty.as_str()))?
+        .with_context(|| {
+            format!(
+                "Failed to create slideshow source of type '{}'",
+                def.ty.as_str()
+            )
+        })?
         .context("Slideshow source did not produce a texture source")?;
 
     Ok(source)
