@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 
 use crate::types::ShadeConfig;
 
@@ -23,12 +24,110 @@ pub struct AssetEntry {
     pub size: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[repr(u8)]
 pub enum CompressionCodec {
     None = 0,
     Zstd = 1,
     Lz4 = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShadeEntryKind {
+    ConfigToml,
+    RootShader,
+    Preview,
+    Asset,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyMode {
+    Fast,
+    Checksum,
+    Decode,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PackageMetadata {
+    pub entry_count: u32,
+    pub index_offset: u64,
+    pub index_size: u64,
+    pub file_size: u64,
+    pub total_chunks: u64,
+    pub total_uncompressed: u64,
+    pub total_compressed: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChunkDebugInfo {
+    pub index: u32,
+    pub data_offset: u64,
+    pub compressed_size: u32,
+    pub uncompressed_size: u32,
+    pub checksum: u32,
+    pub codec: CompressionCodec,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EntryDebugInfo {
+    pub path: String,
+    pub kind: ShadeEntryKind,
+    pub default_codec: CompressionCodec,
+    pub default_level: i16,
+    pub chunk_size: u32,
+    pub chunk_count: u32,
+    pub uncompressed_size: u64,
+    pub compressed_size: u64,
+    pub compression_ratio: f64,
+    pub data_start_offset: u64,
+    pub data_end_offset: u64,
+    pub chunks: Vec<ChunkDebugInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CodecCompressionStat {
+    pub codec: CompressionCodec,
+    pub chunk_count: u64,
+    pub compressed_size: u64,
+    pub uncompressed_size: u64,
+    pub ratio: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChunkSizeBucket {
+    pub label: String,
+    pub chunk_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CompressionStats {
+    pub total_uncompressed: u64,
+    pub total_compressed: u64,
+    pub compression_ratio: f64,
+    pub savings_vs_stored_bytes: i64,
+    pub by_codec: Vec<CodecCompressionStat>,
+    pub largest_entries: Vec<EntryDebugInfo>,
+    pub chunk_size_distribution: Vec<ChunkSizeBucket>,
+    pub average_chunk_entropy_bits_per_byte: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifyFailure {
+    pub path: String,
+    pub chunk_index: Option<u32>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VerifyReport {
+    pub mode: VerifyMode,
+    pub total_entries: u32,
+    pub total_chunks: u64,
+    pub checked_chunks: u64,
+    pub ok: bool,
+    pub failures: Vec<VerifyFailure>,
 }
 
 impl CompressionCodec {
@@ -71,6 +170,17 @@ impl EntryKind {
     }
 }
 
+impl From<EntryKind> for ShadeEntryKind {
+    fn from(value: EntryKind) -> Self {
+        match value {
+            EntryKind::ConfigToml => ShadeEntryKind::ConfigToml,
+            EntryKind::RootShader => ShadeEntryKind::RootShader,
+            EntryKind::Preview => ShadeEntryKind::Preview,
+            EntryKind::Asset => ShadeEntryKind::Asset,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Header {
     entry_count: u32,
@@ -98,6 +208,36 @@ struct ChunkDescriptor {
     uncompressed_size: u32,
     checksum: u32,
     codec: CompressionCodec,
+}
+
+fn safe_ratio(num: u64, den: u64) -> f64 {
+    if den == 0 {
+        1.0
+    } else {
+        num as f64 / den as f64
+    }
+}
+
+fn shannon_entropy_bits_per_byte(bytes: &[u8]) -> f64 {
+    if bytes.is_empty() {
+        return 0.0;
+    }
+
+    let mut counts = [0usize; 256];
+    for &b in bytes {
+        counts[b as usize] += 1;
+    }
+
+    let len = bytes.len() as f64;
+    let mut entropy = 0.0f64;
+    for count in counts {
+        if count == 0 {
+            continue;
+        }
+        let p = count as f64 / len;
+        entropy -= p * p.log2();
+    }
+    entropy
 }
 
 fn read_u16(data: &[u8], offset: &mut usize) -> Result<u16> {
@@ -681,6 +821,307 @@ impl LiveShadePackage {
         self.compression_overrides.insert(path.into(), policy);
     }
 
+    pub fn package_metadata(&self) -> Result<PackageMetadata> {
+        let bytes = self.source_bytes()?;
+        let header = parse_header(bytes)?;
+
+        let mut total_chunks = 0u64;
+        let mut total_uncompressed = 0u64;
+        let mut total_compressed = 0u64;
+        for entry in &self.source_entries {
+            let chunks = parse_chunk_table(bytes, entry)?;
+            total_chunks += chunks.len() as u64;
+            total_uncompressed += entry.uncompressed_size;
+            total_compressed += chunks.iter().map(|c| c.compressed_size as u64).sum::<u64>();
+        }
+
+        Ok(PackageMetadata {
+            entry_count: header.entry_count,
+            index_offset: header.index_offset,
+            index_size: header.index_size,
+            file_size: header.file_size,
+            total_chunks,
+            total_uncompressed,
+            total_compressed,
+        })
+    }
+
+    pub fn entry_debug_infos(&self) -> Result<Vec<EntryDebugInfo>> {
+        self.build_entry_debug_infos()
+    }
+
+    pub fn entry_debug_info(&self, path: &str) -> Result<Option<EntryDebugInfo>> {
+        let entries = self.build_entry_debug_infos()?;
+        Ok(entries.into_iter().find(|entry| entry.path == path))
+    }
+
+    pub fn chunk_debug_infos(&self, path: &str) -> Result<Option<Vec<ChunkDebugInfo>>> {
+        let entry = self.entry_debug_info(path)?;
+        Ok(entry.map(|e| e.chunks))
+    }
+
+    pub fn compression_stats(&self) -> Result<CompressionStats> {
+        let bytes = self.source_bytes()?;
+        let entries = self.build_entry_debug_infos()?;
+
+        let mut by_codec_map: HashMap<CompressionCodec, (u64, u64, u64)> = HashMap::new();
+        let mut dist_4k = 0u64;
+        let mut dist_16k = 0u64;
+        let mut dist_64k = 0u64;
+        let mut dist_256k = 0u64;
+        let mut dist_gt_256k = 0u64;
+        let mut entropy_sum = 0.0f64;
+        let mut entropy_count = 0u64;
+
+        for entry in &self.source_entries {
+            let chunks = parse_chunk_table(bytes, entry)?;
+            for chunk in &chunks {
+                let stat = by_codec_map.entry(chunk.codec).or_insert((0, 0, 0));
+                stat.0 += 1;
+                stat.1 += chunk.compressed_size as u64;
+                stat.2 += chunk.uncompressed_size as u64;
+
+                let size = chunk.uncompressed_size as u64;
+                if size <= 4 * 1024 {
+                    dist_4k += 1;
+                } else if size <= 16 * 1024 {
+                    dist_16k += 1;
+                } else if size <= 64 * 1024 {
+                    dist_64k += 1;
+                } else if size <= 256 * 1024 {
+                    dist_256k += 1;
+                } else {
+                    dist_gt_256k += 1;
+                }
+
+                let start = chunk.data_offset as usize;
+                let end = start + chunk.compressed_size as usize;
+                let sample_end = std::cmp::min(end, start + 4096);
+                if sample_end > start {
+                    let sample = &bytes[start..sample_end];
+                    entropy_sum += shannon_entropy_bits_per_byte(sample);
+                    entropy_count += 1;
+                }
+            }
+        }
+
+        let total_uncompressed: u64 = entries.iter().map(|e| e.uncompressed_size).sum();
+        let total_compressed: u64 = entries.iter().map(|e| e.compressed_size).sum();
+
+        let mut by_codec: Vec<CodecCompressionStat> = by_codec_map
+            .into_iter()
+            .map(
+                |(codec, (chunk_count, compressed_size, uncompressed_size))| CodecCompressionStat {
+                    codec,
+                    chunk_count,
+                    compressed_size,
+                    uncompressed_size,
+                    ratio: safe_ratio(compressed_size, uncompressed_size),
+                },
+            )
+            .collect();
+        by_codec.sort_by_key(|c| c.codec as u8);
+
+        let mut largest_entries = entries;
+        largest_entries.sort_by_key(|e| std::cmp::Reverse(e.uncompressed_size));
+        largest_entries.truncate(10);
+        for entry in &mut largest_entries {
+            entry.chunks.clear();
+        }
+
+        let chunk_size_distribution = vec![
+            ChunkSizeBucket {
+                label: "<=4KiB".to_string(),
+                chunk_count: dist_4k,
+            },
+            ChunkSizeBucket {
+                label: "4-16KiB".to_string(),
+                chunk_count: dist_16k,
+            },
+            ChunkSizeBucket {
+                label: "16-64KiB".to_string(),
+                chunk_count: dist_64k,
+            },
+            ChunkSizeBucket {
+                label: "64-256KiB".to_string(),
+                chunk_count: dist_256k,
+            },
+            ChunkSizeBucket {
+                label: ">256KiB".to_string(),
+                chunk_count: dist_gt_256k,
+            },
+        ];
+
+        Ok(CompressionStats {
+            total_uncompressed,
+            total_compressed,
+            compression_ratio: safe_ratio(total_compressed, total_uncompressed),
+            savings_vs_stored_bytes: total_uncompressed as i64 - total_compressed as i64,
+            by_codec,
+            largest_entries,
+            chunk_size_distribution,
+            average_chunk_entropy_bits_per_byte: if entropy_count == 0 {
+                0.0
+            } else {
+                entropy_sum / entropy_count as f64
+            },
+        })
+    }
+
+    pub fn verify(&self, mode: VerifyMode) -> Result<VerifyReport> {
+        let bytes = self.source_bytes()?;
+        let mut total_chunks = 0u64;
+        let mut checked_chunks = 0u64;
+        let mut failures = Vec::new();
+
+        for entry in &self.source_entries {
+            let chunks = match parse_chunk_table(bytes, entry) {
+                Ok(chunks) => chunks,
+                Err(err) => {
+                    failures.push(VerifyFailure {
+                        path: entry.path.clone(),
+                        chunk_index: None,
+                        message: err.to_string(),
+                    });
+                    continue;
+                }
+            };
+
+            total_chunks += chunks.len() as u64;
+
+            if mode == VerifyMode::Fast {
+                let total_entry_uncompressed: u64 = chunks
+                    .iter()
+                    .map(|chunk| chunk.uncompressed_size as u64)
+                    .sum();
+                if total_entry_uncompressed != entry.uncompressed_size {
+                    failures.push(VerifyFailure {
+                        path: entry.path.clone(),
+                        chunk_index: None,
+                        message: format!(
+                            "Entry uncompressed size mismatch (chunks {}, index {})",
+                            total_entry_uncompressed, entry.uncompressed_size
+                        ),
+                    });
+                }
+                continue;
+            }
+
+            for (idx, chunk) in chunks.iter().enumerate() {
+                checked_chunks += 1;
+                let start = chunk.data_offset as usize;
+                let end = start + chunk.compressed_size as usize;
+                if end > bytes.len() {
+                    failures.push(VerifyFailure {
+                        path: entry.path.clone(),
+                        chunk_index: Some(idx as u32),
+                        message: "Chunk data range is out of bounds".to_string(),
+                    });
+                    continue;
+                }
+
+                let chunk_bytes = &bytes[start..end];
+                let mut hasher = crc32fast::Hasher::new();
+                hasher.update(chunk_bytes);
+                let checksum = hasher.finalize();
+                if checksum != chunk.checksum {
+                    failures.push(VerifyFailure {
+                        path: entry.path.clone(),
+                        chunk_index: Some(idx as u32),
+                        message: format!(
+                            "Checksum mismatch (expected {:08x}, got {:08x})",
+                            chunk.checksum, checksum
+                        ),
+                    });
+                    continue;
+                }
+
+                if mode == VerifyMode::Decode
+                    && let Err(err) = decode_with_codec(
+                        chunk.codec,
+                        chunk_bytes,
+                        chunk.uncompressed_size as usize,
+                    )
+                {
+                    failures.push(VerifyFailure {
+                        path: entry.path.clone(),
+                        chunk_index: Some(idx as u32),
+                        message: format!("Decode failed: {}", err),
+                    });
+                }
+            }
+        }
+
+        Ok(VerifyReport {
+            mode,
+            total_entries: self.source_entries.len() as u32,
+            total_chunks,
+            checked_chunks,
+            ok: failures.is_empty(),
+            failures,
+        })
+    }
+
+    pub fn read_entry_bytes(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        if let Some((_, data)) = self.memory_assets.iter().find(|(name, _)| name == path) {
+            return Ok(Some(data.clone()));
+        }
+        if self.removed_from_base.contains(path) {
+            return Ok(None);
+        }
+
+        if let Some(mmap) = &self.source_mmap
+            && let Some(entry) = self.source_entries.iter().find(|entry| entry.path == path)
+        {
+            let bytes: &[u8] = mmap.as_ref().as_ref();
+            return Ok(Some(join_chunks(bytes, entry)?));
+        }
+
+        let out = match path {
+            "config.toml" => Some(
+                toml::to_string_pretty(&self.config)
+                    .with_context(|| "Failed to serialize config.toml")?
+                    .into_bytes(),
+            ),
+            "shader.frag" => self.shader_source.as_ref().map(|s| s.as_bytes().to_vec()),
+            "preview.jpg" | "preview.png" | "preview.webp" => self.preview.clone(),
+            _ => None,
+        };
+
+        Ok(out)
+    }
+
+    pub fn read_chunk_bytes(
+        &self,
+        path: &str,
+        chunk_index: usize,
+        decoded: bool,
+    ) -> Result<Option<Vec<u8>>> {
+        let bytes = match &self.source_mmap {
+            Some(mmap) => mmap.as_ref().as_ref(),
+            None => return Ok(None),
+        };
+        let entry = match self.source_entries.iter().find(|entry| entry.path == path) {
+            Some(entry) => entry,
+            None => return Ok(None),
+        };
+        let chunks = parse_chunk_table(bytes, entry)?;
+        let chunk = match chunks.get(chunk_index) {
+            Some(chunk) => chunk,
+            None => return Ok(None),
+        };
+
+        let start = chunk.data_offset as usize;
+        let end = start + chunk.compressed_size as usize;
+        let raw = &bytes[start..end];
+
+        if decoded {
+            Ok(Some(decode_chunk_verified(bytes, chunk)?))
+        } else {
+            Ok(Some(raw.to_vec()))
+        }
+    }
+
     pub fn asset_entries(&self) -> Vec<AssetEntry> {
         let mut entries: Vec<AssetEntry> = self
             .base_entries
@@ -913,6 +1354,68 @@ impl LiveShadePackage {
         let entry = self.source_entries.iter().find(|e| e.path == name)?;
         join_chunks(mmap.as_ref().as_ref(), entry).ok()
     }
+
+    fn source_bytes(&self) -> Result<&[u8]> {
+        let mmap = self
+            .source_mmap
+            .as_ref()
+            .with_context(|| "Inspection is only available for packages loaded from disk")?;
+        Ok(mmap.as_ref().as_ref())
+    }
+
+    fn build_entry_debug_infos(&self) -> Result<Vec<EntryDebugInfo>> {
+        let bytes = self.source_bytes()?;
+        let mut entries = Vec::with_capacity(self.source_entries.len());
+
+        for entry in &self.source_entries {
+            let chunks = parse_chunk_table(bytes, entry)?;
+            let compressed_size: u64 = chunks
+                .iter()
+                .map(|chunk| chunk.compressed_size as u64)
+                .sum();
+
+            let data_start_offset = chunks
+                .iter()
+                .map(|chunk| chunk.data_offset)
+                .min()
+                .unwrap_or(0);
+            let data_end_offset = chunks
+                .iter()
+                .map(|chunk| chunk.data_offset + chunk.compressed_size as u64)
+                .max()
+                .unwrap_or(0);
+
+            let chunk_infos = chunks
+                .into_iter()
+                .enumerate()
+                .map(|(index, chunk)| ChunkDebugInfo {
+                    index: index as u32,
+                    data_offset: chunk.data_offset,
+                    compressed_size: chunk.compressed_size,
+                    uncompressed_size: chunk.uncompressed_size,
+                    checksum: chunk.checksum,
+                    codec: chunk.codec,
+                })
+                .collect::<Vec<_>>();
+
+            entries.push(EntryDebugInfo {
+                path: entry.path.clone(),
+                kind: entry.kind.into(),
+                default_codec: entry.default_codec,
+                default_level: entry.default_level,
+                chunk_size: entry.chunk_size,
+                chunk_count: entry.chunk_count,
+                uncompressed_size: entry.uncompressed_size,
+                compressed_size,
+                compression_ratio: safe_ratio(compressed_size, entry.uncompressed_size),
+                data_start_offset,
+                data_end_offset,
+                chunks: chunk_infos,
+            });
+        }
+
+        Ok(entries)
+    }
 }
 
 #[cfg(test)]
@@ -1017,5 +1520,65 @@ mod tests {
             .expect("stream");
         let err = stream.read_range(0, 1024).expect_err("must fail checksum");
         assert!(err.to_string().contains("checksum"));
+    }
+
+    #[test]
+    fn inspect_metadata_entries_and_stats_are_available() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("inspect.shade");
+
+        let mut pkg = LiveShadePackage::new_empty(test_config());
+        pkg.shader_source = Some("void mainImage(out vec4 c, in vec2 f){c=vec4(1.0);}".into());
+        pkg.preview = Some(vec![1, 2, 3, 4, 5]);
+        pkg.add_asset("assets/alpha.bin".into(), vec![7u8; 32 * 1024]);
+        pkg.add_asset("assets/beta.bin".into(), vec![11u8; 48 * 1024]);
+        pkg.save(&path).expect("save");
+
+        let loaded = LiveShadePackage::load(&path).expect("load");
+        let metadata = loaded.package_metadata().expect("metadata");
+        assert!(metadata.entry_count >= 4);
+        assert!(metadata.total_chunks > 0);
+        assert!(metadata.total_uncompressed > 0);
+
+        let entries = loaded.entry_debug_infos().expect("entries");
+        assert!(entries.iter().any(|e| e.path == "config.toml"));
+        assert!(entries.iter().any(|e| e.path == "shader.frag"));
+        assert!(entries.iter().any(|e| e.path == "assets/alpha.bin"));
+
+        let stats = loaded.compression_stats().expect("stats");
+        assert!(stats.total_uncompressed >= stats.total_compressed);
+        assert!(!stats.by_codec.is_empty());
+    }
+
+    #[test]
+    fn verify_reports_corruption() {
+        let tmp = tempdir().expect("tempdir");
+        let path = tmp.path().join("verify_corrupt.shade");
+
+        let mut pkg = LiveShadePackage::new_empty(test_config());
+        pkg.add_asset("assets/verify.bin".into(), vec![55u8; 96 * 1024]);
+        pkg.save(&path).expect("save");
+
+        let loaded_ok = LiveShadePackage::load(&path).expect("load");
+        let report_ok = loaded_ok.verify(VerifyMode::Checksum).expect("verify ok");
+        assert!(report_ok.ok);
+        assert!(report_ok.failures.is_empty());
+
+        let mut bytes = std::fs::read(&path).expect("read");
+        let header = parse_header(&bytes).expect("header");
+        let entries = parse_index(&bytes, &header).expect("index");
+        let entry = entries
+            .iter()
+            .find(|e| e.path == "assets/verify.bin")
+            .expect("entry");
+        let chunks = parse_chunk_table(&bytes, entry).expect("chunks");
+        let first = chunks.first().expect("first chunk");
+        bytes[first.data_offset as usize] ^= 0xAA;
+        std::fs::write(&path, &bytes).expect("write");
+
+        let loaded_bad = LiveShadePackage::load(&path).expect("load bad");
+        let report_bad = loaded_bad.verify(VerifyMode::Checksum).expect("verify bad");
+        assert!(!report_bad.ok);
+        assert!(!report_bad.failures.is_empty());
     }
 }

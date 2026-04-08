@@ -77,6 +77,29 @@ Legacy ZIP `.shade` files are migration-only input via `kroma migrate` and are n
 2. Full extraction to temporary files is not allowed for embedded video playback.
 3. Unsafe FFmpeg AVIO interoperability is isolated to one dedicated module.
 
+### 5.2 Inspect Command Requirements
+
+`kroma inspect` provides deep diagnostics for v2 `.shade` containers.
+
+1. Nested subcommands only:
+- `summary`
+- `verify`
+- `list`
+- `chunks`
+- `stats`
+- `dump-entry`
+- `dump-chunk`
+2. Bare `kroma inspect <file>` defaults to `summary`.
+3. Verify modes:
+- `fast` (structure)
+- `checksum` (CRC)
+- `decode` (CRC + decompression)
+4. Output formats:
+- human text
+- JSON
+5. Chunk debug depth supports levels `1..4`.
+6. Legacy ZIP `.shade` is rejected by inspect.
+
 ## 6. IPC Protocol
 
 Newline-delimited JSON. Commands: LoadShade, SetUniform, Pause, Resume, Reload, LiveReload (returns CompileResult), StatusQuery, Shutdown.

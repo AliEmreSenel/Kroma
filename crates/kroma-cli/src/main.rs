@@ -3,6 +3,7 @@
 //! Controls the daemon, imports Shadertoy shaders, and manages .shade packages.
 
 mod importer;
+mod inspect;
 mod ipc_client;
 
 use std::io;
@@ -11,6 +12,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
+use inspect::InspectCommand;
 use log::info;
 
 /// Kroma — a high-performance wallpaper engine for Linux.
@@ -103,6 +105,16 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    /// Inspect a v2 .shade package in detail.
+    Inspect {
+        /// Path to the .shade package file.
+        path: PathBuf,
+
+        /// Inspect subcommand (defaults to summary when omitted).
+        #[command(subcommand)]
+        command: Option<InspectCommand>,
+    },
+
     /// Generate shell completions for the given shell.
     Completions {
         /// The shell to generate completions for.
@@ -139,6 +151,7 @@ fn main() -> Result<()> {
             entry_compression,
         } => cmd_pack(folder, output, codec, level, entry_compression)?,
         Commands::Migrate { input, output } => cmd_migrate(input, output)?,
+        Commands::Inspect { path, command } => inspect::run(path, command)?,
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "kroma", &mut io::stdout());

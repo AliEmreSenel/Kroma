@@ -84,3 +84,14 @@ Descriptor size: 24 bytes
 1. Embedded legacy files are copied into v2 entries.
 2. Unresolved required references are warned and preserved as references.
 3. Runtime loading remains v2-only.
+
+## Inspect Tooling
+
+Use `kroma inspect` for format introspection and validation:
+
+1. `summary` for package-level overview
+2. `verify --mode fast|checksum|decode` for integrity checks
+3. `list` for entry table metadata
+4. `chunks --depth 1..4` for chunk-level diagnostics
+5. `stats` for compression analytics
+6. `dump-entry` / `dump-chunk` for byte-level debugging
