@@ -105,6 +105,29 @@ kroma pack ./my_shade --entry-compression assets/video.mp4=none
 kroma pack ./my_shade --entry-compression shader.frag=zstd:12
 ```
 
+Inspect v2 `.shade` packages:
+
+```bash
+# default: summary
+kroma inspect ./my_shade.shade
+
+# integrity verification modes
+kroma inspect ./my_shade.shade verify --mode fast
+kroma inspect ./my_shade.shade verify --mode checksum
+kroma inspect ./my_shade.shade verify --mode decode
+
+# deep introspection
+kroma inspect ./my_shade.shade list --format json
+kroma inspect ./my_shade.shade chunks --depth 4
+kroma inspect ./my_shade.shade stats
+kroma inspect ./my_shade.shade dump-entry config.toml
+kroma inspect ./my_shade.shade dump-chunk assets/video.mp4 0 --decoded
+```
+
+`kroma inspect` supports nested subcommands only, text/json output, and
+chunk-depth diagnostics from `--depth 1` through `--depth 4`.
+Legacy ZIP `.shade` input is rejected by inspect.
+
 Example `config.toml`:
 
 ```toml
