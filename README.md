@@ -9,7 +9,7 @@ Kroma renders real-time, data-driven shaders and video streams directly to your 
 - **Real-time shaders** — GLSL fragment shaders running on the GPU via wgpu
 - **Data-driven** — Shaders react to system stats (CPU, RAM, battery), audio spectrum, mouse position, and time
 - **Shadertoy translator** — Import shaders from Shadertoy with automatic transpilation
-- **`.shade` packages** — Distributable ZIP format containing shader, config, previews, and assets
+- **`.shade` v2 packages** — Chunked container format with strict magic/version checks and per-entry compression
 - **Video textures** — Use video files as shader inputs (ffmpeg/gstreamer backend)
 - **Compositor awareness** — Auto-pauses on fullscreen apps and inactive workspaces (Hyprland IPC)
 - **Modular architecture** — Every subsystem is a swappable Rust trait
@@ -56,16 +56,16 @@ cargo run -p kroma-daemon
 ### Import a Shadertoy shader
 
 ```bash
-cargo run -p kroma-gui -- import examples/shadertoy/plasma.glsl "Plasma" "Author"
+cargo run -p kroma-cli -- import examples/shadertoy/plasma.glsl --name "Plasma" --author "Author"
 ```
 
 ### Send commands to the daemon
 
 ```bash
-kroma-gui load /path/to/shader.shade
-kroma-gui pause
-kroma-gui resume
-kroma-gui shutdown
+kroma load /path/to/shader.shade
+kroma pause
+kroma resume
+kroma shutdown
 ```
 
 ### Install as a systemd user service
@@ -78,14 +78,32 @@ systemctl --user enable --now kroma-daemon
 
 ## `.shade` Package Format
 
-A `.shade` file is a ZIP containing:
+Kroma runtime loads v2 `.shade` packages only.
 
-| File | Purpose |
-|---|---|
-| `shader.frag` | Kroma-compliant GLSL fragment shader |
-| `config.toml` | Metadata, uniforms, texture bindings |
-| `preview.jpg` | Thumbnail (optional) |
-| `assets/` | Video/image resources (optional) |
+- v2 uses a chunked container with strict magic/version validation.
+- Legacy ZIP `.shade` files are supported only via one-shot migration.
+- Embedded video assets are read as streamable chunk data (no full temp extraction path).
+
+```bash
+kroma migrate legacy.shade --output migrated.shade
+```
+
+Pack a folder to v2 `.shade`:
+
+```bash
+kroma pack ./my_shade --output my_shade.shade
+```
+
+`kroma pack` embeds only files referenced by `config.toml`.
+Absolute-path references are not embedded by default.
+
+Compression controls:
+
+```bash
+kroma pack ./my_shade --codec zstd --level 8
+kroma pack ./my_shade --entry-compression assets/video.mp4=none
+kroma pack ./my_shade --entry-compression shader.frag=zstd:12
+```
 
 Example `config.toml`:
 

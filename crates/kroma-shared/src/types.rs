@@ -1,9 +1,8 @@
 //! Core types shared across the Kroma engine.
 
-use std::collections::HashMap;
-
 use bytemuck::{Pod, Zeroable};
 use glam::Vec2;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -127,14 +126,14 @@ pub struct ShadeConfig {
     #[serde(default)]
     pub rendering: RenderingConfig,
     #[serde(default)]
-    pub uniforms: HashMap<String, UniformDef>,
+    pub uniforms: IndexMap<String, UniformDef>,
     /// All texture channels — images, videos, fonts, slideshows, audio spectrum.
     #[serde(default)]
-    pub textures: HashMap<String, TextureDef>,
+    pub textures: IndexMap<String, TextureDef>,
     /// Render buffer passes (multi-pass shaders, Shadertoy-style).
     /// Keys are buffer names like "A", "B", "C", "D".
     #[serde(default)]
-    pub buffers: HashMap<String, BufferDef>,
+    pub buffers: IndexMap<String, BufferDef>,
 }
 
 /// Package metadata.
@@ -379,11 +378,11 @@ pub struct TextureDef {
     /// Sub-textures for shader textures — same format as the root `textures`
     /// map. Supports all texture types including nested shader textures.
     #[serde(default)]
-    pub textures: HashMap<String, Box<TextureDef>>,
+    pub textures: IndexMap<String, Box<TextureDef>>,
 
     /// Custom uniforms for shader textures — same format as the root `uniforms`.
     #[serde(default)]
-    pub uniforms: HashMap<String, UniformDef>,
+    pub uniforms: IndexMap<String, UniformDef>,
 }
 
 /// A render buffer pass definition (multi-pass rendering).

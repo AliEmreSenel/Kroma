@@ -9,7 +9,6 @@ use std::path::Path;
 use anyhow::anyhow;
 use anyhow::{Context, Result};
 use ffmpeg_next::codec;
-use ffmpeg_next::format;
 use ffmpeg_next::format::Pixel;
 use ffmpeg_next::frame;
 use ffmpeg_next::media;
@@ -18,24 +17,89 @@ use log::{info, warn};
 
 use kroma_shared::traits::VideoDecoder;
 
+use super::ffmpeg_io;
 use super::hot_reload::SourceHotReload;
-use super::{TextureSource, TextureUpdate};
+use super::{TextureSource, TextureUpdate, VideoSource};
+
+use kroma_shared::shade::AssetByteStream;
 
 pub struct FfmpegVideoDecoder {
-    input: ffmpeg_next::format::context::Input,
+    input: ffmpeg_io::InputContext,
     decoder: ffmpeg_next::decoder::Video,
     video_stream_index: usize,
     scaler: ffmpeg_next::software::scaling::Context,
     width: u32,
     height: u32,
     frame_buffer: Vec<u8>,
-    duration: f64,
     time_base: f64,
     frame_interval: f64,     // Now dynamic: updates per frame
     avg_frame_interval: f64, // Fallback: calculated from stream average FPS
 }
 
 impl FfmpegVideoDecoder {
+    fn from_input(input: ffmpeg_io::InputContext, source_label: &str) -> Result<Self> {
+        let video_stream = input
+            .as_input()
+            .streams()
+            .best(media::Type::Video)
+            .ok_or_else(|| anyhow!("No video stream found in '{}'", source_label))?;
+
+        let video_stream_index = video_stream.index();
+        let time_base = f64::from(video_stream.time_base());
+        let raw_duration = video_stream.duration();
+        let duration = if raw_duration <= 0 {
+            0.0
+        } else {
+            raw_duration as f64 * time_base
+        };
+
+        let stream_parameters = video_stream.parameters();
+
+        let context_decoder = codec::Context::from_parameters(stream_parameters)?;
+        let decoder = context_decoder.decoder().video()?;
+
+        let width = decoder.width();
+        let height = decoder.height();
+
+        let frame_rate = video_stream.rate();
+        let avg_frame_interval = frame_rate.denominator() as f64 / frame_rate.numerator() as f64;
+
+        let scaler = scaling::Context::get(
+            decoder.format(),
+            width,
+            height,
+            Pixel::RGBA,
+            width,
+            height,
+            scaling::Flags::BILINEAR,
+        )?;
+
+        info!(
+            "FFmpeg video decoder: {}x{}, {:.1}s duration, {} FPS (avg), stream {}",
+            width, height, duration, frame_rate, video_stream_index
+        );
+
+        Ok(Self {
+            input,
+            decoder,
+            video_stream_index,
+            scaler,
+            width,
+            height,
+            frame_buffer: vec![0u8; (width * height * 4) as usize],
+            time_base,
+            frame_interval: avg_frame_interval,
+            avg_frame_interval,
+        })
+    }
+
+    pub fn load_from_stream(stream: AssetByteStream, source_label: &str) -> Result<Self> {
+        ffmpeg_next::init().map_err(|e| anyhow::anyhow!("Failed to initialize FFmpeg: {}", e))?;
+        let input = ffmpeg_io::InputContext::open_from_stream(stream)
+            .with_context(|| format!("Failed to open embedded stream for '{}'", source_label))?;
+        Self::from_input(input, source_label)
+    }
+
     /// Try to decode one video frame from the input stream.
     fn decode_next_packet(&mut self) -> Option<()> {
         loop {
@@ -47,7 +111,7 @@ impl FfmpegVideoDecoder {
 
             // Send next packet to the decoder
             let mut found_video = false;
-            for (stream, packet) in self.input.packets() {
+            for (stream, packet) in self.input.as_input_mut().packets() {
                 if stream.index() == self.video_stream_index {
                     if self.decoder.send_packet(&packet).is_err() {
                         continue;
@@ -117,63 +181,10 @@ impl VideoDecoder for FfmpegVideoDecoder {
     {
         ffmpeg_next::init().map_err(|e| anyhow::anyhow!("Failed to initialize FFmpeg: {}", e))?;
 
-        let input = format::input(&path)
+        let input = ffmpeg_next::format::input(&path)
             .map_err(|e| anyhow!("Failed to open video '{}': {}", path.display(), e))?;
-
-        let video_stream = input
-            .streams()
-            .best(media::Type::Video)
-            .ok_or_else(|| anyhow!("No video stream found in '{}'", path.display()))?;
-
-        let video_stream_index = video_stream.index();
-        let time_base = f64::from(video_stream.time_base());
-        let raw_duration = video_stream.duration();
-        let duration = if raw_duration <= 0 {
-            0.0
-        } else {
-            raw_duration as f64 * time_base
-        };
-
-        let stream_parameters = video_stream.parameters();
-
-        let context_decoder = codec::Context::from_parameters(stream_parameters)?;
-        let decoder = context_decoder.decoder().video()?;
-
-        let width = decoder.width();
-        let height = decoder.height();
-
-        // Calculate average frame interval for fallback
-        let frame_rate = video_stream.rate();
-        let avg_frame_interval = frame_rate.denominator() as f64 / frame_rate.numerator() as f64;
-
-        let scaler = scaling::Context::get(
-            decoder.format(),
-            width,
-            height,
-            Pixel::RGBA,
-            width,
-            height,
-            scaling::Flags::BILINEAR,
-        )?;
-
-        info!(
-            "FFmpeg video decoder: {}x{}, {:.1}s duration, {} FPS (avg), stream {}",
-            width, height, duration, frame_rate, video_stream_index
-        );
-
-        Ok(Self {
-            input,
-            decoder,
-            video_stream_index,
-            scaler,
-            width,
-            height,
-            frame_buffer: vec![0u8; (width * height * 4) as usize],
-            duration,
-            time_base,
-            frame_interval: avg_frame_interval,
-            avg_frame_interval,
-        })
+        let input = ffmpeg_io::InputContext::from_input(input);
+        Self::from_input(input, &path.display().to_string())
     }
 
     fn next_frame(&mut self) -> Option<&[u8]> {
@@ -190,6 +201,7 @@ impl VideoDecoder for FfmpegVideoDecoder {
         }
         let ts = (timestamp / self.time_base) as i64;
         self.input
+            .as_input_mut()
             .seek(ts, ..ts)
             .map_err(|e| anyhow::anyhow!("Seek failed: {}", e))?;
         self.decoder.flush();
@@ -219,14 +231,23 @@ pub struct VideoTexture {
 }
 
 impl VideoTexture {
-    fn load_decoder(path: &Path) -> Result<(FfmpegVideoDecoder, u32, u32)> {
+    fn load_decoder_from_path(path: &Path) -> Result<(FfmpegVideoDecoder, u32, u32)> {
         let decoder = FfmpegVideoDecoder::load(path)?;
         let (w, h) = decoder.dimensions();
         Ok((decoder, w, h))
     }
 
+    fn load_decoder_from_stream(
+        stream: AssetByteStream,
+        source_label: &str,
+    ) -> Result<(FfmpegVideoDecoder, u32, u32)> {
+        let decoder = FfmpegVideoDecoder::load_from_stream(stream, source_label)?;
+        let (w, h) = decoder.dimensions();
+        Ok((decoder, w, h))
+    }
+
     fn reload_decoder_from_path(&mut self, path: &Path) -> Result<()> {
-        let (decoder, w, h) = Self::load_decoder(path)
+        let (decoder, w, h) = Self::load_decoder_from_path(path)
             .with_context(|| format!("Failed to reload video decoder '{}'", path.display()))?;
         self.decoder = Some(decoder);
         self.last_width = w;
@@ -248,67 +269,112 @@ impl VideoTexture {
     /// texture degrades to a 1×1 transparent placeholder instead of
     /// returning an error. The hot-reload watcher (if enabled) stays active
     /// so the decoder is created once the file appears/changes.
-    pub fn load(path: &Path, looping: bool, hot_reload: bool, optional: bool) -> Result<Self> {
-        let hot_reload = if hot_reload {
-            match SourceHotReload::from_source(Some(path)) {
-                Ok(hot_reload) => hot_reload,
-                Err(e) => {
-                    warn!(
-                        "VideoTexture watcher disabled for {}: {}",
-                        path.display(),
-                        e
-                    );
-                    SourceHotReload::disabled()
-                }
-            }
-        } else {
-            SourceHotReload::disabled()
-        };
-
-        let decoder_path = hot_reload.source_path().unwrap_or(path);
-        match Self::load_decoder(decoder_path) {
-            Ok((decoder, w, h)) => {
-                if let Some(watch_path) = hot_reload.source_path() {
-                    info!(
-                        "VideoTexture loaded: {}x{}, looping={}, watcher={}",
-                        w,
-                        h,
-                        looping,
-                        watch_path.display()
-                    );
+    pub fn load(
+        source: VideoSource,
+        looping: bool,
+        hot_reload: bool,
+        optional: bool,
+    ) -> Result<Self> {
+        match source {
+            VideoSource::ExternalPath(path) => {
+                let hot_reload = if hot_reload {
+                    match SourceHotReload::from_source(Some(&path)) {
+                        Ok(hot_reload) => hot_reload,
+                        Err(e) => {
+                            warn!(
+                                "VideoTexture watcher disabled for {}: {}",
+                                path.display(),
+                                e
+                            );
+                            SourceHotReload::disabled()
+                        }
+                    }
                 } else {
-                    info!("VideoTexture loaded: {}x{}, looping={}", w, h, looping);
+                    SourceHotReload::disabled()
+                };
+
+                let decoder_path = hot_reload.source_path().unwrap_or(&path);
+                match Self::load_decoder_from_path(decoder_path) {
+                    Ok((decoder, w, h)) => {
+                        if let Some(watch_path) = hot_reload.source_path() {
+                            info!(
+                                "VideoTexture loaded: {}x{}, looping={}, watcher={}",
+                                w,
+                                h,
+                                looping,
+                                watch_path.display()
+                            );
+                        } else {
+                            info!("VideoTexture loaded: {}x{}, looping={}", w, h, looping);
+                        }
+                        Ok(Self {
+                            decoder: Some(decoder),
+                            accum: 0.0,
+                            looping,
+                            first_frame: true,
+                            last_width: w,
+                            last_height: h,
+                            hot_reload,
+                        })
+                    }
+                    Err(e) if optional => {
+                        warn!(
+                            "Optional video '{}' failed to load (using placeholder): {}",
+                            path.display(),
+                            e
+                        );
+                        Ok(Self {
+                            decoder: None,
+                            accum: 0.0,
+                            looping,
+                            first_frame: true,
+                            last_width: 1,
+                            last_height: 1,
+                            hot_reload,
+                        })
+                    }
+                    Err(e) => Err(e.context(format!(
+                        "Failed to load video decoder '{}'",
+                        decoder_path.display()
+                    ))),
                 }
-                Ok(Self {
-                    decoder: Some(decoder),
-                    accum: 0.0,
-                    looping,
-                    first_frame: true,
-                    last_width: w,
-                    last_height: h,
-                    hot_reload,
-                })
             }
-            Err(e) if optional => {
-                warn!(
-                    "Optional video '{}' failed to load (using placeholder): {}",
-                    path.display(),
-                    e
-                );
-                Ok(Self {
-                    decoder: None,
-                    accum: 0.0,
-                    looping,
-                    first_frame: true,
-                    last_width: 1,
-                    last_height: 1,
-                    hot_reload,
-                })
+            VideoSource::EmbeddedStream(stream) => {
+                let hot_reload = SourceHotReload::disabled();
+                match Self::load_decoder_from_stream(stream, "embedded-stream") {
+                    Ok((decoder, w, h)) => {
+                        info!(
+                            "Embedded VideoTexture loaded: {}x{}, looping={}",
+                            w, h, looping
+                        );
+                        Ok(Self {
+                            decoder: Some(decoder),
+                            accum: 0.0,
+                            looping,
+                            first_frame: true,
+                            last_width: w,
+                            last_height: h,
+                            hot_reload,
+                        })
+                    }
+                    Err(e) if optional => {
+                        warn!(
+                            "Optional embedded video failed to load (using placeholder): {}",
+                            e
+                        );
+                        Ok(Self {
+                            decoder: None,
+                            accum: 0.0,
+                            looping,
+                            first_frame: true,
+                            last_width: 1,
+                            last_height: 1,
+                            hot_reload,
+                        })
+                    }
+                    Err(e) => Err(e.context("Failed to load embedded video decoder")),
+                }
             }
-            Err(e) => Err(e.context(format!(
-                "Failed to load video decoder '{}'",
-                decoder_path.display()
-            ))),
         }
     }
 

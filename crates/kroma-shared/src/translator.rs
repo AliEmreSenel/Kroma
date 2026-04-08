@@ -9,6 +9,7 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
+use indexmap::IndexMap;
 use regex::Regex;
 
 use crate::types::{ShadeConfig, ShadeMeta, TextureDef, TextureType, UniformDef};
@@ -119,8 +120,8 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
                     version: "1.0".to_string(),
                     tags: vec![],
                 },
-                textures: std::collections::HashMap::new(),
-                uniforms: std::collections::HashMap::new(),
+                textures: IndexMap::new(),
+                uniforms: IndexMap::new(),
                 rendering: Default::default(),
                 buffers: Default::default(),
             },
@@ -327,7 +328,7 @@ layout(location = 0) out vec4 kroma_out_color;
     // ------------------------------------------------------------------
     // Step 6: Generate config.toml
     // ------------------------------------------------------------------
-    let mut textures = std::collections::HashMap::new();
+    let mut textures = IndexMap::new();
     for idx in &detected_channels {
         let channel_name = format!("channel{}", idx);
         textures.insert(
@@ -351,8 +352,8 @@ layout(location = 0) out vec4 kroma_out_color;
                 shader: None,
                 width: None,
                 height: None,
-                textures: std::collections::HashMap::new(),
-                uniforms: std::collections::HashMap::new(),
+                textures: IndexMap::new(),
+                uniforms: IndexMap::new(),
             },
         );
     }
@@ -367,7 +368,7 @@ layout(location = 0) out vec4 kroma_out_color;
         },
         rendering: Default::default(),
         uniforms: {
-            let mut m = std::collections::HashMap::new();
+            let mut m = IndexMap::new();
             m.insert(
                 "speed".into(),
                 UniformDef {

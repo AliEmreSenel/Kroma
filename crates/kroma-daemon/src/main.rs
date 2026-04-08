@@ -26,6 +26,7 @@ use kroma_shared::{
     ipc::{CompileError, DaemonCommand, DaemonEvent, maybe_send},
     shade::LiveShadePackage,
     traits::DataProvider,
+    types::{ShadeConfig, ShadeMeta, TextureDef, TextureType},
 };
 
 use crate::{
@@ -63,6 +64,71 @@ struct Daemon {
 }
 
 impl Daemon {
+    fn detect_direct_media_type(path: &Path) -> Option<TextureType> {
+        let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+        match ext.as_str() {
+            "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" | "avif" | "tif" | "tiff" => {
+                Some(TextureType::Image)
+            }
+            "mp4" | "webm" | "mkv" | "avi" | "mov" | "m4v" | "mpg" | "mpeg" | "wmv" => {
+                Some(TextureType::Video)
+            }
+            _ => None,
+        }
+    }
+
+    fn package_from_media_path(path: &Path) -> Option<LiveShadePackage> {
+        let ty = Self::detect_direct_media_type(path)?;
+
+        let display_name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "Direct Media".to_string());
+
+        let mut config = ShadeConfig {
+            meta: ShadeMeta {
+                name: display_name,
+                author: "Kroma Auto".into(),
+                version: "1.0".into(),
+                description: "Auto-generated package for direct media playback".into(),
+                tags: vec!["direct-media".into(), ty.as_str().into()],
+            },
+            rendering: Default::default(),
+            uniforms: Default::default(),
+            textures: Default::default(),
+            buffers: Default::default(),
+        };
+
+        config.textures.insert(
+            "iChannel0".into(),
+            TextureDef {
+                ty,
+                source: Some(path.to_string_lossy().to_string()),
+                seed: None,
+                input: None,
+                sources: Vec::new(),
+                looping: true,
+                filter: Default::default(),
+                wrap: Default::default(),
+                binding: Some(0),
+                font_size: None,
+                interval: None,
+                shuffle: false,
+                fft_bands: None,
+                hot_reload: true,
+                optional: false,
+                shader: None,
+                width: None,
+                height: None,
+                textures: Default::default(),
+                uniforms: Default::default(),
+            },
+        );
+
+        Some(LiveShadePackage::new_empty(config))
+    }
+
     fn new() -> Result<Self> {
         let config = config::DaemonConfig::load()?;
         info!(
@@ -309,8 +375,21 @@ impl Daemon {
 
     fn load_shade(&mut self, path: &str, tx: Option<mpsc::Sender<DaemonEvent>>) -> Result<()> {
         let mut loaded_successfully = false;
+        let requested_path = Path::new(path);
 
-        match LiveShadePackage::load(Path::new(path)) {
+        let package_result = if requested_path.extension().and_then(|s| s.to_str()) == Some("shade")
+        {
+            LiveShadePackage::load(requested_path)
+        } else if let Some(pkg) = Self::package_from_media_path(requested_path) {
+            Ok(pkg)
+        } else {
+            anyhow::bail!(
+                "Unsupported input '{}'. Expected .shade package or direct image/video file",
+                path
+            )
+        };
+
+        match package_result {
             Ok(pkg) => {
                 let pkg_name = pkg.config.meta.name.clone();
                 match self.renderer.load_shade(pkg, Some(path)) {
