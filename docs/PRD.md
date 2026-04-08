@@ -61,7 +61,21 @@ Full-featured creative tool with 5 tabs:
 
 ## 5. The `.shade` Format
 
-ZIP containing: `shader.frag`, `config.toml`, `preview.jpg`, `assets/`, `textures/`
+Runtime format is `.shade` v2 (chunked container):
+
+1. Strict magic/version validation.
+2. Per-entry chunk table and independent decoding.
+3. 256 KiB chunking with per-chunk checksum.
+4. Per-entry compression policy (`auto|none|zstd|lz4`) with optional level.
+5. Deterministic packaging order from config declaration order.
+
+Legacy ZIP `.shade` files are migration-only input via `kroma migrate` and are not runtime-loadable.
+
+### 5.1 Embedded Video Rules
+
+1. Embedded videos are decoded from streamable container reads.
+2. Full extraction to temporary files is not allowed for embedded video playback.
+3. Unsafe FFmpeg AVIO interoperability is isolated to one dedicated module.
 
 ## 6. IPC Protocol
 

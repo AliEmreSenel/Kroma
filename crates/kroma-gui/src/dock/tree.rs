@@ -364,6 +364,7 @@ impl DockNode {
     }
 
     /// Find the path to a panel in the tree.
+    #[allow(dead_code)]
     pub fn find_panel(&self, target: PanelId, path: &mut Vec<PathDir>) -> Option<Vec<PathDir>> {
         match self {
             DockNode::Leaf { tabs, .. } => {

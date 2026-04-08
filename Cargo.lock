@@ -2688,6 +2688,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "toml",
  "zip",
 ]
 
@@ -2705,6 +2706,7 @@ dependencies = [
  "fontdue",
  "glam 0.32.0",
  "image",
+ "indexmap",
  "kroma-shared",
  "libloading 0.9.0",
  "log",
@@ -2766,8 +2768,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "crc32fast",
  "glam 0.32.0",
+ "indexmap",
  "log",
+ "lz4_flex",
  "memmap2",
  "raw-window-handle",
  "regex",
@@ -2776,7 +2781,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "toml",
- "zip",
+ "zstd",
 ]
 
 [[package]]
@@ -2994,6 +2999,15 @@ dependencies = [
  "float_next_after",
  "lyon_path",
  "num-traits",
+]
+
+[[package]]
+name = "lz4_flex"
+version = "0.11.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
+dependencies = [
+ "twox-hash",
 ]
 
 [[package]]
@@ -5525,6 +5539,12 @@ checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
 ]
+
+[[package]]
+name = "twox-hash"
+version = "2.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ea3136b675547379c4bd395ca6b938e5ad3c3d20fad76e7fe85f9e0d011419c"
 
 [[package]]
 name = "typed-path"

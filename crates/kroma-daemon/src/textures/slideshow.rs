@@ -81,7 +81,7 @@ pub struct SlideshowTexture {
 impl SlideshowTexture {
     /// Build a slideshow from a list of slide source definitions.
     ///
-    /// Only resolves video paths (temp-extraction if embedded). Image data
+    /// Only resolves video sources (embedded stream or disk path). Image data
     /// is NOT read at this point — it is decompressed from the mmap on
     /// demand when the slide becomes active.
     ///

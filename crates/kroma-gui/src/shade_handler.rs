@@ -152,7 +152,7 @@ impl KromaApp {
                 }
             }
             Message::ShadeRemoveUniform(name) => {
-                self.shade_config.uniforms.remove(&name);
+                self.shade_config.uniforms.shift_remove(&name);
                 self.sync_shade_toml();
             }
             Message::ShadeNewUniformName(s) => self.shade_new_uniform_name = s,
@@ -187,8 +187,8 @@ impl KromaApp {
                             shader: None,
                             width: None,
                             height: None,
-                            textures: std::collections::HashMap::new(),
-                            uniforms: std::collections::HashMap::new(),
+                            textures: Default::default(),
+                            uniforms: Default::default(),
                         },
                     );
                     self.shade_new_texture_name.clear();
@@ -196,7 +196,7 @@ impl KromaApp {
                 }
             }
             Message::ShadeRemoveTexture(name) => {
-                self.shade_config.textures.remove(&name);
+                self.shade_config.textures.shift_remove(&name);
                 self.sync_shade_toml();
             }
             Message::ShadeNewTextureName(s) => self.shade_new_texture_name = s,
@@ -219,7 +219,7 @@ impl KromaApp {
                 self.sync_shade_toml();
             }
             Message::ShadeRemoveBuffer(name) => {
-                self.shade_config.buffers.remove(&name);
+                self.shade_config.buffers.shift_remove(&name);
                 self.sync_shade_toml();
             }
             Message::ShadeBufferShaderChanged(name, shader) => {
@@ -406,8 +406,8 @@ impl KromaApp {
                         shader: None,
                         width: None,
                         height: None,
-                        textures: std::collections::HashMap::new(),
-                        uniforms: std::collections::HashMap::new(),
+                        textures: Default::default(),
+                        uniforms: Default::default(),
                     },
                 );
                 self.sync_shade_toml();

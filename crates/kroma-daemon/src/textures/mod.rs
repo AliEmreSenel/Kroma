@@ -6,6 +6,7 @@
 //! yielding new pixel data when the GPU texture needs updating.
 
 pub mod audio;
+pub mod ffmpeg_io;
 pub mod font;
 pub mod hot_reload;
 pub mod image;
@@ -14,14 +15,18 @@ pub mod shader;
 pub mod slideshow;
 pub mod video;
 
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
-use kroma_shared::shade::LiveShadePackage;
+use kroma_shared::shade::{AssetByteStream, LiveShadePackage};
 use kroma_shared::types::{TextureDef, TextureType};
+
+pub enum VideoSource {
+    ExternalPath(PathBuf),
+    EmbeddedStream(AssetByteStream),
+}
 
 // ---------------------------------------------------------------------------
 // GpuContext — shared GPU resources for texture sources that need them
@@ -37,6 +42,7 @@ pub struct GpuContext {
     pub queue: Arc<wgpu::Queue>,
     /// Output format of the parent surface (used by shader textures to
     /// create compatible render targets).
+    #[allow(dead_code)]
     pub surface_format: wgpu::TextureFormat,
 }
 
@@ -258,8 +264,8 @@ pub fn create_texture_source(
                 .context("Shader texture requires a `shader` path")?;
             let glsl_source = read_asset_or_disk(pkg, shader_path)
                 .with_context(|| format!("Failed to read shader source '{}'", shader_path))?;
-            let glsl_str = String::from_utf8(glsl_source)
-                .context("Shader source is not valid UTF-8")?;
+            let glsl_str =
+                String::from_utf8(glsl_source).context("Shader source is not valid UTF-8")?;
             let width = def.width.unwrap_or(512);
             let height = def.height.unwrap_or(512);
             let tex = self::shader::ShaderTexture::load(
@@ -293,7 +299,7 @@ pub fn read_asset_or_disk_with_path(
     pkg: &LiveShadePackage,
     source: &str,
 ) -> Result<(Vec<u8>, Option<PathBuf>)> {
-    // 1. Try the package's embedded assets (ZIP)
+    // 1. Try the package's embedded assets
     if let Some(data) = pkg.read_asset(source) {
         return Ok((data, None));
     }
@@ -307,8 +313,7 @@ pub fn read_asset_or_disk_with_path(
     anyhow::bail!("Asset '{}' not found in package or on disk", source)
 }
 
-/// Create a video texture source, extracting embedded data to a temp file
-/// if needed (FFmpeg requires a file path).
+/// Create a video texture source from either embedded stream data or a disk path.
 pub fn create_video_source(
     pkg: &LiveShadePackage,
     source: &str,
@@ -316,52 +321,37 @@ pub fn create_video_source(
     hot_reload: bool,
     optional: bool,
 ) -> Result<self::video::VideoTexture> {
-    let (path, is_external_disk) = match resolve_video_path_with_origin(pkg, source) {
+    let (video_source, is_external_disk) = match resolve_video_source_with_origin(pkg, source) {
         Ok(result) => result,
         Err(_) if optional => {
             // Asset not found — pass the raw source path so the
             // VideoTexture watcher can monitor it.
-            (PathBuf::from(source), true)
+            (VideoSource::ExternalPath(PathBuf::from(source)), true)
         }
         Err(e) => return Err(e),
     };
-    self::video::VideoTexture::load(&path, looping, hot_reload && is_external_disk, optional)
+    self::video::VideoTexture::load(
+        video_source,
+        looping,
+        hot_reload && is_external_disk,
+        optional,
+    )
 }
 
-/// Resolve a video source to a filesystem path, also returning whether the
-/// source is an external disk file (not embedded in the package).
-pub fn resolve_video_path_with_origin(
+/// Resolve a video source to either an embedded stream or filesystem path,
+/// also returning whether the source is external on-disk media.
+pub fn resolve_video_source_with_origin(
     pkg: &LiveShadePackage,
     source: &str,
-) -> Result<(std::path::PathBuf, bool)> {
+) -> Result<(VideoSource, bool)> {
     // Try embedded asset first
-    if let Some(data) = pkg.read_asset(source) {
-        return Ok((extract_video_to_temp(source, &data)?, false));
+    if let Some(stream) = pkg.open_asset_stream(source) {
+        return Ok((VideoSource::EmbeddedStream(stream), false));
     }
     // Try disk path
     let path = std::path::Path::new(source);
     if path.exists() {
-        return Ok((path.to_path_buf(), true));
+        return Ok((VideoSource::ExternalPath(path.to_path_buf()), true));
     }
     anyhow::bail!("Video asset '{}' not found in package or on disk", source)
-}
-
-/// Extract embedded video data to a temp file so FFmpeg can open it.
-fn extract_video_to_temp(source: &str, data: &[u8]) -> Result<std::path::PathBuf> {
-    let extension = Path::new(source)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("mp4");
-    let temp_dir = std::env::temp_dir().join("kroma-video");
-    std::fs::create_dir_all(&temp_dir)?;
-    let hash = {
-        let mut h = DefaultHasher::new();
-        source.hash(&mut h);
-        data.len().hash(&mut h);
-        h.finish()
-    };
-    let temp_path = temp_dir.join(format!("kroma-video_{:016x}.{}", hash, extension));
-    std::fs::write(&temp_path, data)?;
-    log::info!("Extracted video to temp: {}", temp_path.display());
-    Ok(temp_path)
 }

@@ -11,6 +11,7 @@ use font8x8::UnicodeFonts;
 use log::{info, warn};
 
 /// A rasterized font atlas with glyph metrics.
+#[allow(dead_code)]
 pub struct FontAtlas {
     /// RGBA8 texture data for the atlas.
     pub rgba_data: Vec<u8>,
@@ -32,6 +33,7 @@ pub struct FontAtlas {
 
 /// Metrics for a single rasterized glyph.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GlyphInfo {
     /// The Unicode character.
     pub ch: char,

@@ -17,6 +17,7 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+indexmap.workspace = true
 log.workspace = true
 env_logger.workspace = true
 wgpu.workspace = true

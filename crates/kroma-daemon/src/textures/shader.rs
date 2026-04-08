@@ -6,10 +6,10 @@
 //! (including other shader textures for recursive composition), and all
 //! system uniforms (time, resolution, mouse, CPU, RAM, battery, audio).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
+use indexmap::IndexMap;
 use log::warn;
 
 use kroma_shared::shade::LiveShadePackage;
@@ -95,8 +95,8 @@ impl ShaderTexture {
         glsl_source: &str,
         width: u32,
         height: u32,
-        sub_texture_defs: &HashMap<String, Box<TextureDef>>,
-        uniform_defs: &HashMap<String, UniformDef>,
+        sub_texture_defs: &IndexMap<String, Box<TextureDef>>,
+        uniform_defs: &IndexMap<String, UniformDef>,
         optional: bool,
     ) -> Result<Self> {
         let device = &gpu.device;

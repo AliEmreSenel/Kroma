@@ -68,6 +68,41 @@ enum Commands {
         output_dir: Option<PathBuf>,
     },
 
+    /// Convert a folder into a .shade package.
+    Pack {
+        /// Input folder that contains config.toml and optional assets.
+        folder: PathBuf,
+
+        /// Output .shade package path.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Default compression codec for packed entries.
+        /// Use `auto` to keep built-in type defaults.
+        #[arg(long, default_value = "auto")]
+        codec: String,
+
+        /// Default compression level (integer) for zstd, or `auto`.
+        #[arg(long, default_value = "auto")]
+        level: String,
+
+        /// Per-entry compression override: PATH=CODEC[:LEVEL]
+        /// Example: --entry-compression assets/video.mp4=none
+        /// Example: --entry-compression shader.frag=zstd:10
+        #[arg(long = "entry-compression")]
+        entry_compression: Vec<String>,
+    },
+
+    /// Convert a legacy ZIP-based .shade package to v2 .shade.
+    Migrate {
+        /// Input legacy .shade file.
+        input: PathBuf,
+
+        /// Output v2 .shade file.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
     /// Generate shell completions for the given shell.
     Completions {
         /// The shell to generate completions for.
@@ -96,6 +131,14 @@ fn main() -> Result<()> {
             url_or_id,
             output_dir,
         } => cmd_download(&url_or_id, output_dir)?,
+        Commands::Pack {
+            folder,
+            output,
+            codec,
+            level,
+            entry_compression,
+        } => cmd_pack(folder, output, codec, level, entry_compression)?,
+        Commands::Migrate { input, output } => cmd_migrate(input, output)?,
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "kroma", &mut io::stdout());
@@ -169,6 +212,43 @@ fn cmd_download(url_or_id: &str, output_dir: Option<PathBuf>) -> Result<()> {
         }
         Err(e) => eprintln!("Download failed: {}", e),
     }
+    Ok(())
+}
+
+fn cmd_pack(
+    folder: PathBuf,
+    output: Option<PathBuf>,
+    codec: String,
+    level: String,
+    entry_compression: Vec<String>,
+) -> Result<()> {
+    let options = importer::PackOptions {
+        default_codec: codec,
+        default_level: level,
+        entry_compression,
+    };
+    let shade_path = importer::pack_folder_to_shade(&folder, output.as_deref(), &options)?;
+    info!("Packed folder into: {}", shade_path.display());
+    Ok(())
+}
+
+fn cmd_migrate(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
+    let (shade_path, report) =
+        importer::migrate_legacy_zip_to_v2_with_report(&input, output.as_deref())?;
+    info!(
+        "Migration embedded {} asset file(s)",
+        report.embedded_assets
+    );
+    if !report.warnings.is_empty() {
+        info!(
+            "Migration completed with {} warning(s)",
+            report.warnings.len()
+        );
+        for warning in &report.warnings {
+            log::warn!("{}", warning);
+        }
+    }
+    info!("Migrated package to v2: {}", shade_path.display());
     Ok(())
 }
 
