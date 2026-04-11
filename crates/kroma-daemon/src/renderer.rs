@@ -262,16 +262,16 @@ impl Renderer {
 
         info!("Initializing WGPU (Vulkan)... Headless detected.");
 
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         let raw_display = surface.display_handle()?;
         let raw_window = surface.create_surface(primary.id)?;
 
         let surface_target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: raw_display,
+            raw_display_handle: Some(raw_display),
             raw_window_handle: raw_window,
         };
 
@@ -354,7 +354,7 @@ impl Renderer {
         // Pipeline layout
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("kroma-pl"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 

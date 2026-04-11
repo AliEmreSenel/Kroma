@@ -310,7 +310,7 @@ impl ShaderTexture {
             // Build pipeline layout with both bind groups
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("shader-tex-pl"),
-                bind_group_layouts: &[&bgl0, &tex_bgl],
+                bind_group_layouts: &[Some(&bgl0), Some(&tex_bgl)],
                 immediate_size: 0,
             });
 
@@ -350,7 +350,7 @@ impl ShaderTexture {
         // -- Pipeline layout (no sub-textures) --
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shader-tex-pl"),
-            bind_group_layouts: &[&bgl0],
+            bind_group_layouts: &[Some(&bgl0)],
             immediate_size: 0,
         });
 
@@ -711,7 +711,7 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shader-tex-placeholder-pl"),
-            bind_group_layouts: &[&bgl0],
+            bind_group_layouts: &[Some(&bgl0)],
             immediate_size: 0,
         });
 

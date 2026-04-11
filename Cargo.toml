@@ -18,13 +18,13 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "1.0"
+toml = "1.1"
 indexmap = { version = "2", features = ["serde"] }
 log = "0.4"
 env_logger = "0.11"
 
 # GPU / Rendering
-wgpu = "28"
+wgpu = "29"
 raw-window-handle = "0.6"
 
 # Wayland
@@ -39,12 +39,11 @@ sysinfo = "0.38"
 
 # Shader translation
 regex = "1"
-naga = { version = "28", features = ["glsl-in", "wgsl-out", "spv-in"] }
+naga = { version = "29", features = ["glsl-in", "wgsl-out", "spv-in"] }
 shaderc = "0.10"
 
 # X11 support
 x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr"] }
-libloading = "0.9"
 
 # IPC
 tokio = { version = "1", features = ["full"] }
@@ -53,8 +52,8 @@ tokio = { version = "1", features = ["full"] }
 zip = { version = "8", features = ["zstd"] }
 memmap2 = "0.9"
 zstd = "0.13"
-lz4_flex = "0.11"
-crc32fast = "1.4"
+lz4_flex = "0.13"
+crc32fast = "1.5"
 
 # Math
 glam = "0.32"
@@ -64,9 +63,6 @@ bytemuck = { version = "1", features = ["derive"] }
 
 # Image decoding
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
-
-# Base64 encoding for IPC binary data
-base64 = "0.22"
 
 # Audio
 cpal = "0.17"
@@ -80,7 +76,7 @@ fontdue = "0.9"
 font8x8 = "0.3"
 
 # File watching for hot-reload
-notify = "6"
+notify = "8"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

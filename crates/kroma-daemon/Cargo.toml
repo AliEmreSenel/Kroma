@@ -6,6 +6,11 @@ authors.workspace = true
 license.workspace = true
 description = "The Kroma wallpaper engine daemon"
 
+[package.metadata.cargo-machete]
+# These crates are included to force required Wayland backend/protocol feature flags,
+# even when no symbols are referenced directly from daemon source.
+ignored = ["wayland-backend", "wayland-protocols", "wayland-protocols-wlr"]
+
 [[bin]]
 name = "kroma-daemon"
 path = "src/main.rs"
@@ -13,7 +18,6 @@ path = "src/main.rs"
 [dependencies]
 kroma-shared = { path = "../kroma-shared" }
 anyhow.workspace = true
-thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -28,15 +32,12 @@ wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
 smithay-client-toolkit.workspace = true
 sysinfo.workspace = true
-tokio.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 naga.workspace = true
 shaderc.workspace = true
 image.workspace = true
-base64.workspace = true
 x11rb.workspace = true
-libloading.workspace = true
 cpal.workspace = true
 rustfft.workspace = true
 ffmpeg-next.workspace = true

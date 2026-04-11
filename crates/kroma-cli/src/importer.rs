@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use log::info;
 
+use kroma_shared::compression::{
+    parse_default_compression_policy, parse_entry_compression_override,
+};
 use kroma_shared::shade::{CompressionPolicy, LiveShadePackage};
 use kroma_shared::translator;
 use kroma_shared::types::{ShadeConfig, TextureDef, TextureType};
@@ -321,102 +324,11 @@ pub fn migrate_legacy_zip_to_v2_with_report(
 }
 
 fn parse_default_policy(options: &PackOptions) -> Result<Option<CompressionPolicy>> {
-    let codec = options.default_codec.trim().to_ascii_lowercase();
-    let level = options.default_level.trim().to_ascii_lowercase();
-
-    match codec.as_str() {
-        "auto" => {
-            if level != "auto" {
-                anyhow::bail!("--level must be 'auto' when --codec is 'auto'");
-            }
-            Ok(None)
-        }
-        "none" => {
-            if level != "auto" {
-                anyhow::bail!("--level must be 'auto' when --codec is 'none'");
-            }
-            Ok(Some(CompressionPolicy::None))
-        }
-        "lz4" => {
-            if level != "auto" {
-                anyhow::bail!("--level must be 'auto' when --codec is 'lz4'");
-            }
-            Ok(Some(CompressionPolicy::Lz4))
-        }
-        "zstd" => {
-            let lvl = if level == "auto" {
-                3
-            } else {
-                level
-                    .parse::<i32>()
-                    .with_context(|| "Invalid --level value for zstd")?
-            };
-            Ok(Some(CompressionPolicy::Zstd { level: lvl }))
-        }
-        _ => anyhow::bail!(
-            "Unsupported --codec '{}'. Use auto|none|zstd|lz4",
-            options.default_codec
-        ),
-    }
+    parse_default_compression_policy(&options.default_codec, &options.default_level)
 }
 
 fn parse_entry_override(spec: &str) -> Result<(String, CompressionPolicy)> {
-    let (raw_path, raw_policy) = spec
-        .split_once('=')
-        .with_context(|| "Entry compression must be PATH=CODEC[:LEVEL]")?;
-
-    let path = raw_path.trim().replace('\\', "/");
-    if path.is_empty() {
-        anyhow::bail!("Entry compression override path cannot be empty");
-    }
-
-    let (codec_raw, level_raw) = if let Some((c, l)) = raw_policy.split_once(':') {
-        (
-            c.trim().to_ascii_lowercase(),
-            Some(l.trim().to_ascii_lowercase()),
-        )
-    } else {
-        (raw_policy.trim().to_ascii_lowercase(), None)
-    };
-
-    let policy = match codec_raw.as_str() {
-        "auto" => {
-            if let Some(level) = &level_raw
-                && level != "auto"
-            {
-                anyhow::bail!("Entry override '{}' has invalid level for auto codec", spec);
-            }
-            CompressionPolicy::Auto
-        }
-        "none" => {
-            if level_raw.as_deref().is_some_and(|l| l != "auto") {
-                anyhow::bail!("Entry override '{}' has invalid level for none codec", spec);
-            }
-            CompressionPolicy::None
-        }
-        "lz4" => {
-            if level_raw.as_deref().is_some_and(|l| l != "auto") {
-                anyhow::bail!("Entry override '{}' has invalid level for lz4 codec", spec);
-            }
-            CompressionPolicy::Lz4
-        }
-        "zstd" => {
-            let lvl = match level_raw.as_deref() {
-                None | Some("auto") => 3,
-                Some(v) => v
-                    .parse::<i32>()
-                    .with_context(|| format!("Invalid zstd level in entry override '{}'", spec))?,
-            };
-            CompressionPolicy::Zstd { level: lvl }
-        }
-        _ => anyhow::bail!(
-            "Entry override '{}' has unsupported codec '{}'. Use auto|none|zstd|lz4",
-            spec,
-            codec_raw
-        ),
-    };
-
-    Ok((path, policy))
+    parse_entry_compression_override(spec)
 }
 
 fn unresolved_reference_warnings_after_migration(
