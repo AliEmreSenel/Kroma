@@ -29,7 +29,13 @@ enum Commands {
     Load {
         /// Path to the .shade package file.
         path: PathBuf,
+        /// Force immediate load by preempting current lifecycle.
+        #[arg(long)]
+        force: bool,
     },
+
+    /// Unload current shade and transition to terminal/no-shade state.
+    Unload,
 
     /// Pause wallpaper rendering.
     Pause,
@@ -95,16 +101,6 @@ enum Commands {
         entry_compression: Vec<String>,
     },
 
-    /// Convert a legacy ZIP-based .shade package to v2 .shade.
-    Migrate {
-        /// Input legacy .shade file.
-        input: PathBuf,
-
-        /// Output v2 .shade file.
-        #[arg(short, long)]
-        output: Option<PathBuf>,
-    },
-
     /// Inspect a v2 .shade package in detail.
     Inspect {
         /// Path to the .shade package file.
@@ -128,7 +124,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Load { path } => cmd_load(path)?,
+        Commands::Load { path, force } => cmd_load(path, force)?,
+        Commands::Unload => cmd_unload()?,
         Commands::Pause => cmd_pause()?,
         Commands::Resume => cmd_resume()?,
         Commands::Shutdown => cmd_shutdown()?,
@@ -150,7 +147,6 @@ fn main() -> Result<()> {
             level,
             entry_compression,
         } => cmd_pack(folder, output, codec, level, entry_compression)?,
-        Commands::Migrate { input, output } => cmd_migrate(input, output)?,
         Commands::Inspect { path, command } => inspect::run(path, command)?,
         Commands::Completions { shell } => {
             let mut cmd = Cli::command();
@@ -162,7 +158,7 @@ fn main() -> Result<()> {
 }
 
 /// Load a .shade package — resolves to an absolute path before sending to the daemon.
-fn cmd_load(path: PathBuf) -> Result<()> {
+fn cmd_load(path: PathBuf, force: bool) -> Result<()> {
     let absolute = std::fs::canonicalize(&path).map_err(|e| {
         anyhow::anyhow!(
             "Cannot resolve path '{}': {}. Does the file exist?",
@@ -172,8 +168,17 @@ fn cmd_load(path: PathBuf) -> Result<()> {
     })?;
 
     let path_str = absolute.to_string_lossy();
-    ipc_client::send_load(&path_str)?;
-    info!("Sent load command to daemon: {}", path_str);
+    ipc_client::send_load(&path_str, force)?;
+    info!(
+        "Sent load command to daemon: {} (force={})",
+        path_str, force
+    );
+    Ok(())
+}
+
+fn cmd_unload() -> Result<()> {
+    ipc_client::send_unload()?;
+    info!("Sent unload command");
     Ok(())
 }
 
@@ -242,26 +247,6 @@ fn cmd_pack(
     };
     let shade_path = importer::pack_folder_to_shade(&folder, output.as_deref(), &options)?;
     info!("Packed folder into: {}", shade_path.display());
-    Ok(())
-}
-
-fn cmd_migrate(input: PathBuf, output: Option<PathBuf>) -> Result<()> {
-    let (shade_path, report) =
-        importer::migrate_legacy_zip_to_v2_with_report(&input, output.as_deref())?;
-    info!(
-        "Migration embedded {} asset file(s)",
-        report.embedded_assets
-    );
-    if !report.warnings.is_empty() {
-        info!(
-            "Migration completed with {} warning(s)",
-            report.warnings.len()
-        );
-        for warning in &report.warnings {
-            log::warn!("{}", warning);
-        }
-    }
-    info!("Migrated package to v2: {}", shade_path.display());
     Ok(())
 }
 

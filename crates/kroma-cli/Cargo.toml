@@ -23,4 +23,3 @@ env_logger.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
 regex.workspace = true
-zip.workspace = true

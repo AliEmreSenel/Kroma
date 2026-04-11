@@ -36,7 +36,6 @@ pub enum CompressionCodec {
 #[serde(rename_all = "snake_case")]
 pub enum ShadeEntryKind {
     ConfigToml,
-    RootShader,
     Preview,
     Asset,
 }
@@ -153,7 +152,6 @@ pub enum CompressionPolicy {
 #[repr(u8)]
 enum EntryKind {
     ConfigToml = 0,
-    RootShader = 1,
     Preview = 2,
     Asset = 3,
 }
@@ -162,7 +160,6 @@ impl EntryKind {
     fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::ConfigToml),
-            1 => Some(Self::RootShader),
             2 => Some(Self::Preview),
             3 => Some(Self::Asset),
             _ => None,
@@ -174,7 +171,6 @@ impl From<EntryKind> for ShadeEntryKind {
     fn from(value: EntryKind) -> Self {
         match value {
             EntryKind::ConfigToml => ShadeEntryKind::ConfigToml,
-            EntryKind::RootShader => ShadeEntryKind::RootShader,
             EntryKind::Preview => ShadeEntryKind::Preview,
             EntryKind::Asset => ShadeEntryKind::Asset,
         }
@@ -302,9 +298,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header> {
     }
 
     if &bytes[0..8] != SHADE_MAGIC {
-        anyhow::bail!(
-            "Unsupported .shade format (bad magic). Use `kroma migrate` for legacy packages"
-        );
+        anyhow::bail!("Unsupported .shade format (bad magic)");
     }
 
     let mut off = 8usize;
@@ -580,10 +574,7 @@ fn is_image_or_video(path: &str) -> bool {
     )
 }
 
-fn default_policy_for_path(path: &str, kind: EntryKind) -> CompressionPolicy {
-    if kind == EntryKind::RootShader || path == "shader.frag" {
-        return CompressionPolicy::Auto;
-    }
+fn default_policy_for_path(path: &str) -> CompressionPolicy {
     if is_image_or_video(path) {
         return CompressionPolicy::None;
     }
@@ -727,7 +718,6 @@ pub struct LiveShadePackage {
     source_mmap: Option<Arc<memmap2::Mmap>>,
     source_entries: Vec<V2EntryIndex>,
     pub config: ShadeConfig,
-    pub shader_source: Option<String>,
     pub preview: Option<Vec<u8>>,
     base_entries: Vec<AssetEntry>,
     memory_assets: Vec<(String, Vec<u8>)>,
@@ -740,7 +730,6 @@ impl std::fmt::Debug for LiveShadePackage {
         f.debug_struct("LiveShadePackage")
             .field("has_mmap", &self.source_mmap.is_some())
             .field("config", &self.config)
-            .field("has_shader", &self.shader_source.is_some())
             .field("has_preview", &self.preview.is_some())
             .field("base_assets", &self.base_entries.len())
             .field("memory_assets", &self.memory_assets.len())
@@ -769,20 +758,17 @@ impl LiveShadePackage {
         let config: ShadeConfig =
             toml::from_str(&config_str).with_context(|| "Failed to parse config.toml")?;
 
-        let shader_source = if let Some(entry) = find_entry("shader.frag") {
-            let shader = join_chunks(bytes, entry)?;
-            Some(String::from_utf8(shader).with_context(|| "shader.frag is not valid UTF-8")?)
-        } else {
-            None
-        };
-
         let preview = ["preview.jpg", "preview.png", "preview.webp"]
             .iter()
             .find_map(|name| find_entry(name).and_then(|e| join_chunks(bytes, e).ok()));
 
         let mut base_entries = Vec::new();
         for entry in &source_entries {
-            if entry.path.starts_with("assets/") {
+            if entry.path != "config.toml"
+                && entry.path != "preview.jpg"
+                && entry.path != "preview.png"
+                && entry.path != "preview.webp"
+            {
                 base_entries.push(AssetEntry {
                     name: entry.path.clone(),
                     size: entry.uncompressed_size,
@@ -794,7 +780,6 @@ impl LiveShadePackage {
             source_mmap: Some(mmap),
             source_entries,
             config,
-            shader_source,
             preview,
             base_entries,
             memory_assets: Vec::new(),
@@ -808,7 +793,6 @@ impl LiveShadePackage {
             source_mmap: None,
             source_entries: Vec::new(),
             config,
-            shader_source: None,
             preview: None,
             base_entries: Vec::new(),
             memory_assets: Vec::new(),
@@ -1083,7 +1067,6 @@ impl LiveShadePackage {
                     .with_context(|| "Failed to serialize config.toml")?
                     .into_bytes(),
             ),
-            "shader.frag" => self.shader_source.as_ref().map(|s| s.as_bytes().to_vec()),
             "preview.jpg" | "preview.png" | "preview.webp" => self.preview.clone(),
             _ => None,
         };
@@ -1197,14 +1180,6 @@ impl LiveShadePackage {
             data: config_toml.into_bytes(),
         });
 
-        if let Some(shader) = &self.shader_source {
-            entries.push(EntryToWrite {
-                path: "shader.frag".to_string(),
-                kind: EntryKind::RootShader,
-                data: shader.as_bytes().to_vec(),
-            });
-        }
-
         if let Some(preview) = &self.preview {
             entries.push(EntryToWrite {
                 path: "preview.jpg".to_string(),
@@ -1235,7 +1210,7 @@ impl LiveShadePackage {
                 .compression_overrides
                 .get(&entry.path)
                 .cloned()
-                .unwrap_or_else(|| default_policy_for_path(&entry.path, entry.kind));
+                .unwrap_or_else(|| default_policy_for_path(&entry.path));
 
             let mut chunks = Vec::<ChunkDescriptor>::new();
             let mut offset = 0usize;
@@ -1422,7 +1397,6 @@ impl LiveShadePackage {
 mod tests {
     use super::*;
     use crate::types::{RenderingConfig, ShadeMeta};
-    use indexmap::IndexMap;
     use tempfile::tempdir;
 
     fn test_config() -> ShadeConfig {
@@ -1435,9 +1409,7 @@ mod tests {
                 tags: Vec::new(),
             },
             rendering: RenderingConfig::default(),
-            uniforms: IndexMap::new(),
-            textures: IndexMap::new(),
-            buffers: IndexMap::new(),
+            states: Default::default(),
         }
     }
 
@@ -1482,7 +1454,10 @@ mod tests {
         let b = tmp.path().join("b.shade");
 
         let mut pkg = LiveShadePackage::new_empty(test_config());
-        pkg.shader_source = Some("void mainImage(out vec4 c, in vec2 f){c=vec4(1.0);}".into());
+        pkg.add_asset(
+            "shader.frag".into(),
+            b"void mainImage(out vec4 c, in vec2 f){c=vec4(1.0);}".to_vec(),
+        );
         pkg.add_asset("assets/a.bin".into(), vec![7u8; 8192]);
 
         pkg.save(&a).expect("save a");
@@ -1528,7 +1503,10 @@ mod tests {
         let path = tmp.path().join("inspect.shade");
 
         let mut pkg = LiveShadePackage::new_empty(test_config());
-        pkg.shader_source = Some("void mainImage(out vec4 c, in vec2 f){c=vec4(1.0);}".into());
+        pkg.add_asset(
+            "shader.frag".into(),
+            b"void mainImage(out vec4 c, in vec2 f){c=vec4(1.0);}".to_vec(),
+        );
         pkg.preview = Some(vec![1, 2, 3, 4, 5]);
         pkg.add_asset("assets/alpha.bin".into(), vec![7u8; 32 * 1024]);
         pkg.add_asset("assets/beta.bin".into(), vec![11u8; 48 * 1024]);

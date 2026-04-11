@@ -7,11 +7,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use indexmap::IndexMap;
 use kroma_shared::traits::SurfaceProvider;
 use log::{info, warn};
 
 use kroma_shared::shade::LiveShadePackage;
-use kroma_shared::types::ShaderUniforms;
+use kroma_shared::types::{ShadePhase, ShaderUniforms, TextureDef, UniformDef};
 
 mod preview;
 mod render_flow;
@@ -396,20 +397,19 @@ impl Renderer {
         Ok(())
     }
 
-    /// Load a shade package into the pipeline.
-    ///
-    /// If the package has a GLSL shader, translates it to WGSL and builds the
-    /// pipeline. If it has image/video assets, loads them as GPU textures.
-    /// If there is no shader, uses either a texture sampler or a no-shade fallback.
-    ///
-    /// On texture or shader errors the renderer switches to a fallback error
-    /// image (rendered via `font8x8`) instead of propagating the error.
-    pub fn load_shade(
+    pub fn load_phase(
         &mut self,
-        pkg: LiveShadePackage,
+        pkg: Arc<LiveShadePackage>,
+        phase: ShadePhase,
+        precompiled_wgsl: Option<&str>,
         shade_path: Option<&str>,
     ) -> Result<ShadeLoadOutcome> {
-        let pkg = Arc::new(pkg);
+        let state = match phase {
+            ShadePhase::Load => pkg.config.states.load.as_ref(),
+            ShadePhase::Active => pkg.config.states.active.as_ref(),
+            ShadePhase::Unload => pkg.config.states.unload.as_ref(),
+        }
+        .with_context(|| format!("State {:?} is not defined in config.toml", phase))?;
 
         // Reset texture state
         self.textures.clear();
@@ -417,7 +417,7 @@ impl Renderer {
         self.buffer_passes.clear();
 
         // Load all textures from package config
-        let tex_failures = self.load_package_textures(&pkg)?;
+        let tex_failures = self.load_package_textures(&pkg, &state.textures)?;
 
         // If any *required* textures failed, switch to fallback error display.
         if !tex_failures.is_empty() {
@@ -436,43 +436,55 @@ impl Renderer {
 
         // Initialize custom uniforms (creates storage buffer + rebuilds BGL0).
         // Must happen BEFORE shader compilation so GLSL referencing binding=1 works.
-        self.init_custom_uniforms(&pkg.config)?;
+        self.init_custom_uniforms(&state.uniforms)?;
 
-        match &pkg.shader_source {
-            Some(glsl_source) => {
+        match &state.shader {
+            Some(shader_path) => {
+                let shader_bytes = pkg
+                    .read_asset(shader_path)
+                    .with_context(|| format!("Missing phase shader asset: {}", shader_path))?;
+                let glsl_source = String::from_utf8(shader_bytes).with_context(|| {
+                    format!("Phase shader '{}' is not valid UTF-8", shader_path)
+                })?;
                 info!(
                     "Compiling shade shader ({} bytes GLSL)...",
                     glsl_source.len()
                 );
 
-                let wgsl_source = match glsl_to_wgsl(glsl_source) {
-                    Ok(wgsl) => wgsl,
-                    Err(e) => {
-                        for (i, line) in glsl_source.lines().enumerate() {
-                            log::debug!("  {:>4}: {}", i + 1, line);
+                let wgsl_source = match precompiled_wgsl {
+                    Some(src) => src.to_string(),
+                    None => match glsl_to_wgsl(&glsl_source) {
+                        Ok(wgsl) => wgsl,
+                        Err(e) => {
+                            for (i, line) in glsl_source.lines().enumerate() {
+                                log::debug!("  {:>4}: {}", i + 1, line);
+                            }
+                            let error_msg = format!("{:#}", e);
+                            let display_path = shade_path
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| pkg.config.meta.name.clone());
+                            let paths = vec![display_path];
+                            self.switch_to_fallback_error(
+                                |p, w, h| fallback::render_load_error(&error_msg, p, w, h),
+                                &paths,
+                            )?;
+                            info!(
+                                "Shade '{}' shader failed to compile — showing fallback",
+                                pkg.config.meta.name,
+                            );
+                            self.active_package = Some(pkg);
+                            return Ok(ShadeLoadOutcome::CompileError(error_msg));
                         }
-                        let error_msg = format!("{:#}", e);
-                        let display_path = shade_path
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| pkg.config.meta.name.clone());
-                        let paths = vec![display_path];
-                        self.switch_to_fallback_error(
-                            |p, w, h| fallback::render_load_error(&error_msg, p, w, h),
-                            &paths,
-                        )?;
-                        info!(
-                            "Shade '{}' shader failed to compile — showing fallback",
-                            pkg.config.meta.name,
-                        );
-                        self.active_package = Some(pkg);
-                        return Ok(ShadeLoadOutcome::CompileError(error_msg));
-                    }
+                    },
                 };
 
-                info!(
-                    "GLSL→WGSL translation successful ({} bytes WGSL)",
-                    wgsl_source.len()
-                );
+                if precompiled_wgsl.is_none() {
+                    info!(
+                        "GLSL→WGSL translation successful ({} bytes WGSL)",
+                        wgsl_source.len()
+                    );
+                }
+
                 self.rebuild_pipeline_with_frag(&wgsl_source)?;
                 self.current_frag_wgsl = wgsl_source;
             }
@@ -495,8 +507,9 @@ impl Renderer {
         }
 
         info!(
-            "Shade package '{}' loaded successfully ({} textures)",
+            "Shade package '{}' phase {:?} loaded successfully ({} textures)",
             pkg.config.meta.name,
+            phase,
             self.textures.len()
         );
         self.active_package = Some(pkg);
@@ -569,17 +582,14 @@ impl Renderer {
     ///
     /// Called after loading a shade package. Maps uniform names from config
     /// to sequential indices in a storage buffer.
-    pub fn init_custom_uniforms(
-        &mut self,
-        config: &kroma_shared::types::ShadeConfig,
-    ) -> Result<()> {
+    pub fn init_custom_uniforms(&mut self, uniforms: &IndexMap<String, UniformDef>) -> Result<()> {
         let device = self.gpu.device.as_ref().context("GPU not initialised")?;
 
         // Map uniform names to indices
         self.custom_uniform_indices.clear();
         self.custom_uniform_data = vec![0.0; MAX_CUSTOM_UNIFORMS];
 
-        for (idx, (name, def)) in config.uniforms.iter().enumerate() {
+        for (idx, (name, def)) in uniforms.iter().enumerate() {
             if idx >= MAX_CUSTOM_UNIFORMS {
                 warn!(
                     "Maximum {} custom uniform slots reached — ignoring '{}'",
@@ -779,6 +789,7 @@ impl Renderer {
     fn load_package_textures(
         &mut self,
         pkg: &Arc<LiveShadePackage>,
+        textures: &IndexMap<String, TextureDef>,
     ) -> Result<Vec<TextureLoadFailure>> {
         let device = self
             .gpu
@@ -806,7 +817,7 @@ impl Renderer {
         let mut required_failures: Vec<TextureLoadFailure> = Vec::new();
 
         // Collect texture defs sorted by binding index
-        let mut tex_defs: Vec<_> = pkg.config.textures.iter().collect();
+        let mut tex_defs: Vec<_> = textures.iter().collect();
         tex_defs.sort_by_key(|(_, def)| def.binding.unwrap_or(u32::MAX));
 
         for (name, def) in &tex_defs {

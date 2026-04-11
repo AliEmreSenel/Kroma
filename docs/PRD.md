@@ -45,8 +45,7 @@ Command-line tool for package lifecycle and daemon control:
 1. **Import** — Convert Shadertoy shaders into `.shade` packages
 2. **Pack** — Build v2 `.shade` containers from project folders
 3. **Inspect** — Verify, list, and debug container structure/chunks
-4. **Migrate** — Convert legacy ZIP `.shade` to v2 format
-5. **IPC Control** — Load, pause, resume, reload, and shutdown daemon
+4. **IPC Control** — Load, pause, resume, reload, and shutdown daemon
 
 ## 4. Shader Translation Pipeline
 
@@ -66,7 +65,20 @@ Runtime format is `.shade` v2 (chunked container):
 4. Per-entry compression policy (`auto|none|zstd|lz4`) with optional level.
 5. Deterministic packaging order from config declaration order.
 
-Legacy ZIP `.shade` files are migration-only input via `kroma migrate` and are not runtime-loadable.
+### 5.3 Runtime State Lifecycle
+
+Runtime shader config is defined in `config.toml` under fixed keys:
+
+1. `states.load` (optional one-shot)
+2. `states.active` (optional loop)
+3. `states.unload` (optional one-shot)
+
+Each phase contains full shader structure (`shader`, `uniforms`, `textures`, `buffers`) plus `length`.
+
+1. `active.length = 0` allows immediate interrupt to unload.
+2. `active.length > 0` allows unload only on future loop boundaries.
+3. Phase-local time/frame counters reset when entering a new phase.
+4. After the last defined phase completes, daemon holds the final frame.
 
 ### 5.1 Embedded Video Rules
 
@@ -95,11 +107,26 @@ Legacy ZIP `.shade` files are migration-only input via `kroma migrate` and are n
 - human text
 - JSON
 5. Chunk debug depth supports levels `1..4`.
-6. Legacy ZIP `.shade` is rejected by inspect.
 
 ## 6. IPC Protocol
 
-Newline-delimited JSON. Commands: LoadShade, SetUniform, Pause, Resume, Reload, LiveReload (returns CompileResult), StatusQuery, Shutdown.
+Newline-delimited JSON.
+
+Commands include:
+
+1. `LoadShade { path, force }`
+2. `UnloadShade`
+3. `SetUniform`
+4. `Pause`, `Resume`, `Reload`, `LiveReload`, `StatusQuery`, `Shutdown`
+
+Status payload includes lifecycle telemetry:
+
+1. `current_phase` (`load|active|unload|terminal|none`)
+2. `pending_request_path`
+3. `wait_reason` (`waiting_active_boundary|running_unload|running_load|idle`)
+
+Daemon may return `LoadRejected { code, message }` for lifecycle policy rejections
+(for example while waiting for active loop boundary and `force=false`).
 
 ## 7. Implementation Status
 
@@ -111,7 +138,7 @@ Newline-delimited JSON. Commands: LoadShade, SetUniform, Pause, Resume, Reload, 
 - Shadertoy import/translation
 - IPC client/server
 - Audio capture (desktop loopback)
-- Shade package tooling (pack, inspect, migrate)
+- Shade package tooling (pack, inspect)
 
 ### In Progress 🔧
 - GLSL ↔ Node sync

@@ -1,6 +1,8 @@
 //! Integration tests for the shared crate.
 
-use kroma_shared::ipc::{DaemonCommand, DaemonEvent, UniformValue};
+use kroma_shared::ipc::{
+    DaemonCommand, DaemonEvent, DaemonPhase, DaemonWaitReason, LoadRejectCode, UniformValue,
+};
 use kroma_shared::translator;
 use kroma_shared::types::{ShadeConfig, ShaderUniforms, SystemStats};
 
@@ -12,12 +14,14 @@ use kroma_shared::types::{ShadeConfig, ShaderUniforms, SystemStats};
 fn daemon_command_load_roundtrip() {
     let cmd = DaemonCommand::LoadShade {
         path: "/home/user/my_shader.shade".into(),
+        force: false,
     };
     let json = serde_json::to_string(&cmd).unwrap();
     let deserialized: DaemonCommand = serde_json::from_str(&json).unwrap();
     match deserialized {
-        DaemonCommand::LoadShade { path } => {
+        DaemonCommand::LoadShade { path, force } => {
             assert_eq!(path, "/home/user/my_shader.shade");
+            assert!(!force);
         }
         _ => panic!("Expected LoadShade"),
     }
@@ -48,6 +52,9 @@ fn daemon_event_status_roundtrip() {
         fps: 59.8,
         paused: false,
         loaded_shade: Some("Cyber Rain".into()),
+        current_phase: DaemonPhase::Active,
+        pending_request_path: None,
+        wait_reason: DaemonWaitReason::Idle,
     };
     let json = serde_json::to_string(&event).unwrap();
     let deserialized: DaemonEvent = serde_json::from_str(&json).unwrap();
@@ -56,12 +63,36 @@ fn daemon_event_status_roundtrip() {
             fps,
             paused,
             loaded_shade,
+            current_phase,
+            pending_request_path,
+            wait_reason,
         } => {
             assert!((fps - 59.8).abs() < 0.01);
             assert!(!paused);
             assert_eq!(loaded_shade.unwrap(), "Cyber Rain");
+            assert_eq!(current_phase, DaemonPhase::Active);
+            assert!(pending_request_path.is_none());
+            assert_eq!(wait_reason, DaemonWaitReason::Idle);
         }
         _ => panic!("Expected Status"),
+    }
+}
+
+#[test]
+fn daemon_event_load_rejected_roundtrip() {
+    let event = DaemonEvent::LoadRejected {
+        code: LoadRejectCode::BusyRunningUnload,
+        message: "unload phase is running".into(),
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let deserialized: DaemonEvent = serde_json::from_str(&json).unwrap();
+    match deserialized {
+        DaemonEvent::LoadRejected { code, message } => {
+            assert_eq!(code, LoadRejectCode::BusyRunningUnload);
+            assert_eq!(message, "unload phase is running");
+        }
+        _ => panic!("Expected LoadRejected"),
     }
 }
 
@@ -117,14 +148,14 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 }
 
 #[test]
-fn translator_handles_legacy_iglobaltime() {
+fn translator_handles_iglobaltime_alias() {
     let src = r#"
 void mainImage(out vec4 fragColor, in vec2 fragCoord) {
     float t = iGlobalTime;
     fragColor = vec4(sin(t), 0.0, 0.0, 1.0);
 }
 "#;
-    let result = translator::translate(src, "Legacy", "Author");
+    let result = translator::translate(src, "Alias", "Author");
     assert!(result.shader_source.contains("u_time"));
     assert!(!result.shader_source.contains("iGlobalTime"));
 }
@@ -157,9 +188,15 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
             .shader_source
             .contains("sampler2D(kroma_tex_2, kroma_samp_2)")
     );
-    assert!(result.config.textures.contains_key("channel0"));
-    assert!(result.config.textures.contains_key("channel1"));
-    assert!(result.config.textures.contains_key("channel2"));
+    let active = result
+        .config
+        .states
+        .active
+        .as_ref()
+        .expect("active state must exist");
+    assert!(active.textures.contains_key("channel0"));
+    assert!(active.textures.contains_key("channel1"));
+    assert!(active.textures.contains_key("channel2"));
 }
 
 // -----------------------------------------------------------------------
@@ -174,20 +211,24 @@ name = "Test Wallpaper"
 author = "Tester"
 version = "2.0"
 
-[uniforms]
+[states.active]
+length = 0.0
+
+[states.active.uniforms]
 speed = { type = "float", min = 0.1, max = 5.0, default = 1.5 }
 enabled = { type = "bool", default = true }
 
-[textures]
+[states.active.textures]
 channel0 = { type = "video", source = "assets/loop.mp4", loop = true }
 "#;
     let config: ShadeConfig = toml::from_str(toml_str).unwrap();
+    let active = config.states.active.as_ref().unwrap();
     assert_eq!(config.meta.name, "Test Wallpaper");
     assert_eq!(config.meta.version, "2.0");
-    assert!(config.uniforms.contains_key("speed"));
-    assert!(config.uniforms.contains_key("enabled"));
-    assert!(config.textures.contains_key("channel0"));
-    assert!(config.textures["channel0"].looping);
+    assert!(active.uniforms.contains_key("speed"));
+    assert!(active.uniforms.contains_key("enabled"));
+    assert!(active.textures.contains_key("channel0"));
+    assert!(active.textures["channel0"].looping);
 }
 
 #[test]
@@ -197,19 +238,29 @@ fn parse_shader_texture_t_minus_one_input() {
 name = "Feedback"
 author = "Tester"
 
-[textures.main]
+[states.active]
+length = 0.0
+
+[states.active.textures.main]
 type = "shader"
 shader = "assets/main.glsl"
 width = 512
 height = 512
 
-[textures.main.textures.history]
+[states.active.textures.main.textures.history]
 type = "image"
 input = "t-1"
 "#;
 
     let config: ShadeConfig = toml::from_str(toml_str).unwrap();
-    let main_tex = config.textures.get("main").unwrap();
+    let main_tex = config
+        .states
+        .active
+        .as_ref()
+        .unwrap()
+        .textures
+        .get("main")
+        .unwrap();
     let history = main_tex.textures.get("history").unwrap();
 
     assert_eq!(history.input.as_deref(), Some("t-1"));
@@ -222,32 +273,42 @@ fn parse_slideshow_sources_with_shader_entries() {
 name = "Slideshow Shader Mix"
 author = "Tester"
 
-[textures.wallpaper]
+[states.active]
+length = 0.0
+
+[states.active.textures.wallpaper]
 type = "slideshow"
 interval = 5.0
 
-[[textures.wallpaper.sources]]
+[[states.active.textures.wallpaper.sources]]
 type = "image"
 source = "assets/base.png"
 
-[[textures.wallpaper.sources]]
+[[states.active.textures.wallpaper.sources]]
 type = "shader"
 shader = "assets/fx.frag"
 width = 1280
 height = 720
 
-[textures.wallpaper.sources.textures.history]
+[states.active.textures.wallpaper.sources.textures.history]
 type = "image"
 input = "t-1"
 
-[textures.wallpaper.sources.textures.motion]
+[states.active.textures.wallpaper.sources.textures.motion]
 type = "video"
 source = "assets/motion.mp4"
 loop = true
 "#;
 
     let config: ShadeConfig = toml::from_str(toml_str).unwrap();
-    let slideshow = config.textures.get("wallpaper").unwrap();
+    let slideshow = config
+        .states
+        .active
+        .as_ref()
+        .unwrap()
+        .textures
+        .get("wallpaper")
+        .unwrap();
 
     assert_eq!(slideshow.sources.len(), 2);
     assert_eq!(slideshow.sources[1].ty.as_str(), "shader");
@@ -265,12 +326,15 @@ fn parse_noise_texture_with_and_without_seed() {
 name = "Noise"
 author = "Tester"
 
-[textures.base]
+[states.active]
+length = 0.0
+
+[states.active.textures.base]
 type = "noise"
 width = 320
 height = 180
 
-[textures.detail]
+[states.active.textures.detail]
 type = "noise"
 seed = 1337
 width = 320
@@ -278,8 +342,9 @@ height = 180
 "#;
 
     let config: ShadeConfig = toml::from_str(toml_str).unwrap();
-    let base = config.textures.get("base").unwrap();
-    let detail = config.textures.get("detail").unwrap();
+    let active = config.states.active.as_ref().unwrap();
+    let base = active.textures.get("base").unwrap();
+    let detail = active.textures.get("detail").unwrap();
 
     assert_eq!(base.ty.as_str(), "noise");
     assert_eq!(detail.ty.as_str(), "noise");

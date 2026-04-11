@@ -1,8 +1,7 @@
 //! Shadertoy importer — reads a GLSL file or downloads from Shadertoy API
 //! and produces a `.shade` package.
 
-use std::collections::{HashMap, HashSet};
-use std::io::Read;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -13,19 +12,13 @@ use kroma_shared::compression::{
 };
 use kroma_shared::shade::{CompressionPolicy, LiveShadePackage};
 use kroma_shared::translator;
-use kroma_shared::types::{ShadeConfig, TextureDef, TextureType};
+use kroma_shared::types::{ShadeConfig, ShadeStateDef, TextureDef, TextureType};
 
 #[derive(Debug, Clone)]
 pub struct PackOptions {
     pub default_codec: String,
     pub default_level: String,
     pub entry_compression: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct MigrationReport {
-    pub embedded_assets: usize,
-    pub warnings: Vec<String>,
 }
 
 impl Default for PackOptions {
@@ -52,7 +45,7 @@ pub fn import_shadertoy_file(glsl_path: &Path, name: &str, author: &str) -> Resu
     }
 
     let mut package = LiveShadePackage::new_empty(result.config);
-    package.shader_source = Some(result.shader_source);
+    package.add_asset("shader.frag".to_string(), result.shader_source.into_bytes());
 
     let output_path = glsl_path.with_extension("shade");
     package
@@ -72,8 +65,7 @@ pub fn import_shadertoy_file(glsl_path: &Path, name: &str, author: &str) -> Resu
 ///
 /// Expected layout:
 /// - `config.toml` (required)
-/// - `shader.frag` (optional)
-/// - only files referenced by `config.toml` are embedded as assets
+/// - files referenced by state blocks are embedded as assets
 pub fn pack_folder_to_shade(
     folder: &Path,
     output: Option<&Path>,
@@ -93,14 +85,11 @@ pub fn pack_folder_to_shade(
     let config: ShadeConfig =
         toml::from_str(&config_str).with_context(|| "Failed to parse config.toml")?;
 
-    let mut package = LiveShadePackage::new_empty(config);
-
-    let shader_path = folder.join("shader.frag");
-    if shader_path.exists() {
-        let shader = std::fs::read_to_string(&shader_path)
-            .with_context(|| format!("Failed to read shader.frag: {}", shader_path.display()))?;
-        package.shader_source = Some(shader);
+    if !config.states.has_any() {
+        anyhow::bail!("config.toml does not define any [states.*] blocks");
     }
+
+    let mut package = LiveShadePackage::new_empty(config);
 
     let refs = collect_referenced_files_in_order(&package.config);
     let mut required_missing = Vec::new();
@@ -143,9 +132,6 @@ pub fn pack_folder_to_shade(
 
     if let Some(default_policy) = parse_default_policy(options)? {
         package.set_entry_compression("config.toml", default_policy.clone());
-        if package.shader_source.is_some() {
-            package.set_entry_compression("shader.frag", default_policy.clone());
-        }
         for rf in &refs {
             if Path::new(&rf.path).is_absolute() {
                 continue;
@@ -180,15 +166,36 @@ fn collect_referenced_files_in_order(config: &ShadeConfig) -> Vec<ReferencedFile
     let mut ordered = Vec::<ReferencedFile>::new();
     let mut first_index = HashMap::<String, usize>::new();
 
-    for texture in config.textures.values() {
-        collect_texture_refs(texture, true, &mut ordered, &mut first_index);
-    }
-
-    for buffer in config.buffers.values() {
-        push_ref(&buffer.shader, true, &mut ordered, &mut first_index);
+    for state in [
+        config.states.load.as_ref(),
+        config.states.active.as_ref(),
+        config.states.unload.as_ref(),
+    ] {
+        let Some(state) = state else {
+            continue;
+        };
+        collect_state_refs(state, &mut ordered, &mut first_index);
     }
 
     ordered
+}
+
+fn collect_state_refs(
+    state: &ShadeStateDef,
+    ordered: &mut Vec<ReferencedFile>,
+    first_index: &mut HashMap<String, usize>,
+) {
+    if let Some(shader) = &state.shader {
+        push_ref(shader, true, ordered, first_index);
+    }
+
+    for texture in state.textures.values() {
+        collect_texture_refs(texture, true, ordered, first_index);
+    }
+
+    for buffer in state.buffers.values() {
+        push_ref(&buffer.shader, true, ordered, first_index);
+    }
 }
 
 fn collect_texture_refs(
@@ -243,142 +250,12 @@ fn push_ref(
     first_index.insert(normalized, idx);
 }
 
-pub fn migrate_legacy_zip_to_v2_with_report(
-    input: &Path,
-    output: Option<&Path>,
-) -> Result<(PathBuf, MigrationReport)> {
-    let file = std::fs::File::open(input)
-        .with_context(|| format!("Failed to open legacy .shade: {}", input.display()))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .with_context(|| "Input is not a valid legacy ZIP .shade package")?;
-
-    let config: ShadeConfig = {
-        let mut cfg = zip
-            .by_name("config.toml")
-            .with_context(|| "Legacy package is missing config.toml")?;
-        let mut config_str = String::new();
-        cfg.read_to_string(&mut config_str)?;
-        toml::from_str(&config_str).with_context(|| "Failed to parse legacy config.toml")?
-    };
-
-    let mut package = LiveShadePackage::new_empty(config);
-
-    if let Ok(mut shader_entry) = zip.by_name("shader.frag") {
-        let mut shader = String::new();
-        shader_entry
-            .read_to_string(&mut shader)
-            .with_context(|| "Failed to read legacy shader.frag")?;
-        package.shader_source = Some(shader);
-    }
-
-    for preview_name in ["preview.jpg", "preview.png", "preview.webp"] {
-        if let Ok(mut p) = zip.by_name(preview_name) {
-            let mut bytes = Vec::new();
-            p.read_to_end(&mut bytes)?;
-            package.preview = Some(bytes);
-            break;
-        }
-    }
-
-    let mut embedded_assets = 0usize;
-    for i in 0..zip.len() {
-        let mut entry = zip.by_index(i)?;
-        if entry.is_dir() {
-            continue;
-        }
-        let name = entry.name().to_string();
-        if name == "config.toml"
-            || name == "shader.frag"
-            || name == "preview.jpg"
-            || name == "preview.png"
-            || name == "preview.webp"
-        {
-            continue;
-        }
-
-        let mut data = Vec::new();
-        entry.read_to_end(&mut data)?;
-        package.add_asset(name, data);
-        embedded_assets += 1;
-    }
-
-    let warnings = unresolved_reference_warnings_after_migration(&package.config, &package);
-
-    let output_path = output.map(|p| p.to_path_buf()).unwrap_or_else(|| {
-        let stem = input
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("migrated");
-        input.with_file_name(format!("{}_v2.shade", stem))
-    });
-    package
-        .save(&output_path)
-        .with_context(|| format!("Failed to write v2 .shade: {}", output_path.display()))?;
-    Ok((
-        output_path,
-        MigrationReport {
-            embedded_assets,
-            warnings,
-        },
-    ))
-}
-
 fn parse_default_policy(options: &PackOptions) -> Result<Option<CompressionPolicy>> {
     parse_default_compression_policy(&options.default_codec, &options.default_level)
 }
 
 fn parse_entry_override(spec: &str) -> Result<(String, CompressionPolicy)> {
     parse_entry_compression_override(spec)
-}
-
-fn unresolved_reference_warnings_after_migration(
-    config: &ShadeConfig,
-    package: &LiveShadePackage,
-) -> Vec<String> {
-    let refs = collect_referenced_files_in_order(config);
-    let mut embedded = HashSet::new();
-    let mut warnings = Vec::new();
-    for asset in package.asset_entries() {
-        embedded.insert(asset.name.replace('\\', "/"));
-    }
-    if package.shader_source.is_some() {
-        embedded.insert("shader.frag".to_string());
-    }
-
-    for rf in refs {
-        if Path::new(&rf.path).is_absolute() {
-            if rf.required {
-                warnings.push(format!(
-                    "Migration kept required absolute path reference '{}' (not embedded)",
-                    rf.path
-                ));
-            } else {
-                warnings.push(format!(
-                    "Migration kept optional absolute path reference '{}' (not embedded)",
-                    rf.path
-                ));
-            }
-            continue;
-        }
-
-        if embedded.contains(&rf.path) {
-            continue;
-        }
-
-        if rf.required {
-            warnings.push(format!(
-                "Migration output is missing required referenced file '{}' (reference kept)",
-                rf.path
-            ));
-        } else {
-            warnings.push(format!(
-                "Migration output is missing optional referenced file '{}'",
-                rf.path
-            ));
-        }
-    }
-
-    warnings
 }
 
 #[cfg(test)]
@@ -396,17 +273,28 @@ mod pack_tests {
                 tags: Vec::new(),
             },
             rendering: RenderingConfig::default(),
-            uniforms: Default::default(),
-            textures: Default::default(),
-            buffers: Default::default(),
+            states: Default::default(),
         }
     }
 
     #[test]
     fn referenced_files_keep_first_order_and_required_upgrade() {
         let mut cfg = base_config();
+        cfg.states.active = Some(ShadeStateDef {
+            length: 0.0,
+            shader: None,
+            uniforms: Default::default(),
+            textures: Default::default(),
+            buffers: Default::default(),
+        });
 
-        cfg.textures.insert(
+        let active = cfg
+            .states
+            .active
+            .as_mut()
+            .expect("active state should exist");
+
+        active.textures.insert(
             "a".into(),
             TextureDef {
                 ty: TextureType::Image,
@@ -432,7 +320,7 @@ mod pack_tests {
             },
         );
 
-        cfg.textures.insert(
+        active.textures.insert(
             "b".into(),
             TextureDef {
                 ty: TextureType::Image,
@@ -458,7 +346,7 @@ mod pack_tests {
             },
         );
 
-        cfg.buffers.insert(
+        active.buffers.insert(
             "A".into(),
             BufferDef {
                 shader: "buffers/a.frag".into(),
@@ -498,6 +386,62 @@ mod pack_tests {
             entry_compression: Vec::new(),
         };
         assert!(parse_default_policy(&opts).is_err());
+    }
+
+    #[test]
+    fn referenced_files_include_state_phase_assets() {
+        let mut cfg = base_config();
+        cfg.states.active = Some(ShadeStateDef {
+            length: 4.0,
+            shader: Some("assets/shaders/active.frag".into()),
+            uniforms: Default::default(),
+            textures: Default::default(),
+            buffers: Default::default(),
+        });
+
+        if let Some(active) = cfg.states.active.as_mut() {
+            active.textures.insert(
+                "channel0".into(),
+                TextureDef {
+                    ty: TextureType::Image,
+                    source: Some("assets/img/background.png".into()),
+                    seed: None,
+                    input: None,
+                    sources: Vec::new(),
+                    looping: true,
+                    filter: Default::default(),
+                    wrap: Default::default(),
+                    binding: None,
+                    font_size: None,
+                    interval: None,
+                    shuffle: false,
+                    fft_bands: None,
+                    hot_reload: false,
+                    optional: false,
+                    shader: None,
+                    width: None,
+                    height: None,
+                    textures: Default::default(),
+                    uniforms: Default::default(),
+                },
+            );
+
+            active.buffers.insert(
+                "A".into(),
+                BufferDef {
+                    shader: "assets/buffers/a.frag".into(),
+                    inputs: Vec::new(),
+                    feedback: false,
+                },
+            );
+        }
+
+        let refs = collect_referenced_files_in_order(&cfg);
+        assert_eq!(refs.len(), 3);
+        assert_eq!(refs[0].path, "assets/shaders/active.frag");
+        assert_eq!(refs[1].path, "assets/img/background.png");
+        assert_eq!(refs[2].path, "assets/buffers/a.frag");
+        assert!(refs.iter().all(|r| r.required));
     }
 }
 
@@ -624,7 +568,7 @@ pub async fn download_shadertoy(
     }
 
     let mut package = LiveShadePackage::new_empty(result.config);
-    package.shader_source = Some(result.shader_source);
+    package.add_asset("shader.frag".to_string(), result.shader_source.into_bytes());
 
     let shade_path = output_dir.join(format!("{}.shade", safe_name));
     package

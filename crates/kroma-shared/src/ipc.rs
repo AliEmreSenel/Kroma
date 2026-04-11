@@ -7,6 +7,42 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::mpsc};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonPhase {
+    Load,
+    Active,
+    Unload,
+    Terminal,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonWaitReason {
+    WaitingActiveBoundary,
+    RunningUnload,
+    RunningLoad,
+    Idle,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadRejectCode {
+    BusyWaitingBoundary,
+    BusyRunningUnload,
+    BusyRunningLoad,
+    InvalidStateDefinition,
+}
+
+fn default_phase_none() -> DaemonPhase {
+    DaemonPhase::None
+}
+
+fn default_wait_reason_idle() -> DaemonWaitReason {
+    DaemonWaitReason::Idle
+}
+
 /// Returns the path to the IPC socket.
 pub fn socket_path() -> PathBuf {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_string());
@@ -32,7 +68,14 @@ pub fn maybe_send<T: Send + Sync + 'static>(
 #[serde(tag = "type")]
 pub enum DaemonCommand {
     /// Load a .shade package file.
-    LoadShade { path: String },
+    LoadShade {
+        path: String,
+        #[serde(default)]
+        force: bool,
+    },
+
+    /// Move the currently loaded shade into unload flow.
+    UnloadShade,
 
     /// Update a uniform value at runtime.
     SetUniform { name: String, value: UniformValue },
@@ -110,11 +153,23 @@ pub enum DaemonEvent {
     /// An error occurred.
     Error { message: String },
 
+    /// A load request was rejected by lifecycle policy.
+    LoadRejected {
+        code: LoadRejectCode,
+        message: String,
+    },
+
     /// Current status snapshot.
     Status {
         fps: f32,
         paused: bool,
         loaded_shade: Option<String>,
+        #[serde(default = "default_phase_none")]
+        current_phase: DaemonPhase,
+        #[serde(default)]
+        pending_request_path: Option<String>,
+        #[serde(default = "default_wait_reason_idle")]
+        wait_reason: DaemonWaitReason,
     },
 
     /// Result of a shader compilation attempt (from LiveReload or LoadShade).

@@ -49,7 +49,6 @@ x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr"] }
 tokio = { version = "1", features = ["full"] }
 
 # .shade packaging
-zip = { version = "8", features = ["zstd"] }
 memmap2 = "0.9"
 zstd = "0.13"
 lz4_flex = "0.13"

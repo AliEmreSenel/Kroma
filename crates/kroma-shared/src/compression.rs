@@ -47,7 +47,10 @@ fn parse_policy(codec: &str, level: Option<&str>) -> Result<CompressionPolicy> {
 ///
 /// Returns `Ok(None)` when policy is `auto`, meaning package defaults should
 /// remain path/type-derived.
-pub fn parse_default_compression_policy(codec: &str, level: &str) -> Result<Option<CompressionPolicy>> {
+pub fn parse_default_compression_policy(
+    codec: &str,
+    level: &str,
+) -> Result<Option<CompressionPolicy>> {
     let policy = parse_policy(codec, Some(level))?;
     if matches!(policy, CompressionPolicy::Auto) {
         Ok(None)
@@ -85,9 +88,11 @@ mod tests {
 
     #[test]
     fn default_auto_returns_none() {
-        assert!(parse_default_compression_policy("auto", "auto")
-            .expect("auto policy")
-            .is_none());
+        assert!(
+            parse_default_compression_policy("auto", "auto")
+                .expect("auto policy")
+                .is_none()
+        );
     }
 
     #[test]

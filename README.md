@@ -63,6 +63,8 @@ cargo run -p kroma-cli -- import examples/shadertoy/plasma.glsl --name "Plasma" 
 
 ```bash
 kroma load /path/to/shader.shade
+kroma load /path/to/next.shade --force
+kroma unload
 kroma pause
 kroma resume
 kroma shutdown
@@ -81,12 +83,7 @@ systemctl --user enable --now kroma-daemon
 Kroma runtime loads v2 `.shade` packages only.
 
 - v2 uses a chunked container with strict magic/version validation.
-- Legacy ZIP `.shade` files are supported only via one-shot migration.
 - Embedded video assets are read as streamable chunk data (no full temp extraction path).
-
-```bash
-kroma migrate legacy.shade --output migrated.shade
-```
 
 Pack a folder to v2 `.shade`:
 
@@ -102,7 +99,7 @@ Compression controls:
 ```bash
 kroma pack ./my_shade --codec zstd --level 8
 kroma pack ./my_shade --entry-compression assets/video.mp4=none
-kroma pack ./my_shade --entry-compression shader.frag=zstd:12
+kroma pack ./my_shade --entry-compression assets/shaders/active.frag=zstd:12
 ```
 
 Inspect v2 `.shade` packages:
@@ -126,7 +123,6 @@ kroma inspect ./my_shade.shade dump-chunk assets/video.mp4 0 --decoded
 
 `kroma inspect` supports nested subcommands only, text/json output, and
 chunk-depth diagnostics from `--depth 1` through `--depth 4`.
-Legacy ZIP `.shade` input is rejected by inspect.
 
 Example `config.toml`:
 
@@ -136,11 +132,15 @@ name = "Cyber Rain"
 author = "Neo"
 version = "1.0"
 
-[uniforms]
+[states.active]
+length = 8.0
+shader = "assets/shaders/active.frag"
+
+[states.active.uniforms]
 speed = { type = "float", min = 0.1, max = 5.0, default = 1.0 }
 color_shift = { type = "bool", default = false }
 
-[textures]
+[states.active.textures]
 channel0 = { type = "video", source = "assets/rain_loop.mp4", loop = true, hot_reload = true }
 ```
 

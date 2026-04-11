@@ -121,17 +121,62 @@ impl ShaderUniforms {
 
 /// Root of a `.shade` package's `config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShadeConfig {
     pub meta: ShadeMeta,
     #[serde(default)]
     pub rendering: RenderingConfig,
+    /// Runtime state graph with fixed phase keys.
+    #[serde(default)]
+    pub states: ShadeStates,
+}
+
+/// Fixed runtime phase names for stateful shade playback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShadePhase {
+    Load,
+    Active,
+    Unload,
+}
+
+/// State blocks defined in `config.toml` under `[states]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShadeStates {
+    #[serde(default)]
+    pub load: Option<ShadeStateDef>,
+    #[serde(default)]
+    pub active: Option<ShadeStateDef>,
+    #[serde(default)]
+    pub unload: Option<ShadeStateDef>,
+}
+
+impl ShadeStates {
+    /// Returns true when at least one phase is defined.
+    pub fn has_any(&self) -> bool {
+        self.load.is_some() || self.active.is_some() || self.unload.is_some()
+    }
+}
+
+/// Full shader structure for one lifecycle phase.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShadeStateDef {
+    /// Fixed phase length in seconds.
+    ///
+    /// - `load` and `unload`: fixed one-shot duration.
+    /// - `active`: loop period. `0.0` means immediate interruptibility.
+    #[serde(default)]
+    pub length: f64,
+    /// Fragment shader source path relative to package root.
+    #[serde(default)]
+    pub shader: Option<String>,
+    /// Phase-local custom uniforms.
     #[serde(default)]
     pub uniforms: IndexMap<String, UniformDef>,
-    /// All texture channels — images, videos, fonts, slideshows, audio spectrum.
+    /// Phase-local textures.
     #[serde(default)]
     pub textures: IndexMap<String, TextureDef>,
-    /// Render buffer passes (multi-pass shaders, Shadertoy-style).
-    /// Keys are buffer names like "A", "B", "C", "D".
+    /// Phase-local render buffers.
     #[serde(default)]
     pub buffers: IndexMap<String, BufferDef>,
 }

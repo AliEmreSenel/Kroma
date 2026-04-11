@@ -242,7 +242,9 @@ pub(super) fn render_frame(state: &mut Renderer) -> Result<()> {
             return Ok(());
         }
         wgpu::CurrentSurfaceTexture::Validation => {
-            return Err(anyhow::anyhow!("Surface validation error while acquiring frame"));
+            return Err(anyhow::anyhow!(
+                "Surface validation error while acquiring frame"
+            ));
         }
     };
 

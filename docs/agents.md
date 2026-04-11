@@ -5,7 +5,7 @@
 ```
 kroma-shared/     — Types, traits, translator, shade package handling
 kroma-daemon/     — Headless renderer (wgpu, Wayland, X11, audio, IPC server)
-kroma-cli/        — Import, inspect, pack, migrate, and daemon IPC control
+kroma-cli/        — Import, inspect, pack, and daemon IPC control
 ```
 
 ## Key Design Decisions

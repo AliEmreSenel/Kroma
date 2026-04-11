@@ -12,7 +12,9 @@ use std::sync::LazyLock;
 use indexmap::IndexMap;
 use regex::Regex;
 
-use crate::types::{ShadeConfig, ShadeMeta, TextureDef, TextureType, UniformDef};
+use crate::types::{
+    ShadeConfig, ShadeMeta, ShadeStateDef, ShadeStates, TextureDef, TextureType, UniformDef,
+};
 
 /// Pre-compiled regex for a word-boundary match.
 fn word_regex(word: &str) -> Regex {
@@ -80,7 +82,7 @@ pub struct TranslationResult {
 /// These are simple 1:1 name replacements (same type or compatible).
 const UNIFORM_MAP: &[(&str, &str)] = &[
     ("iTime", "u_time"),
-    ("iGlobalTime", "u_time"), // legacy alias
+    ("iGlobalTime", "u_time"), // compatibility alias
     ("iTimeDelta", "u_delta_time"),
     ("iMouse", "u_mouse"),
 ];
@@ -120,10 +122,18 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
                     version: "1.0".to_string(),
                     tags: vec![],
                 },
-                textures: IndexMap::new(),
-                uniforms: IndexMap::new(),
+                states: ShadeStates {
+                    load: None,
+                    active: Some(ShadeStateDef {
+                        length: 0.0,
+                        shader: Some("shader.frag".to_string()),
+                        uniforms: IndexMap::new(),
+                        textures: IndexMap::new(),
+                        buffers: IndexMap::new(),
+                    }),
+                    unload: None,
+                },
                 rendering: Default::default(),
-                buffers: Default::default(),
             },
             warnings,
         };
@@ -149,7 +159,7 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
     // ------------------------------------------------------------------
     output = fix_mat_constructors(&output, &mut warnings);
 
-    // Replace legacy GLSL texture functions with GLSL 450 equivalents
+    // Replace older GLSL texture functions with GLSL 450 equivalents
     for (re, _new, old, new) in TEXTURE_FIX_REGEXES.iter() {
         if re.is_match(&output) {
             output = re.replace_all(&output, *new).to_string();
@@ -358,6 +368,17 @@ layout(location = 0) out vec4 kroma_out_color;
         );
     }
 
+    let mut active_uniforms = IndexMap::new();
+    active_uniforms.insert(
+        "speed".into(),
+        UniformDef {
+            ty: "float".into(),
+            min: Some(0.1),
+            max: Some(5.0),
+            default: Some(toml::Value::Float(1.0)),
+        },
+    );
+
     let config = ShadeConfig {
         meta: ShadeMeta {
             name: name.to_string(),
@@ -367,21 +388,17 @@ layout(location = 0) out vec4 kroma_out_color;
             tags: Vec::new(),
         },
         rendering: Default::default(),
-        uniforms: {
-            let mut m = IndexMap::new();
-            m.insert(
-                "speed".into(),
-                UniformDef {
-                    ty: "float".into(),
-                    min: Some(0.1),
-                    max: Some(5.0),
-                    default: Some(toml::Value::Float(1.0)),
-                },
-            );
-            m
+        states: ShadeStates {
+            load: None,
+            active: Some(ShadeStateDef {
+                length: 0.0,
+                shader: Some("shader.frag".to_string()),
+                uniforms: active_uniforms,
+                textures: textures.clone(),
+                buffers: Default::default(),
+            }),
+            unload: None,
         },
-        textures,
-        buffers: Default::default(),
     };
 
     TranslationResult {
@@ -439,7 +456,16 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 .shader_source
                 .contains("uniform sampler kroma_samp_0")
         );
-        assert!(result.config.textures.contains_key("channel0"));
+        assert!(
+            result
+                .config
+                .states
+                .active
+                .as_ref()
+                .expect("active state")
+                .textures
+                .contains_key("channel0")
+        );
     }
 
     #[test]

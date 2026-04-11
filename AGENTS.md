@@ -12,7 +12,7 @@ Kroma is a **Rust workspace** with the following crates:
 |---|---|---|
 | `kroma-shared` | Library | Core traits, types, IPC protocol, .shade format, shader translator |
 | `kroma-daemon` | Binary | Headless renderer — holds wgpu context, manages render loop & data aggregation |
-| `kroma-cli` | Binary | Import, pack, inspect, migrate, and daemon IPC control |
+| `kroma-cli` | Binary | Import, pack, inspect, and daemon IPC control |
 
 ## Core Principles
 
@@ -41,11 +41,15 @@ Kroma is a **Rust workspace** with the following crates:
 
 ## .shade Format
 
-A `.shade` file is a ZIP containing:
-- `shader.frag` — Kroma-compliant GLSL
-- `config.toml` — Metadata, uniforms, texture bindings
-- `preview.jpg` — Thumbnail
-- `assets/` — Video/image resources
+A `.shade` file is a v2 chunked container containing:
+- `config.toml` — Metadata plus `states.load|active|unload` definitions
+- optional `preview.jpg` — Thumbnail
+- `assets/` — Shader/image/video resources referenced by state blocks
+
+Runtime shader lifecycle is defined by fixed state keys:
+- `load` — optional one-shot phase (`length` seconds)
+- `active` — optional loop phase (`length` is loop period; `0` is immediate-interrupt)
+- `unload` — optional one-shot phase (`length` seconds)
 
 ## Coding Standards
 
@@ -61,6 +65,11 @@ A `.shade` file is a ZIP containing:
 ## IPC Protocol
 
 Daemon communication uses Unix domain sockets at `$XDG_RUNTIME_DIR/kroma.sock` with JSON-serialized messages.
+
+Lifecycle control commands include:
+- `LoadShade { path, force }`
+- `UnloadShade`
+- `StatusQuery` returning `current_phase`, `pending_request_path`, and `wait_reason`
 
 ## GUI Branch Note
 

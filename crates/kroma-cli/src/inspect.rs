@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -9,6 +7,7 @@ use serde::Serialize;
 use kroma_shared::shade::{
     ChunkDebugInfo, CompressionStats, LiveShadePackage, PackageMetadata, VerifyMode, VerifyReport,
 };
+use kroma_shared::types::{ShadeConfig, ShadeStateDef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InspectOutputFormat {
@@ -94,6 +93,15 @@ struct SummaryOutput {
     metadata: PackageMetadata,
     stats: CompressionStats,
     entry_count: usize,
+    phases: Vec<PhaseOutput>,
+}
+
+#[derive(Debug, Serialize)]
+struct PhaseOutput {
+    phase: String,
+    length: f64,
+    is_loop: bool,
+    shader: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +162,7 @@ fn cmd_summary(pkg: &LiveShadePackage, format: InspectOutputFormat) -> Result<()
     let metadata = pkg.package_metadata()?;
     let stats = pkg.compression_stats()?;
     let entries = pkg.entry_debug_infos()?;
+    let phases = collect_phase_outputs(&pkg.config);
 
     match format {
         InspectOutputFormat::Json => {
@@ -161,6 +170,7 @@ fn cmd_summary(pkg: &LiveShadePackage, format: InspectOutputFormat) -> Result<()
                 metadata,
                 stats,
                 entry_count: entries.len(),
+                phases,
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
@@ -191,6 +201,25 @@ fn cmd_summary(pkg: &LiveShadePackage, format: InspectOutputFormat) -> Result<()
                 "avg entropy       : {:.3} bits/byte",
                 stats.average_chunk_entropy_bits_per_byte
             );
+            if phases.is_empty() {
+                println!("states            : none");
+            } else {
+                println!("states            : {}", phases.len());
+                for phase in phases {
+                    let shader = phase.shader.unwrap_or_else(|| "<none>".to_string());
+                    if phase.is_loop {
+                        println!(
+                            "  - {:<8} loop_length={:.3}s shader={}",
+                            phase.phase, phase.length, shader
+                        );
+                    } else {
+                        println!(
+                            "  - {:<8} length={:.3}s shader={}",
+                            phase.phase, phase.length, shader
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -221,12 +250,39 @@ fn cmd_verify(
 
 fn cmd_list(pkg: &LiveShadePackage, format: InspectOutputFormat) -> Result<()> {
     let entries = pkg.entry_debug_infos()?;
+    let phases = collect_phase_outputs(&pkg.config);
 
     match format {
         InspectOutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&entries)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "phases": phases,
+                    "entries": entries,
+                }))?
+            );
         }
         InspectOutputFormat::Text => {
+            if phases.is_empty() {
+                println!("phases: none");
+            } else {
+                println!("phases:");
+                for phase in phases {
+                    let shader = phase.shader.unwrap_or_else(|| "<none>".to_string());
+                    if phase.is_loop {
+                        println!(
+                            "  {:<8} loop_length={:.3}s shader={}",
+                            phase.phase, phase.length, shader
+                        );
+                    } else {
+                        println!(
+                            "  {:<8} length={:.3}s shader={}",
+                            phase.phase, phase.length, shader
+                        );
+                    }
+                }
+            }
+            println!();
             println!(
                 "{:<36} {:<12} {:>11} {:>11} {:>8} {:>8} {:>8} {:>18}",
                 "path", "kind", "raw", "stored", "ratio", "chunks", "codec", "offset range"
@@ -248,6 +304,26 @@ fn cmd_list(pkg: &LiveShadePackage, format: InspectOutputFormat) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn collect_phase_outputs(config: &ShadeConfig) -> Vec<PhaseOutput> {
+    let mut out = Vec::new();
+    push_phase_output(&mut out, "load", config.states.load.as_ref());
+    push_phase_output(&mut out, "active", config.states.active.as_ref());
+    push_phase_output(&mut out, "unload", config.states.unload.as_ref());
+    out
+}
+
+fn push_phase_output(out: &mut Vec<PhaseOutput>, phase: &str, state: Option<&ShadeStateDef>) {
+    let Some(state) = state else {
+        return;
+    };
+    out.push(PhaseOutput {
+        phase: phase.to_string(),
+        length: state.length,
+        is_loop: phase == "active",
+        shader: state.shader.clone(),
+    });
 }
 
 fn cmd_chunks(pkg: &LiveShadePackage, depth: u8, format: InspectOutputFormat) -> Result<()> {
@@ -467,15 +543,6 @@ fn cmd_dump_chunk(
 }
 
 fn load_v2_package(path: &Path) -> Result<LiveShadePackage> {
-    let mut file =
-        File::open(path).with_context(|| format!("Failed to open package '{}'", path.display()))?;
-
-    let mut header = [0u8; 8];
-    let read = file.read(&mut header)?;
-    if read >= 4 && &header[0..4] == b"PK\x03\x04" {
-        anyhow::bail!("Unsupported legacy ZIP .shade package")
-    }
-
     LiveShadePackage::load(path).map_err(|err| {
         let msg = err.to_string();
         if msg.contains("bad magic") {

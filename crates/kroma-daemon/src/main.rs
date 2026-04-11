@@ -23,10 +23,15 @@ use anyhow::{Context, Result};
 use log::info;
 
 use kroma_shared::{
-    ipc::{CompileError, DaemonCommand, DaemonEvent, maybe_send},
+    ipc::{
+        CompileError, DaemonCommand, DaemonEvent, DaemonPhase, DaemonWaitReason, LoadRejectCode,
+        maybe_send,
+    },
     shade::LiveShadePackage,
     traits::DataProvider,
-    types::{ShadeConfig, ShadeMeta, TextureDef, TextureType},
+    types::{
+        ShadeConfig, ShadeMeta, ShadePhase, ShadeStateDef, ShadeStates, TextureDef, TextureType,
+    },
 };
 
 use crate::{
@@ -43,6 +48,49 @@ enum LoopControl {
     Shutdown,
 }
 
+#[derive(Default)]
+struct PhaseWgslCache {
+    load: Option<String>,
+    active: Option<String>,
+    unload: Option<String>,
+}
+
+struct RuntimeShade {
+    path: String,
+    package: Arc<LiveShadePackage>,
+    cache: PhaseWgslCache,
+}
+
+impl RuntimeShade {
+    fn state(&self, phase: ShadePhase) -> Option<&ShadeStateDef> {
+        match phase {
+            ShadePhase::Load => self.package.config.states.load.as_ref(),
+            ShadePhase::Active => self.package.config.states.active.as_ref(),
+            ShadePhase::Unload => self.package.config.states.unload.as_ref(),
+        }
+    }
+
+    fn wgsl(&self, phase: ShadePhase) -> Option<&str> {
+        match phase {
+            ShadePhase::Load => self.cache.load.as_deref(),
+            ShadePhase::Active => self.cache.active.as_deref(),
+            ShadePhase::Unload => self.cache.unload.as_deref(),
+        }
+    }
+
+    fn first_defined_phase(&self) -> Option<ShadePhase> {
+        if self.state(ShadePhase::Load).is_some() {
+            Some(ShadePhase::Load)
+        } else if self.state(ShadePhase::Active).is_some() {
+            Some(ShadePhase::Active)
+        } else if self.state(ShadePhase::Unload).is_some() {
+            Some(ShadePhase::Unload)
+        } else {
+            None
+        }
+    }
+}
+
 struct Daemon {
     config: config::DaemonConfig,
     backend: Backend,
@@ -52,10 +100,18 @@ struct Daemon {
     ipc_status: Arc<Mutex<ipc_server::DaemonStatus>>,
     preview_stream: Arc<Mutex<ipc_server::PreviewStreamState>>,
     _ipc_handle: JoinHandle<()>,
+    runtime_shade: Option<RuntimeShade>,
+    pending_shade: Option<RuntimeShade>,
+    unload_requested: bool,
     current_shade_path: Option<String>,
     start_time: Instant,
     frame: u32,
+    phase_elapsed: f64,
+    phase_frame: u32,
     paused: bool,
+    current_phase: DaemonPhase,
+    pending_request_path: Option<String>,
+    wait_reason: DaemonWaitReason,
     active_workspace_id: i64,
     last_frame_time: Instant,
     frame_budget: Duration,
@@ -95,36 +151,46 @@ impl Daemon {
                 tags: vec!["direct-media".into(), ty.as_str().into()],
             },
             rendering: Default::default(),
-            uniforms: Default::default(),
-            textures: Default::default(),
-            buffers: Default::default(),
+            states: ShadeStates {
+                load: None,
+                active: Some(ShadeStateDef {
+                    length: 0.0,
+                    shader: None,
+                    uniforms: Default::default(),
+                    textures: Default::default(),
+                    buffers: Default::default(),
+                }),
+                unload: None,
+            },
         };
 
-        config.textures.insert(
-            "iChannel0".into(),
-            TextureDef {
-                ty,
-                source: Some(path.to_string_lossy().to_string()),
-                seed: None,
-                input: None,
-                sources: Vec::new(),
-                looping: true,
-                filter: Default::default(),
-                wrap: Default::default(),
-                binding: Some(0),
-                font_size: None,
-                interval: None,
-                shuffle: false,
-                fft_bands: None,
-                hot_reload: true,
-                optional: false,
-                shader: None,
-                width: None,
-                height: None,
-                textures: Default::default(),
-                uniforms: Default::default(),
-            },
-        );
+        if let Some(active) = config.states.active.as_mut() {
+            active.textures.insert(
+                "iChannel0".into(),
+                TextureDef {
+                    ty,
+                    source: Some(path.to_string_lossy().to_string()),
+                    seed: None,
+                    input: None,
+                    sources: Vec::new(),
+                    looping: true,
+                    filter: Default::default(),
+                    wrap: Default::default(),
+                    binding: Some(0),
+                    font_size: None,
+                    interval: None,
+                    shuffle: false,
+                    fft_bands: None,
+                    hot_reload: true,
+                    optional: false,
+                    shader: None,
+                    width: None,
+                    height: None,
+                    textures: Default::default(),
+                    uniforms: Default::default(),
+                },
+            );
+        }
 
         Some(LiveShadePackage::new_empty(config))
     }
@@ -179,10 +245,18 @@ impl Daemon {
             ipc_status,
             preview_stream,
             _ipc_handle: ipc_handle,
+            runtime_shade: None,
+            pending_shade: None,
+            unload_requested: false,
             current_shade_path: None,
             start_time: Instant::now(),
             frame: 0,
+            phase_elapsed: 0.0,
+            phase_frame: 0,
             paused: false,
+            current_phase: DaemonPhase::None,
+            pending_request_path: None,
+            wait_reason: DaemonWaitReason::Idle,
             active_workspace_id: 1,
             last_frame_time: Instant::now(),
             fps_counter: 0,
@@ -191,7 +265,7 @@ impl Daemon {
 
         if let Some(shade_path) = daemon.config.current_shade.clone() {
             info!("Loading initial shade: {}", shade_path);
-            daemon.load_shade(&shade_path, None)?;
+            daemon.handle_load_command(&shade_path, true, None)?;
         } else {
             info!("No startup shade configured. Load a .shade file to start.");
             daemon.renderer.show_no_shade_fallback()?;
@@ -217,6 +291,7 @@ impl Daemon {
             }
 
             if self.paused {
+                self.last_frame_time = Instant::now();
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -275,14 +350,16 @@ impl Daemon {
                     info!("Shutdown requested");
                     return Ok(LoopControl::Shutdown);
                 }
-                DaemonCommand::LoadShade { path } => {
-                    info!("Loading shade package: {}", path);
-                    self.load_shade(&path, response_tx)?;
+                DaemonCommand::LoadShade { path, force } => {
+                    self.handle_load_command(&path, force, response_tx)?;
+                }
+                DaemonCommand::UnloadShade => {
+                    self.handle_unload_command()?;
                 }
                 DaemonCommand::Reload => {
                     if let Some(path) = self.current_shade_path.clone() {
                         info!("Reloading shade: {}", path);
-                        self.load_shade(&path, response_tx)?;
+                        self.handle_load_command(&path, true, response_tx)?;
                     } else {
                         log::warn!("No shade loaded to reload");
                         maybe_send(
@@ -373,109 +450,48 @@ impl Daemon {
         Ok(LoopControl::Continue)
     }
 
-    fn load_shade(&mut self, path: &str, tx: Option<mpsc::Sender<DaemonEvent>>) -> Result<()> {
-        let mut loaded_successfully = false;
-        let requested_path = Path::new(path);
+    fn handle_load_command(
+        &mut self,
+        path: &str,
+        force: bool,
+        tx: Option<mpsc::Sender<DaemonEvent>>,
+    ) -> Result<()> {
+        info!("Load request: path='{}' force={}", path, force);
 
-        let package_result = if requested_path.extension().and_then(|s| s.to_str()) == Some("shade")
-        {
-            LiveShadePackage::load(requested_path)
-        } else if let Some(pkg) = Self::package_from_media_path(requested_path) {
-            Ok(pkg)
-        } else {
-            anyhow::bail!(
-                "Unsupported input '{}'. Expected .shade package or direct image/video file",
-                path
-            )
-        };
-
-        match package_result {
-            Ok(pkg) => {
-                let pkg_name = pkg.config.meta.name.clone();
-                match self.renderer.load_shade(pkg, Some(path)) {
-                    Ok(ShadeLoadOutcome::Success) => {
-                        info!("Loaded: {}", pkg_name);
-                        loaded_successfully = true;
-                        maybe_send(
-                            tx,
-                            DaemonEvent::CompileResult {
-                                success: true,
-                                errors: vec![],
-                                warnings: vec![],
-                            },
-                        )?;
-                    }
-                    Ok(ShadeLoadOutcome::TextureError(failures)) => {
-                        let msgs: Vec<CompileError> = failures
-                            .iter()
-                            .map(|f| CompileError {
-                                message: format!(
-                                    "Required texture '{}' ({}): {}",
-                                    f.name, f.source, f.error
-                                ),
-                                line: None,
-                                column: None,
-                            })
-                            .collect();
-                        log::error!(
-                            "Shade '{}' loaded with {} texture error(s) — fallback displayed",
-                            pkg_name,
-                            msgs.len()
-                        );
-                        // Consider it "loaded" so the package stays active;
-                        // the daemon renders the fallback error image.
-                        loaded_successfully = true;
-                        maybe_send(
-                            tx,
-                            DaemonEvent::CompileResult {
-                                success: false,
-                                errors: msgs,
-                                warnings: vec![],
-                            },
-                        )?;
-                    }
-                    Ok(ShadeLoadOutcome::CompileError(msg)) => {
-                        log::error!(
-                            "Shade '{}' shader compile error — fallback displayed",
-                            pkg_name
-                        );
-                        loaded_successfully = true;
-                        maybe_send(
-                            tx,
-                            DaemonEvent::CompileResult {
-                                success: false,
-                                errors: vec![CompileError {
-                                    message: msg,
-                                    line: None,
-                                    column: None,
-                                }],
-                                warnings: vec![],
-                            },
-                        )?;
-                    }
-                    Err(e) => {
-                        log::error!("Failed to load shade '{}': {:#}", pkg_name, e);
-                        self.renderer
-                            .switch_to_load_error(path, &format!("{:#}", e))?;
-                        maybe_send(
-                            tx,
-                            DaemonEvent::CompileResult {
-                                success: false,
-                                errors: vec![CompileError {
-                                    message: e.to_string(),
-                                    line: None,
-                                    column: None,
-                                }],
-                                warnings: vec![],
-                            },
-                        )?;
-                    }
-                }
+        if !force {
+            if self.pending_shade.is_some() {
+                return self.send_load_reject(
+                    tx,
+                    LoadRejectCode::BusyWaitingBoundary,
+                    "load already queued",
+                );
             }
+            if self.current_phase == DaemonPhase::Load {
+                return self.send_load_reject(
+                    tx,
+                    LoadRejectCode::BusyRunningLoad,
+                    "load phase is running",
+                );
+            }
+            if self.current_phase == DaemonPhase::Unload {
+                return self.send_load_reject(
+                    tx,
+                    LoadRejectCode::BusyRunningUnload,
+                    "unload phase is running",
+                );
+            }
+        }
+
+        let prepared = match self.prepare_runtime_shade(path) {
+            Ok(runtime) => runtime,
             Err(e) => {
-                log::error!("Failed to load shade: {:#}", e);
+                let msg = e.to_string();
+                if msg.contains("states.") || msg.contains("No phase is defined in states") {
+                    return self.send_load_reject(tx, LoadRejectCode::InvalidStateDefinition, &msg);
+                }
                 self.renderer
                     .switch_to_load_error(path, &format!("{:#}", e))?;
+                self.current_phase = DaemonPhase::Terminal;
                 maybe_send(
                     tx,
                     DaemonEvent::CompileResult {
@@ -488,18 +504,389 @@ impl Daemon {
                         warnings: vec![],
                     },
                 )?;
+                return Ok(());
+            }
+        };
+
+        if force
+            || self.runtime_shade.is_none()
+            || matches!(
+                self.current_phase,
+                DaemonPhase::None | DaemonPhase::Terminal
+            )
+        {
+            self.pending_shade = None;
+            self.pending_request_path = None;
+            self.unload_requested = false;
+            return self.start_runtime_shade(prepared, tx);
+        }
+
+        self.pending_request_path = Some(path.to_string());
+        self.pending_shade = Some(prepared);
+        self.unload_requested = true;
+
+        maybe_send(
+            tx,
+            DaemonEvent::CompileResult {
+                success: true,
+                errors: vec![],
+                warnings: vec!["queued_load".to_string()],
+            },
+        )?;
+
+        if self.current_phase == DaemonPhase::Active {
+            let active_len = self.phase_length(ShadePhase::Active);
+            if active_len <= 0.0 {
+                self.begin_unload_or_finalize()?;
+            } else {
+                self.wait_reason = DaemonWaitReason::WaitingActiveBoundary;
             }
         }
 
-        if loaded_successfully {
-            // Force initial texture update (first frame decode for videos, etc.)
-            self.renderer.update_textures(0.0)?;
-            self.current_shade_path = Some(path.to_string());
+        Ok(())
+    }
 
-            if self.config.runtime.persist_current_shade {
-                self.config.current_shade = Some(path.to_string());
-                if let Err(e) = self.config.save() {
-                    log::warn!("Failed to persist current shade to config: {}", e);
+    fn handle_unload_command(&mut self) -> Result<()> {
+        if self.runtime_shade.is_none() {
+            self.current_phase = DaemonPhase::None;
+            self.wait_reason = DaemonWaitReason::Idle;
+            return Ok(());
+        }
+
+        self.pending_shade = None;
+        self.pending_request_path = None;
+        self.unload_requested = true;
+
+        if self.current_phase == DaemonPhase::Active && self.phase_length(ShadePhase::Active) > 0.0
+        {
+            self.wait_reason = DaemonWaitReason::WaitingActiveBoundary;
+            return Ok(());
+        }
+
+        self.begin_unload_or_finalize()
+    }
+
+    fn send_load_reject(
+        &self,
+        tx: Option<mpsc::Sender<DaemonEvent>>,
+        code: LoadRejectCode,
+        message: &str,
+    ) -> Result<()> {
+        maybe_send(
+            tx,
+            DaemonEvent::LoadRejected {
+                code,
+                message: message.to_string(),
+            },
+        )
+    }
+
+    fn prepare_runtime_shade(&self, path: &str) -> Result<RuntimeShade> {
+        let requested_path = Path::new(path);
+        let package = if requested_path.extension().and_then(|s| s.to_str()) == Some("shade") {
+            LiveShadePackage::load(requested_path)?
+        } else if let Some(pkg) = Self::package_from_media_path(requested_path) {
+            pkg
+        } else {
+            anyhow::bail!(
+                "Unsupported input '{}'. Expected .shade package or direct image/video file",
+                path
+            )
+        };
+
+        if !package.config.states.has_any() {
+            anyhow::bail!("Unsupported runtime config: missing [states.*] phase blocks");
+        }
+
+        for (name, state) in [
+            ("load", package.config.states.load.as_ref()),
+            ("active", package.config.states.active.as_ref()),
+            ("unload", package.config.states.unload.as_ref()),
+        ] {
+            if let Some(state) = state
+                && state.length < 0.0
+            {
+                anyhow::bail!("states.{}.length cannot be negative", name);
+            }
+        }
+
+        let package = Arc::new(package);
+        let mut cache = PhaseWgslCache::default();
+        cache.load = self.precompile_phase_shader(&package, ShadePhase::Load)?;
+        cache.active = self.precompile_phase_shader(&package, ShadePhase::Active)?;
+        cache.unload = self.precompile_phase_shader(&package, ShadePhase::Unload)?;
+
+        Ok(RuntimeShade {
+            path: path.to_string(),
+            package,
+            cache,
+        })
+    }
+
+    fn precompile_phase_shader(
+        &self,
+        pkg: &Arc<LiveShadePackage>,
+        phase: ShadePhase,
+    ) -> Result<Option<String>> {
+        let state = match phase {
+            ShadePhase::Load => pkg.config.states.load.as_ref(),
+            ShadePhase::Active => pkg.config.states.active.as_ref(),
+            ShadePhase::Unload => pkg.config.states.unload.as_ref(),
+        };
+        let Some(state) = state else {
+            return Ok(None);
+        };
+        let Some(shader_path) = &state.shader else {
+            return Ok(None);
+        };
+
+        let shader_bytes = pkg
+            .read_asset(shader_path)
+            .with_context(|| format!("Missing phase shader asset: {}", shader_path))?;
+        let shader_source = String::from_utf8(shader_bytes)
+            .with_context(|| format!("Phase shader '{}' is not valid UTF-8", shader_path))?;
+        let wgsl = crate::renderer::glsl_to_wgsl(&shader_source)
+            .with_context(|| format!("Failed to compile {:?} phase shader", phase))?;
+        Ok(Some(wgsl))
+    }
+
+    fn start_runtime_shade(
+        &mut self,
+        runtime: RuntimeShade,
+        tx: Option<mpsc::Sender<DaemonEvent>>,
+    ) -> Result<()> {
+        let path = runtime.path.clone();
+        let first_phase = runtime
+            .first_defined_phase()
+            .with_context(|| "No phase is defined in states")?;
+
+        self.runtime_shade = Some(runtime);
+        self.pending_shade = None;
+        self.pending_request_path = None;
+        self.unload_requested = false;
+        self.current_shade_path = Some(path.clone());
+        self.wait_reason = DaemonWaitReason::RunningLoad;
+
+        let outcome = self.enter_phase(first_phase)?;
+        self.handle_phase_load_outcome(outcome, tx)?;
+
+        self.renderer.update_textures(0.0)?;
+        self.resolve_zero_length_chain()?;
+
+        if self.config.runtime.persist_current_shade {
+            self.config.current_shade = Some(path);
+            if let Err(e) = self.config.save() {
+                log::warn!("Failed to persist current shade to config: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_phase_load_outcome(
+        &mut self,
+        outcome: ShadeLoadOutcome,
+        tx: Option<mpsc::Sender<DaemonEvent>>,
+    ) -> Result<()> {
+        match outcome {
+            ShadeLoadOutcome::Success => {
+                maybe_send(
+                    tx,
+                    DaemonEvent::CompileResult {
+                        success: true,
+                        errors: vec![],
+                        warnings: vec![],
+                    },
+                )?;
+            }
+            ShadeLoadOutcome::TextureError(failures) => {
+                let msgs: Vec<CompileError> = failures
+                    .iter()
+                    .map(|f| CompileError {
+                        message: format!(
+                            "Required texture '{}' ({}): {}",
+                            f.name, f.source, f.error
+                        ),
+                        line: None,
+                        column: None,
+                    })
+                    .collect();
+                maybe_send(
+                    tx,
+                    DaemonEvent::CompileResult {
+                        success: false,
+                        errors: msgs,
+                        warnings: vec![],
+                    },
+                )?;
+            }
+            ShadeLoadOutcome::CompileError(msg) => {
+                maybe_send(
+                    tx,
+                    DaemonEvent::CompileResult {
+                        success: false,
+                        errors: vec![CompileError {
+                            message: msg,
+                            line: None,
+                            column: None,
+                        }],
+                        warnings: vec![],
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn enter_phase(&mut self, phase: ShadePhase) -> Result<ShadeLoadOutcome> {
+        let (pkg, path, wgsl) = {
+            let runtime = self
+                .runtime_shade
+                .as_ref()
+                .with_context(|| "No runtime shade loaded")?;
+            (
+                Arc::clone(&runtime.package),
+                runtime.path.clone(),
+                runtime.wgsl(phase).map(|s| s.to_string()),
+            )
+        };
+
+        let outcome = self
+            .renderer
+            .load_phase(pkg, phase, wgsl.as_deref(), Some(&path))?;
+
+        self.phase_elapsed = 0.0;
+        self.phase_frame = 0;
+        self.current_phase = match phase {
+            ShadePhase::Load => DaemonPhase::Load,
+            ShadePhase::Active => DaemonPhase::Active,
+            ShadePhase::Unload => DaemonPhase::Unload,
+        };
+        self.wait_reason = match phase {
+            ShadePhase::Load => DaemonWaitReason::RunningLoad,
+            ShadePhase::Unload => DaemonWaitReason::RunningUnload,
+            ShadePhase::Active => DaemonWaitReason::Idle,
+        };
+
+        Ok(outcome)
+    }
+
+    fn phase_length(&self, phase: ShadePhase) -> f64 {
+        self.runtime_shade
+            .as_ref()
+            .and_then(|runtime| runtime.state(phase))
+            .map(|s| s.length)
+            .unwrap_or(0.0)
+    }
+
+    fn resolve_zero_length_chain(&mut self) -> Result<()> {
+        // Prevent accidental infinite loops from malformed transition logic.
+        for _ in 0..6 {
+            match self.current_phase {
+                DaemonPhase::Load if self.phase_length(ShadePhase::Load) <= 0.0 => {
+                    self.transition_after_load()?;
+                }
+                DaemonPhase::Unload if self.phase_length(ShadePhase::Unload) <= 0.0 => {
+                    self.finalize_unload()?;
+                }
+                _ => break,
+            }
+        }
+        Ok(())
+    }
+
+    fn transition_after_load(&mut self) -> Result<()> {
+        let Some(runtime) = self.runtime_shade.as_ref() else {
+            self.current_phase = DaemonPhase::None;
+            return Ok(());
+        };
+
+        if runtime.state(ShadePhase::Active).is_some() {
+            let outcome = self.enter_phase(ShadePhase::Active)?;
+            self.handle_phase_load_outcome(outcome, None)?;
+        } else if runtime.state(ShadePhase::Unload).is_some() {
+            let outcome = self.enter_phase(ShadePhase::Unload)?;
+            self.handle_phase_load_outcome(outcome, None)?;
+        } else {
+            self.current_phase = DaemonPhase::Terminal;
+            self.wait_reason = DaemonWaitReason::Idle;
+        }
+        Ok(())
+    }
+
+    fn begin_unload_or_finalize(&mut self) -> Result<()> {
+        if self
+            .runtime_shade
+            .as_ref()
+            .and_then(|runtime| runtime.state(ShadePhase::Unload))
+            .is_some()
+        {
+            let outcome = self.enter_phase(ShadePhase::Unload)?;
+            self.handle_phase_load_outcome(outcome, None)?;
+        } else {
+            self.current_phase = DaemonPhase::Terminal;
+            self.wait_reason = DaemonWaitReason::Idle;
+            self.unload_requested = false;
+            if let Some(next) = self.pending_shade.take() {
+                self.runtime_shade = None;
+                self.start_runtime_shade(next, None)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize_unload(&mut self) -> Result<()> {
+        self.unload_requested = false;
+        self.wait_reason = DaemonWaitReason::Idle;
+        if let Some(next) = self.pending_shade.take() {
+            self.runtime_shade = None;
+            self.start_runtime_shade(next, None)?;
+        } else {
+            self.current_phase = DaemonPhase::Terminal;
+        }
+        Ok(())
+    }
+
+    fn advance_lifecycle(&mut self, dt: f64) -> Result<()> {
+        self.phase_elapsed += dt;
+
+        match self.current_phase {
+            DaemonPhase::Load => {
+                let length = self.phase_length(ShadePhase::Load);
+                if self.phase_elapsed + (dt + 1e-6) >= length {
+                    self.transition_after_load()?;
+                    self.resolve_zero_length_chain()?;
+                }
+            }
+            DaemonPhase::Active => {
+                if self.unload_requested || self.pending_shade.is_some() {
+                    let loop_len = self.phase_length(ShadePhase::Active);
+                    if loop_len <= 0.0 {
+                        self.begin_unload_or_finalize()?;
+                    } else {
+                        let prev = (self.phase_elapsed - dt).max(0.0);
+                        let crossed = ((prev / loop_len).floor() as i64)
+                            < (((self.phase_elapsed + (dt + 1e-6)) / loop_len).floor() as i64);
+                        if crossed {
+                            self.begin_unload_or_finalize()?;
+                        } else {
+                            self.wait_reason = DaemonWaitReason::WaitingActiveBoundary;
+                        }
+                    }
+                } else {
+                    self.wait_reason = DaemonWaitReason::Idle;
+                }
+            }
+            DaemonPhase::Unload => {
+                let length = self.phase_length(ShadePhase::Unload);
+                if self.phase_elapsed + (dt + 1e-6) >= length {
+                    self.finalize_unload()?;
+                    self.resolve_zero_length_chain()?;
+                }
+            }
+            DaemonPhase::Terminal | DaemonPhase::None => {
+                if let Some(next) = self.pending_shade.take() {
+                    self.start_runtime_shade(next, None)?;
                 }
             }
         }
@@ -520,9 +907,12 @@ impl Daemon {
             .as_secs_f32();
         self.last_frame_time = frame_start;
 
-        self.renderer.uniforms.u_time = self.start_time.elapsed().as_secs_f32();
+        self.advance_lifecycle(dt as f64)?;
+
+        self.renderer.uniforms.u_time = self.phase_elapsed as f32;
         self.renderer.uniforms.u_delta_time = dt;
-        self.renderer.uniforms.u_frame = self.frame;
+        self.renderer.uniforms.u_frame = self.phase_frame;
+        self.phase_frame = self.phase_frame.wrapping_add(1);
 
         let stats = self.data_provider.get_system_stats();
         self.renderer.uniforms.apply_system_stats(&stats);
@@ -613,6 +1003,9 @@ impl Daemon {
                 status.fps = current_fps;
                 status.paused = self.paused;
                 status.loaded_shade = self.current_shade_path.clone();
+                status.current_phase = self.current_phase;
+                status.pending_request_path = self.pending_request_path.clone();
+                status.wait_reason = self.wait_reason;
                 status.cpu_usage = self.renderer.uniforms.u_cpu * 100.0;
                 status.ram_usage = self.renderer.uniforms.u_ram * 100.0;
                 status.battery = if self.renderer.uniforms.u_battery >= 0.0 {

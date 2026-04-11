@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use log::{error, info};
 
-use kroma_shared::ipc::{DaemonCommand, DaemonEvent, socket_path};
+use kroma_shared::ipc::{DaemonCommand, DaemonEvent, DaemonPhase, DaemonWaitReason, socket_path};
 
 use crate::config::PreviewConfig;
 
@@ -42,6 +42,9 @@ pub struct DaemonStatus {
     pub fps: f32,
     pub paused: bool,
     pub loaded_shade: Option<String>,
+    pub current_phase: DaemonPhase,
+    pub pending_request_path: Option<String>,
+    pub wait_reason: DaemonWaitReason,
     pub cpu_usage: f32,
     pub ram_usage: f32,
     pub battery: Option<f32>,
@@ -75,6 +78,9 @@ impl Default for DaemonStatus {
             fps: 0.0,
             paused: false,
             loaded_shade: None,
+            current_phase: DaemonPhase::None,
+            pending_request_path: None,
+            wait_reason: DaemonWaitReason::Idle,
             cpu_usage: 0.0,
             ram_usage: 0.0,
             battery: None,
@@ -143,21 +149,6 @@ pub fn start(
                                 match line {
                                     Ok(line) if line.trim().is_empty() => continue,
                                     Ok(line) => {
-                                        // Check for legacy bare-string status query
-                                        if line.trim() == "\"StatusQuery\"" {
-                                            let s = status.lock().unwrap_or_else(|e| e.into_inner());
-                                            let event = DaemonEvent::Status {
-                                                fps: s.fps,
-                                                paused: s.paused,
-                                                loaded_shade: s.loaded_shade.clone(),
-                                            };
-                                            if let Ok(json) = serde_json::to_string(&event) {
-                                                let _ = writeln!(writer, "{}", json);
-                                                let _ = writer.flush();
-                                            }
-                                            continue;
-                                        }
-
                                         match serde_json::from_str::<DaemonCommand>(&line) {
                                             Ok(DaemonCommand::StatusQuery) => {
                                                 let s = status.lock().unwrap_or_else(|e| e.into_inner());
@@ -165,6 +156,9 @@ pub fn start(
                                                     fps: s.fps,
                                                     paused: s.paused,
                                                     loaded_shade: s.loaded_shade.clone(),
+                                                    current_phase: s.current_phase,
+                                                    pending_request_path: s.pending_request_path.clone(),
+                                                    wait_reason: s.wait_reason,
                                                 };
                                                 if let Ok(json) = serde_json::to_string(&event) {
                                                     let _ = writeln!(writer, "{}", json);
