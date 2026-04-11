@@ -5,7 +5,7 @@
 ```
 kroma-shared/     — Types, traits, translator, shade package handling
 kroma-daemon/     — Headless renderer (wgpu, Wayland, X11, audio, IPC server)
-kroma-gui/        — iced desktop GUI (editor, import, dashboard, project manager)
+kroma-cli/        — Import, inspect, pack, migrate, and daemon IPC control
 ```
 
 ## Key Design Decisions
@@ -37,7 +37,7 @@ kroma-gui/        — iced desktop GUI (editor, import, dashboard, project manag
 cargo build --workspace          # Build all crates
 cargo test --workspace           # Run all tests
 cargo run --bin kroma-daemon     # Start renderer daemon
-cargo run --bin kroma-gui        # Start GUI
+cargo run --bin kroma -- --help  # Run CLI commands
 ```
 
 ## File Types in .shade Packages

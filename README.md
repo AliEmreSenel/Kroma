@@ -18,8 +18,8 @@ Kroma renders real-time, data-driven shaders and video streams directly to your 
 
 ```
 ┌──────────────┐     IPC (Unix Socket)     ┌──────────────┐
-│  kroma-gui   │ ◄──────────────────────── │ kroma-daemon │
-│  (config UI) │                           │  (renderer)  │
+│  kroma-cli   │ ◄──────────────────────── │ kroma-daemon │
+│  (control)   │                           │  (renderer)  │
 └──────────────┘                           └──────┬───────┘
                                                   │
                               ┌────────────┬──────┴──────┬────────────┐
@@ -33,7 +33,7 @@ The system is split into two binaries:
 | Binary | Purpose |
 |---|---|
 | `kroma-daemon` | Headless background renderer — holds GPU context, manages render loop |
-| `kroma-gui` | CLI/GUI tool for configuration, shader import, and IPC control |
+| `kroma-cli` | CLI tool for packaging, importing, inspection, and daemon IPC control |
 
 ## Quick Start
 
@@ -186,7 +186,7 @@ cargo test --workspace
 crates/
 ├── kroma-shared/     # Core traits, types, IPC, .shade format, translator
 ├── kroma-daemon/     # The render daemon
-└── kroma-gui/        # GUI / CLI client
+└── kroma-cli/        # Command-line import/pack/inspect + daemon control
 examples/
 ├── shaders/          # Kroma-native example shaders
 └── shadertoy/        # Shadertoy examples for translator testing

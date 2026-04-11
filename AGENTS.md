@@ -12,7 +12,7 @@ Kroma is a **Rust workspace** with the following crates:
 |---|---|---|
 | `kroma-shared` | Library | Core traits, types, IPC protocol, .shade format, shader translator |
 | `kroma-daemon` | Binary | Headless renderer — holds wgpu context, manages render loop & data aggregation |
-| `kroma-gui` | Binary | User-facing config tool — browse/import .shade packages, Shadertoy translator UI |
+| `kroma-cli` | Binary | Import, pack, inspect, migrate, and daemon IPC control |
 
 ## Core Principles
 
@@ -60,63 +60,17 @@ A `.shade` file is a ZIP containing:
 
 ## IPC Protocol
 
-Daemon ↔ GUI communication uses Unix domain sockets at `$XDG_RUNTIME_DIR/kroma.sock` with JSON-serialized messages.
+Daemon communication uses Unix domain sockets at `$XDG_RUNTIME_DIR/kroma.sock` with JSON-serialized messages.
 
-## GUI v2 Architecture
+## GUI Branch Note
 
-The GUI is undergoing a full modular rewrite (see `docs/GUI_DESIGN.md` for complete spec).
-
-### Design Decisions (Locked)
-- **Layout**: Full IDE-style docking system (drag-split-tab), floating windows deferred
-- **Live Preview**: Daemon IPC — low-res JPEG frames over Unix socket
-- **Sub-graphs**: Tabbed navigation with breadcrumbs + tree sidebar (UE5 Blueprint-style)
-- **Undo/Redo**: Full command-based from day one (Command trait + CommandHistory)
-- **Themes**: User-selectable (Tokyo Night, Catppuccin, Nord, Dracula, One Dark)
-- **Video Preview**: Full inline playback via FFmpeg in GUI
-- **Refactor Strategy**: Incremental — extract modules from monolith, then enhance
-
-### Module Structure
-```
-kroma-gui/src/
-├── app.rs              # Thin orchestrator (update/view dispatch)
-├── message.rs          # Namespaced Message enum
-├── dock/               # Binary split tree docking system
-├── panels/             # Self-contained Panel trait implementations
-│   ├── dashboard.rs    # Daemon status, FPS, quick actions
-│   ├── node_editor.rs  # Graph canvas + sub-graph breadcrumbs
-│   ├── code_editor.rs  # GLSL text editor
-│   ├── asset_browser.rs # File tree with drag-to-import
-│   ├── asset_preview.rs # Image/video/font/shader preview
-│   ├── properties.rs   # Node/asset inspector
-│   ├── library.rs      # .shade package grid browser
-│   ├── live_preview.rs # Daemon frame stream display
-│   ├── import.rs       # Shadertoy import
-│   ├── error_log.rs    # Compile errors + messages
-│   └── settings.rs     # Theme, directories, API keys
-├── editor/             # Node editor internals (canvas, palette, wires, sub-graphs)
-├── commands/           # Command pattern for undo/redo
-├── ipc/                # Async daemon communication
-└── theme/              # Theme trait + 5 built-in themes
-```
-
-### Panel Trait
-Every dockable panel implements `Panel` with: `id()`, `title()`, `icon()`, `view()`, `update()`, `subscription()`.
-
-### Implementation Phases
-1. **Docking System & Module Extraction** — Foundation
-2. **Command System & Undo/Redo** — All mutations through commands
-3. **Node Editor Enhancements** — Sub-graphs, multi-select, palette popup
-4. **Async IPC & Live Preview** — Non-blocking daemon comms + frame streaming
-5. **Asset Management & Previews** — Drag-drop import, image/video/font preview
-6. **Theme System** — 5 themes with full token coverage
-7. **Polish & Error Tolerance** — No unwrap(), toast notifications, robustness
-8. **Floating Windows** — Multi-window docking (future)
+The GUI/editor stack was moved off the default branch. Use `feature/gui` for GUI-specific development.
 
 ## Build & Run
 
 ```bash
 cargo build --workspace          # Build everything
 cargo run -p kroma-daemon        # Run the daemon
-cargo run -p kroma-gui           # Run the GUI
+cargo run -p kroma-cli -- --help # Run CLI commands
 cargo test --workspace           # Run all tests
 ```

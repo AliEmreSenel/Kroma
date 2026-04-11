@@ -38,18 +38,15 @@ Headless background renderer holding the wgpu context.
 - Frame rendering
 - IPC server with compile error reporting
 
-### 3.2. The GUI (`kroma-gui`)
+### 3.2. The CLI (`kroma-cli`)
 
-Full-featured creative tool with 5 tabs:
+Command-line tool for package lifecycle and daemon control:
 
-1. **Dashboard** — Status, FPS, active shader
-2. **Import** — Shadertoy URL import
-3. **Editor** — GLSL text / Node graph / Live preview
-4. **Project** — Complete `.shade` package IDE:
-   - Project files tree with asset management
-   - Multi-mode editing per file type
-   - Metadata, rendering, audio config
-5. **Settings** — Daemon connection, preferences
+1. **Import** — Convert Shadertoy shaders into `.shade` packages
+2. **Pack** — Build v2 `.shade` containers from project folders
+3. **Inspect** — Verify, list, and debug container structure/chunks
+4. **Migrate** — Convert legacy ZIP `.shade` to v2 format
+5. **IPC Control** — Load, pause, resume, reload, and shutdown daemon
 
 ## 4. Shader Translation Pipeline
 
@@ -107,27 +104,15 @@ Newline-delimited JSON. Commands: LoadShade, SetUniform, Pause, Resume, Reload, 
 ## 7. Implementation Status
 
 ### Completed ✅
-- Rust workspace (shared, daemon, gui)
+- Rust workspace (shared, daemon, cli)
 - Wayland + X11 surface providers with auto-detection
 - wgpu Vulkan rendering, DPI-aware
 - shaderc + naga shader pipeline
 - Shadertoy import/translation
 - IPC client/server
-- iced GUI (Dashboard, Import, Editor, ShadeEdit, Settings)
-- Node-based shader editor + GLSL text editor
-- Live preview / hot reload
 - Audio capture (desktop loopback)
-- Shade package editor
+- Shade package tooling (pack, inspect, migrate)
 
 ### In Progress 🔧
-- **GUI v2 Overhaul** — Full modular rewrite (see `GUI_DESIGN.md`)
-  - IDE-style docking system (drag-split-tab)
-  - Command-based undo/redo across all operations
-  - Sub-graph navigation (ForLoop/Conditional/CustomFunc) with breadcrumbs
-  - Async IPC with live daemon-rendered preview frames
-  - Rich asset previews (image/video/font inline)
-  - User-selectable themes (5 built-in)
-  - Drag-and-drop everywhere (assets, nodes, panels)
-  - Full error tolerance — nothing crashes
 - GLSL ↔ Node sync
 - IPC compile error feedback

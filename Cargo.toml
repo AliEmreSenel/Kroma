@@ -3,8 +3,6 @@ resolver = "2"
 members = [
     "crates/kroma-shared",
     "crates/kroma-daemon",
-    "crates/kroma-gui",
-    "crates/kroma-graph",
     "crates/kroma-cli",
 ]
 
@@ -87,10 +85,6 @@ notify = "6"
 # CLI
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
-
-# GUI
-iced = { version = "0.14", features = ["tokio", "canvas", "image"] }
-rfd = "0.17"
 
 # HTTP client
 reqwest = { version = "0.13", features = ["json"] }
