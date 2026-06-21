@@ -32,6 +32,9 @@ enum Commands {
         /// Force immediate load by preempting current lifecycle.
         #[arg(long)]
         force: bool,
+        /// Optional transition usage in `scope.id[:seconds]` format.
+        #[arg(long)]
+        transition: Option<String>,
     },
 
     /// Unload current shade and transition to terminal/no-shade state.
@@ -124,7 +127,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Load { path, force } => cmd_load(path, force)?,
+        Commands::Load {
+            path,
+            force,
+            transition,
+        } => cmd_load(path, force, transition)?,
         Commands::Unload => cmd_unload()?,
         Commands::Pause => cmd_pause()?,
         Commands::Resume => cmd_resume()?,
@@ -158,7 +165,7 @@ fn main() -> Result<()> {
 }
 
 /// Load a .shade package — resolves to an absolute path before sending to the daemon.
-fn cmd_load(path: PathBuf, force: bool) -> Result<()> {
+fn cmd_load(path: PathBuf, force: bool, transition: Option<String>) -> Result<()> {
     let absolute = std::fs::canonicalize(&path).map_err(|e| {
         anyhow::anyhow!(
             "Cannot resolve path '{}': {}. Does the file exist?",
@@ -168,10 +175,10 @@ fn cmd_load(path: PathBuf, force: bool) -> Result<()> {
     })?;
 
     let path_str = absolute.to_string_lossy();
-    ipc_client::send_load(&path_str, force)?;
+    ipc_client::send_load(&path_str, force, transition.as_deref())?;
     info!(
-        "Sent load command to daemon: {} (force={})",
-        path_str, force
+        "Sent load command to daemon: {} (force={}, transition={:?})",
+        path_str, force, transition
     );
     Ok(())
 }
@@ -258,5 +265,53 @@ fn default_output_dir() -> PathBuf {
         PathBuf::from(h).join(".local/share/kroma/shaders")
     } else {
         PathBuf::from("./shaders")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Commands};
+    use clap::Parser;
+
+    #[test]
+    fn parse_load_transition_option() {
+        let cli = Cli::try_parse_from([
+            "kroma",
+            "load",
+            "/tmp/demo.shade",
+            "--force",
+            "--transition",
+            "kroma.fade:0.75",
+        ])
+        .expect("CLI parse should succeed");
+
+        match cli.command {
+            Commands::Load {
+                path,
+                force,
+                transition,
+            } => {
+                assert_eq!(path.to_string_lossy(), "/tmp/demo.shade");
+                assert!(force);
+                assert_eq!(transition.as_deref(), Some("kroma.fade:0.75"));
+            }
+            _ => panic!("expected load command"),
+        }
+    }
+
+    #[test]
+    fn parse_load_without_transition_option() {
+        let cli = Cli::try_parse_from(["kroma", "load", "/tmp/demo.shade"])
+            .expect("CLI parse should succeed");
+
+        match cli.command {
+            Commands::Load {
+                force, transition, ..
+            } => {
+                assert!(!force);
+                assert!(transition.is_none());
+            }
+            _ => panic!("expected load command"),
+        }
     }
 }

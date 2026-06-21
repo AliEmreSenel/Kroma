@@ -234,6 +234,7 @@ pub fn create_texture_source(
                 Arc::clone(pkg),
                 &def.sources,
                 interval,
+                def.transition.as_deref(),
                 def.shuffle,
                 def.hot_reload,
                 def.optional,

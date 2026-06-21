@@ -12,7 +12,7 @@ use kroma_shared::compression::{
 };
 use kroma_shared::shade::{CompressionPolicy, LiveShadePackage};
 use kroma_shared::translator;
-use kroma_shared::types::{ShadeConfig, ShadeStateDef, TextureDef, TextureType};
+use kroma_shared::types::{ShadeConfig, ShadeStateDef, TextureDef, TextureType, TransitionDef};
 
 #[derive(Debug, Clone)]
 pub struct PackOptions {
@@ -177,7 +177,27 @@ fn collect_referenced_files_in_order(config: &ShadeConfig) -> Vec<ReferencedFile
         collect_state_refs(state, &mut ordered, &mut first_index);
     }
 
+    for transition in config.transitions.values() {
+        collect_transition_refs(transition, &mut ordered, &mut first_index);
+    }
+
     ordered
+}
+
+fn collect_transition_refs(
+    transition: &TransitionDef,
+    ordered: &mut Vec<ReferencedFile>,
+    first_index: &mut HashMap<String, usize>,
+) {
+    push_ref(&transition.shader, true, ordered, first_index);
+
+    for texture in transition.textures.values() {
+        collect_texture_refs(texture, true, ordered, first_index);
+    }
+
+    for buffer in transition.buffers.values() {
+        push_ref(&buffer.shader, true, ordered, first_index);
+    }
 }
 
 fn collect_state_refs(
@@ -274,6 +294,8 @@ mod pack_tests {
             },
             rendering: RenderingConfig::default(),
             states: Default::default(),
+            transitions: Default::default(),
+            transitions_usage: Default::default(),
         }
     }
 
@@ -308,6 +330,7 @@ mod pack_tests {
                 binding: None,
                 font_size: None,
                 interval: None,
+                transition: None,
                 shuffle: false,
                 fft_bands: None,
                 hot_reload: false,
@@ -334,6 +357,7 @@ mod pack_tests {
                 binding: None,
                 font_size: None,
                 interval: None,
+                transition: None,
                 shuffle: false,
                 fft_bands: None,
                 hot_reload: false,
@@ -414,6 +438,7 @@ mod pack_tests {
                     binding: None,
                     font_size: None,
                     interval: None,
+                    transition: None,
                     shuffle: false,
                     fft_bands: None,
                     hot_reload: false,

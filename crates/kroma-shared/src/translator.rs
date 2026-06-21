@@ -134,6 +134,8 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
                     unload: None,
                 },
                 rendering: Default::default(),
+                transitions: Default::default(),
+                transitions_usage: Default::default(),
             },
             warnings,
         };
@@ -355,6 +357,7 @@ layout(location = 0) out vec4 kroma_out_color;
                 binding: None,
                 font_size: None,
                 interval: None,
+                transition: None,
                 shuffle: false,
                 fft_bands: None,
                 hot_reload: false,
@@ -399,6 +402,8 @@ layout(location = 0) out vec4 kroma_out_color;
             }),
             unload: None,
         },
+        transitions: Default::default(),
+        transitions_usage: Default::default(),
     };
 
     TranslationResult {
@@ -409,6 +414,7 @@ layout(location = 0) out vec4 kroma_out_color;
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
 

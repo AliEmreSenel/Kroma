@@ -297,7 +297,7 @@ fn parse_header(bytes: &[u8]) -> Result<Header> {
         anyhow::bail!("Invalid .shade file: header too small");
     }
 
-    if &bytes[0..8] != SHADE_MAGIC {
+    if bytes[0..8] != SHADE_MAGIC {
         anyhow::bail!("Unsupported .shade format (bad magic)");
     }
 
@@ -646,6 +646,10 @@ impl AssetByteStream {
             AssetByteStreamInner::Memory(data) => data.len() as u64,
             AssetByteStreamInner::BaseV2 { entry, .. } => entry.uncompressed_size,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize> {
@@ -1200,7 +1204,7 @@ impl LiveShadePackage {
 
         let mut file = std::fs::File::create(path)
             .with_context(|| format!("Failed to create shade package: {}", path.display()))?;
-        file.write_all(&vec![0u8; HEADER_SIZE])?;
+        file.write_all(&[0u8; HEADER_SIZE])?;
 
         let mut index_entries = Vec::<V2EntryIndex>::new();
         let mut all_chunk_tables = Vec::<Vec<ChunkDescriptor>>::new();
@@ -1410,6 +1414,8 @@ mod tests {
             },
             rendering: RenderingConfig::default(),
             states: Default::default(),
+            transitions: Default::default(),
+            transitions_usage: Default::default(),
         }
     }
 

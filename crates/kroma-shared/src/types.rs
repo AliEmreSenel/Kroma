@@ -74,6 +74,10 @@ pub struct ShaderUniforms {
     pub u_battery: f32,
     /// Audio level from microphone/desktop audio (0.0 – 1.0).
     pub u_audio_level: f32,
+    /// Transition progress in range [0, 1] while transitioning.
+    pub u_transition_t: f32,
+    /// Padding for std140-friendly trailing alignment.
+    pub _pad2: [f32; 3],
 }
 
 impl Default for ShaderUniforms {
@@ -90,6 +94,8 @@ impl Default for ShaderUniforms {
             u_ram: 0.0,
             u_battery: -1.0,
             u_audio_level: 0.0,
+            u_transition_t: 0.0,
+            _pad2: [0.0, 0.0, 0.0],
         }
     }
 }
@@ -129,6 +135,48 @@ pub struct ShadeConfig {
     /// Runtime state graph with fixed phase keys.
     #[serde(default)]
     pub states: ShadeStates,
+    /// Transition effect library keyed by transition id.
+    #[serde(default)]
+    pub transitions: IndexMap<String, TransitionDef>,
+    /// Lifecycle transition usage hooks.
+    #[serde(default)]
+    pub transitions_usage: ShadeTransitionsUsage,
+}
+
+/// Transition usage hooks for lifecycle edges.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShadeTransitionsUsage {
+    /// Transition spec applied between load -> active.
+    #[serde(default)]
+    pub on_load_to_active: Option<String>,
+    /// Transition spec applied between active -> unload.
+    #[serde(default)]
+    pub on_active_to_unload: Option<String>,
+}
+
+fn default_transition_duration() -> f64 {
+    1.0
+}
+
+/// Shader-driven transition effect definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransitionDef {
+    /// Fragment shader source path relative to package root.
+    pub shader: String,
+    /// Default transition duration in seconds.
+    #[serde(default = "default_transition_duration")]
+    pub duration: f64,
+    /// Transition-local custom uniforms.
+    #[serde(default)]
+    pub uniforms: IndexMap<String, UniformDef>,
+    /// Transition-local textures.
+    #[serde(default)]
+    pub textures: IndexMap<String, TextureDef>,
+    /// Transition-local render buffers.
+    #[serde(default)]
+    pub buffers: IndexMap<String, BufferDef>,
 }
 
 /// Fixed runtime phase names for stateful shade playback.
@@ -383,6 +431,9 @@ pub struct TextureDef {
     /// Slideshow interval in seconds (only for slideshow textures, default: 30.0).
     #[serde(default)]
     pub interval: Option<f64>,
+    /// Slideshow transition usage spec in `scope.id[:seconds]` format.
+    #[serde(default)]
+    pub transition: Option<String>,
     /// Whether to shuffle slideshow order.
     #[serde(default)]
     pub shuffle: bool,

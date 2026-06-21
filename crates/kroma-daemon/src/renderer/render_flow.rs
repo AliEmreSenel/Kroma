@@ -112,40 +112,6 @@ pub(super) fn upload_frame_uniforms(state: &Renderer) {
     state.upload_custom_uniforms();
 }
 
-/// Uploads preview uniforms using a temporary resolution override.
-pub(super) fn upload_preview_uniforms(state: &Renderer, width: u32, height: u32) {
-    let mut preview_uniforms = state.uniforms;
-    preview_uniforms.u_resolution = [width as f32, height as f32];
-    state.write_uniform_buffer(&preview_uniforms);
-    state.upload_custom_uniforms();
-}
-
-/// Creates an offscreen texture target used for preview rendering and readback.
-pub(super) fn create_offscreen_render_target(
-    device: &wgpu::Device,
-    width: u32,
-    height: u32,
-    format: wgpu::TextureFormat,
-    label: &str,
-) -> (wgpu::Texture, wgpu::TextureView) {
-    let tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        view_formats: &[],
-    });
-    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-    (tex, view)
-}
-
 /// Rebuilds the main pipeline with the provided fragment WGSL source.
 pub(super) fn rebuild_pipeline_with_frag(state: &mut Renderer, frag_wgsl: &str) -> Result<()> {
     let device = state.gpu.device.as_ref().context("GPU not initialised")?;
@@ -210,7 +176,7 @@ pub(super) fn rebuild_pipeline_layout(state: &mut Renderer) -> Result<()> {
 
 /// Renders one frame to the surface, handling recoverable surface errors.
 pub(super) fn render_frame(state: &mut Renderer) -> Result<()> {
-    let Some(queue) = state.gpu.queue.as_ref() else {
+    let Some(queue) = state.gpu.queue.as_ref().cloned() else {
         return Ok(());
     };
 
@@ -262,7 +228,83 @@ pub(super) fn render_frame(state: &mut Renderer) -> Result<()> {
         label: Some("kroma-frame"),
     });
 
-    encode_fullscreen_pass(state, &mut encoder, &view, "kroma-render-pass", false)?;
+    if state.transition_state.is_some() {
+        let mut transition = state
+            .transition_state
+            .take()
+            .context("Transition state disappeared during frame render")?;
+
+        if let Some(lane) = state.transition_lane_uniforms {
+            let mut lane_uniforms = state.uniforms;
+            lane_uniforms.u_time = lane.outgoing_elapsed;
+            lane_uniforms.u_frame = lane.outgoing_frame;
+            write_uniform_buffer(state, &lane_uniforms);
+            state.upload_custom_uniforms();
+        }
+
+        // Pass 1: render outgoing lane into prev target.
+        encode_fullscreen_pass(
+            state,
+            &mut encoder,
+            &transition.prev_view,
+            "kroma-transition-prev-pass",
+            true,
+        )?;
+
+        // Pass 2: render incoming lane using the exact same lane pipeline path.
+        if let Some(lane) = state.transition_lane_uniforms {
+            let mut lane_uniforms = state.uniforms;
+            lane_uniforms.u_time = lane.incoming_elapsed;
+            lane_uniforms.u_frame = lane.incoming_frame;
+            write_uniform_buffer(state, &lane_uniforms);
+            state.upload_custom_uniforms();
+        }
+
+        let outgoing_lane = state.take_active_lane();
+        state.install_active_lane(transition.incoming_lane);
+        encode_fullscreen_pass(
+            state,
+            &mut encoder,
+            &transition.next_view,
+            "kroma-transition-next-pass",
+            true,
+        )?;
+        transition.incoming_lane = state.take_active_lane();
+        state.install_active_lane(outgoing_lane);
+
+        // Composite pass uses global transition uniforms.
+        write_uniform_buffer(state, &state.uniforms);
+        state.upload_custom_uniforms();
+
+        // Pass 2: blend previous snapshot with live next pass into the real surface.
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("kroma-transition-composite-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+
+        if let Some(bg0) = state.gpu.bind_group.as_ref() {
+            pass.set_pipeline(&transition.pipeline);
+            pass.set_bind_group(0, bg0, &[]);
+            pass.set_bind_group(1, &transition.texture_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        state.transition_state = Some(transition);
+    } else {
+        encode_fullscreen_pass(state, &mut encoder, &view, "kroma-render-pass", false)?;
+    }
 
     queue.submit(std::iter::once(encoder.finish()));
     frame.present();

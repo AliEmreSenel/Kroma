@@ -357,10 +357,6 @@ impl ShaderTexture {
         let pipeline =
             Self::create_pipeline(device, &pipeline_layout, &wgsl_source, output_format)?;
 
-        // -- Initial uniform upload --
-        let mut initial_uniforms = ShaderUniforms::default();
-        initial_uniforms.u_resolution = [width as f32, height as f32];
-
         Ok(Self {
             gpu: gpu.clone(),
             render_texture,
@@ -378,7 +374,10 @@ impl ShaderTexture {
             bind_group_0,
             sub_textures,
             texture_bind_group,
-            uniforms: initial_uniforms,
+            uniforms: ShaderUniforms {
+                u_resolution: [width as f32, height as f32],
+                ..ShaderUniforms::default()
+            },
             custom_uniform_data,
         })
     }

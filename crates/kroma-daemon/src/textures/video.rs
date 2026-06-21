@@ -5,6 +5,9 @@
 //! hot-reload for external disk-backed files.
 
 use std::path::Path;
+use std::sync::mpsc::{self, Receiver, TryRecvError, TrySendError};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use anyhow::{Context, Result};
@@ -213,47 +216,191 @@ impl VideoDecoder for FfmpegVideoDecoder {
     }
 }
 
-/// A video texture that decodes frames on its own schedule.
+struct DecodedVideoFrame {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
+    frame_interval: f64,
+}
+
+struct VideoDecodeWorker {
+    stop_tx: mpsc::Sender<()>,
+    frame_rx: Receiver<DecodedVideoFrame>,
+    handle: JoinHandle<()>,
+}
+
 pub struct VideoTexture {
-    /// `None` for placeholder sources (optional textures whose file is missing).
-    decoder: Option<FfmpegVideoDecoder>,
-    /// Frame-rate accumulator (seconds).
-    accum: f64,
-    /// Whether to loop the video on EOF.
+    worker: Option<VideoDecodeWorker>,
     looping: bool,
-    /// True on the first update (forces an initial frame decode).
-    pub(crate) first_frame: bool,
-    /// Cached last frame data for dimensions.
+    frame_interval: f64,
+    pending_frame: Option<DecodedVideoFrame>,
     last_width: u32,
     last_height: u32,
-    /// Optional filesystem watcher for external hot-reload.
     hot_reload: SourceHotReload,
 }
 
 impl VideoTexture {
-    fn load_decoder_from_path(path: &Path) -> Result<(FfmpegVideoDecoder, u32, u32)> {
-        let decoder = FfmpegVideoDecoder::load(path)?;
-        let (w, h) = decoder.dimensions();
-        Ok((decoder, w, h))
+    fn decode_with_looping(decoder: &mut FfmpegVideoDecoder, looping: bool) -> Option<Vec<u8>> {
+        match decoder.next_frame() {
+            Some(data) => Some(data.to_vec()),
+            None if looping => {
+                if let Err(e) = decoder.seek(0.0) {
+                    warn!("Video seek-to-start failed: {}", e);
+                    return None;
+                }
+                decoder.next_frame().map(|d| d.to_vec())
+            }
+            None => None,
+        }
     }
 
-    fn load_decoder_from_stream(
-        stream: AssetByteStream,
+    fn spawn_worker(
+        source: VideoSource,
+        looping: bool,
         source_label: &str,
-    ) -> Result<(FfmpegVideoDecoder, u32, u32)> {
-        let decoder = FfmpegVideoDecoder::load_from_stream(stream, source_label)?;
-        let (w, h) = decoder.dimensions();
-        Ok((decoder, w, h))
+    ) -> Result<(VideoDecodeWorker, u32, u32)> {
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<Result<(u32, u32), String>>(1);
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<DecodedVideoFrame>(2);
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+
+        let label = source_label.to_string();
+        let handle = std::thread::Builder::new()
+            .name(format!("kroma-video-{}", label))
+            .spawn(move || {
+                let mut decoder = match source {
+                    VideoSource::ExternalPath(path) => match FfmpegVideoDecoder::load(&path) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            let _ = ready_tx.send(Err(format!(
+                                "Failed to open video '{}': {}",
+                                path.display(),
+                                e
+                            )));
+                            return;
+                        }
+                    },
+                    VideoSource::EmbeddedStream(stream) => {
+                        match FfmpegVideoDecoder::load_from_stream(stream, "embedded-stream") {
+                            Ok(d) => d,
+                            Err(e) => {
+                                let _ = ready_tx.send(Err(format!(
+                                    "Failed to open embedded video stream: {}",
+                                    e
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                let (w, h) = decoder.dimensions();
+                if ready_tx.send(Ok((w, h))).is_err() {
+                    return;
+                }
+
+                // Prime the queue with the very first frame so callers do not
+                // render a black placeholder while waiting for async decode.
+                if let Some(data) = Self::decode_with_looping(&mut decoder, looping) {
+                    let frame_interval = {
+                        let raw = decoder.frame_interval();
+                        if raw.is_finite() && raw > 0.0 {
+                            raw
+                        } else {
+                            1.0 / 30.0
+                        }
+                    };
+                    let _ = frame_tx.try_send(DecodedVideoFrame {
+                        data,
+                        width: w,
+                        height: h,
+                        frame_interval,
+                    });
+                }
+
+                loop {
+                    match stop_rx.try_recv() {
+                        Ok(()) | Err(TryRecvError::Disconnected) => return,
+                        Err(TryRecvError::Empty) => {}
+                    }
+
+                    let data = match Self::decode_with_looping(&mut decoder, looping) {
+                        Some(data) => data,
+                        None => {
+                            std::thread::sleep(Duration::from_millis(5));
+                            continue;
+                        }
+                    };
+
+                    let (fw, fh) = decoder.dimensions();
+                    let frame_interval = {
+                        let raw = decoder.frame_interval();
+                        if raw.is_finite() && raw > 0.0 {
+                            raw
+                        } else {
+                            1.0 / 30.0
+                        }
+                    };
+
+                    let frame = DecodedVideoFrame {
+                        data,
+                        width: fw,
+                        height: fh,
+                        frame_interval,
+                    };
+
+                    match frame_tx.try_send(frame) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {}
+                        Err(TrySendError::Disconnected(_)) => return,
+                    }
+
+                    let sleep_secs = frame_interval.clamp(1.0 / 240.0, 1.0);
+                    std::thread::sleep(Duration::from_secs_f64(sleep_secs));
+                }
+            })
+            .with_context(|| {
+                format!(
+                    "Failed to spawn video decode worker for '{}': {}",
+                    label, label
+                )
+            })?;
+
+        let (w, h) = ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| anyhow!("Timed out waiting for video decode worker init"))?
+            .map_err(|e| anyhow!(e))?;
+
+        Ok((
+            VideoDecodeWorker {
+                stop_tx,
+                frame_rx,
+                handle,
+            },
+            w,
+            h,
+        ))
     }
 
-    fn reload_decoder_from_path(&mut self, path: &Path) -> Result<()> {
-        let (decoder, w, h) = Self::load_decoder_from_path(path)
-            .with_context(|| format!("Failed to reload video decoder '{}'", path.display()))?;
-        self.decoder = Some(decoder);
+    fn stop_worker(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.stop_tx.send(());
+            let _ = worker.handle.join();
+        }
+    }
+
+    fn restart_worker_from_path(&mut self, path: &Path) -> Result<()> {
+        self.stop_worker();
+        let (worker, w, h) = Self::spawn_worker(
+            VideoSource::ExternalPath(path.to_path_buf()),
+            self.looping,
+            &path.display().to_string(),
+        )
+        .with_context(|| format!("Failed to reload video decoder '{}'", path.display()))?;
+        self.worker = Some(worker);
         self.last_width = w;
         self.last_height = h;
-        self.accum = 0.0;
-        self.first_frame = true;
+        self.frame_interval = 1.0 / 30.0;
+        self.pending_frame = None;
         info!(
             "VideoTexture reloaded from disk: {} ({}x{})",
             path.display(),
@@ -293,9 +440,38 @@ impl VideoTexture {
                     SourceHotReload::disabled()
                 };
 
-                let decoder_path = hot_reload.source_path().unwrap_or(&path);
-                match Self::load_decoder_from_path(decoder_path) {
-                    Ok((decoder, w, h)) => {
+                let decoder_path = hot_reload
+                    .source_path()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| path.clone());
+
+                let mut pending_frame = None;
+                if let Ok(mut primer) = FfmpegVideoDecoder::load(&decoder_path)
+                    && let Some(data) = Self::decode_with_looping(&mut primer, looping)
+                {
+                    let (pw, ph) = primer.dimensions();
+                    let frame_interval = {
+                        let raw = primer.frame_interval();
+                        if raw.is_finite() && raw > 0.0 {
+                            raw
+                        } else {
+                            1.0 / 30.0
+                        }
+                    };
+                    pending_frame = Some(DecodedVideoFrame {
+                        data,
+                        width: pw,
+                        height: ph,
+                        frame_interval,
+                    });
+                }
+
+                match Self::spawn_worker(
+                    VideoSource::ExternalPath(decoder_path.clone()),
+                    looping,
+                    &decoder_path.display().to_string(),
+                ) {
+                    Ok((worker, w, h)) => {
                         if let Some(watch_path) = hot_reload.source_path() {
                             info!(
                                 "VideoTexture loaded: {}x{}, looping={}, watcher={}",
@@ -308,10 +484,10 @@ impl VideoTexture {
                             info!("VideoTexture loaded: {}x{}, looping={}", w, h, looping);
                         }
                         Ok(Self {
-                            decoder: Some(decoder),
-                            accum: 0.0,
+                            worker: Some(worker),
                             looping,
-                            first_frame: true,
+                            frame_interval: 1.0 / 30.0,
+                            pending_frame,
                             last_width: w,
                             last_height: h,
                             hot_reload,
@@ -324,10 +500,10 @@ impl VideoTexture {
                             e
                         );
                         Ok(Self {
-                            decoder: None,
-                            accum: 0.0,
+                            worker: None,
                             looping,
-                            first_frame: true,
+                            frame_interval: 1.0 / 30.0,
+                            pending_frame: None,
                             last_width: 1,
                             last_height: 1,
                             hot_reload,
@@ -341,17 +517,21 @@ impl VideoTexture {
             }
             VideoSource::EmbeddedStream(stream) => {
                 let hot_reload = SourceHotReload::disabled();
-                match Self::load_decoder_from_stream(stream, "embedded-stream") {
-                    Ok((decoder, w, h)) => {
+                match Self::spawn_worker(
+                    VideoSource::EmbeddedStream(stream),
+                    looping,
+                    "embedded-stream",
+                ) {
+                    Ok((worker, w, h)) => {
                         info!(
                             "Embedded VideoTexture loaded: {}x{}, looping={}",
                             w, h, looping
                         );
                         Ok(Self {
-                            decoder: Some(decoder),
-                            accum: 0.0,
+                            worker: Some(worker),
                             looping,
-                            first_frame: true,
+                            frame_interval: 1.0 / 30.0,
+                            pending_frame: None,
                             last_width: w,
                             last_height: h,
                             hot_reload,
@@ -363,10 +543,10 @@ impl VideoTexture {
                             e
                         );
                         Ok(Self {
-                            decoder: None,
-                            accum: 0.0,
+                            worker: None,
                             looping,
-                            first_frame: true,
+                            frame_interval: 1.0 / 30.0,
+                            pending_frame: None,
                             last_width: 1,
                             last_height: 1,
                             hot_reload,
@@ -377,85 +557,59 @@ impl VideoTexture {
             }
         }
     }
+}
 
-    /// Decode one frame, handling looping.
-    fn decode_one_frame(&mut self) -> Option<Vec<u8>> {
-        let decoder = self.decoder.as_mut()?;
-        let (w, h) = decoder.dimensions();
-        self.last_width = w;
-        self.last_height = h;
-        match decoder.next_frame() {
-            Some(data) => Some(data.to_vec()),
-            None => {
-                if self.looping {
-                    if let Err(e) = decoder.seek(0.0) {
-                        log::warn!("Video seek-to-start failed: {}", e);
-                    }
-                    // Try again after seeking
-                    decoder.next_frame().map(|d| d.to_vec())
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn frame_interval(&self) -> f64 {
-        let raw = self
-            .decoder
-            .as_ref()
-            .map(|d| d.frame_interval())
-            .unwrap_or(1.0 / 30.0);
-        if raw.is_finite() && raw > 0.0 {
-            raw
-        } else {
-            1.0 / 30.0
-        }
+impl Drop for VideoTexture {
+    fn drop(&mut self) {
+        self.stop_worker();
     }
 }
 
 impl TextureSource for VideoTexture {
     fn update(&mut self, dt: f64) -> Result<TextureUpdate> {
+        if let Some(frame) = self.pending_frame.take() {
+            self.last_width = frame.width;
+            self.last_height = frame.height;
+            self.frame_interval = frame.frame_interval;
+            return Ok(TextureUpdate::NewFrame {
+                width: self.last_width,
+                height: self.last_height,
+                data: frame.data,
+            });
+        }
+
         if let Some(path) = self.hot_reload.take_changed_path()
-            && let Err(e) = self.reload_decoder_from_path(&path)
+            && let Err(e) = self.restart_worker_from_path(&path)
         {
             warn!("VideoTexture reload failed: {}", e);
         }
 
-        // On first frame, decode immediately regardless of timing.
-        if self.first_frame {
-            self.first_frame = false;
-            if let Some(data) = self.decode_one_frame() {
-                return Ok(TextureUpdate::NewFrame {
-                    width: self.last_width,
-                    height: self.last_height,
-                    data,
-                });
-            }
+        let _ = dt;
+
+        let Some(worker) = self.worker.as_ref() else {
             return Ok(TextureUpdate::Unchanged);
-        }
+        };
 
-        let interval = self.frame_interval();
-        self.accum += dt;
-
-        // Only produce one frame per update even if multiple intervals elapsed
-        // to avoid decoding too many frames when the render loop hitches.
-        let mut latest_frame: Option<Vec<u8>> = None;
-        while self.accum >= interval {
-            self.accum -= interval;
-            if let Some(data) = self.decode_one_frame() {
-                latest_frame = Some(data);
+        let mut latest: Option<DecodedVideoFrame> = None;
+        loop {
+            match worker.frame_rx.try_recv() {
+                Ok(frame) => latest = Some(frame),
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
             }
         }
 
-        match latest_frame {
-            Some(data) => Ok(TextureUpdate::NewFrame {
+        if let Some(frame) = latest {
+            self.last_width = frame.width;
+            self.last_height = frame.height;
+            self.frame_interval = frame.frame_interval;
+            return Ok(TextureUpdate::NewFrame {
                 width: self.last_width,
                 height: self.last_height,
-                data,
-            }),
-            None => Ok(TextureUpdate::Unchanged),
+                data: frame.data,
+            });
         }
+
+        Ok(TextureUpdate::Unchanged)
     }
 
     fn dimensions(&self) -> (u32, u32) {

@@ -91,6 +91,9 @@ pub struct LoggingConfig {
     /// Interval, in seconds, between periodic FPS log lines.
     #[serde(default = "default_fps_log_interval_secs")]
     pub fps_log_interval_secs: u32,
+    /// Emit deterministic per-frame transition trace lines for debugging.
+    #[serde(default)]
+    pub transition_trace: bool,
 }
 
 /// Runtime behavior configuration.
@@ -150,6 +153,7 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             fps_log_interval_secs: default_fps_log_interval_secs(),
+            transition_trace: false,
         }
     }
 }
@@ -322,5 +326,17 @@ mod tests {
         assert!(raw.contains("[preview]"));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn logging_transition_trace_defaults_and_roundtrips() {
+        let cfg = DaemonConfig::default();
+        assert!(!cfg.logging.transition_trace);
+
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        assert!(s.contains("transition_trace = false"));
+
+        let parsed: DaemonConfig = toml::from_str(&s).unwrap();
+        assert!(!parsed.logging.transition_trace);
     }
 }

@@ -70,10 +70,11 @@ fn parse_ack_event(ack: &str) -> Result<()> {
 }
 
 /// Tell the daemon to load a shade package.
-pub fn send_load(path: &str, force: bool) -> Result<()> {
+pub fn send_load(path: &str, force: bool, transition: Option<&str>) -> Result<()> {
     send_command(&DaemonCommand::LoadShade {
         path: path.to_string(),
         force,
+        transition: transition.map(|value| value.to_string()),
     })
 }
 

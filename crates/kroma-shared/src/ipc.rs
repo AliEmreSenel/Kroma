@@ -13,6 +13,7 @@ pub enum DaemonPhase {
     Load,
     Active,
     Unload,
+    Transitioning,
     Terminal,
     None,
 }
@@ -21,8 +22,11 @@ pub enum DaemonPhase {
 #[serde(rename_all = "snake_case")]
 pub enum DaemonWaitReason {
     WaitingActiveBoundary,
+    WaitingIncomingPreload,
     RunningUnload,
     RunningLoad,
+    TransitionTimingInfeasible,
+    IncomingPreloadFailed,
     Idle,
 }
 
@@ -32,7 +36,11 @@ pub enum LoadRejectCode {
     BusyWaitingBoundary,
     BusyRunningUnload,
     BusyRunningLoad,
+    BusyTransitioning,
+    InvalidTransitionSpec,
     InvalidStateDefinition,
+    TransitionTimingInfeasible,
+    IncomingPreloadFailed,
 }
 
 fn default_phase_none() -> DaemonPhase {
@@ -54,7 +62,7 @@ pub fn maybe_send<T: Send + Sync + 'static>(
     event: T,
 ) -> Result<()> {
     if let Some(tx) = maybe_tx {
-        tx.send(event)?
+        let _ = tx.send(event);
     };
     Ok(())
 }
@@ -72,6 +80,8 @@ pub enum DaemonCommand {
         path: String,
         #[serde(default)]
         force: bool,
+        #[serde(default)]
+        transition: Option<String>,
     },
 
     /// Move the currently loaded shade into unload flow.

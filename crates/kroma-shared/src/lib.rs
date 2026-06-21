@@ -9,5 +9,6 @@ pub mod error;
 pub mod ipc;
 pub mod shade;
 pub mod traits;
+pub mod transition;
 pub mod translator;
 pub mod types;

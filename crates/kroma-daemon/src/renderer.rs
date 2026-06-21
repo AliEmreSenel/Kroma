@@ -14,7 +14,6 @@ use log::{info, warn};
 use kroma_shared::shade::LiveShadePackage;
 use kroma_shared::types::{ShadePhase, ShaderUniforms, TextureDef, UniformDef};
 
-mod preview;
 mod render_flow;
 mod shader_translation;
 
@@ -83,6 +82,71 @@ struct LoadedTexture {
     height: u32,
     /// Pixel format (needed for correct uploads and bind group layout).
     format: wgpu::TextureFormat,
+}
+
+struct TransitionRenderState {
+    _spec: String,
+    pipeline: wgpu::RenderPipeline,
+    texture_bind_group: wgpu::BindGroup,
+    _prev_texture: wgpu::Texture,
+    prev_view: wgpu::TextureView,
+    _next_texture: wgpu::Texture,
+    next_view: wgpu::TextureView,
+    _width: u32,
+    _height: u32,
+    incoming_lane: RendererLane,
+}
+
+#[derive(Clone, Copy)]
+struct TransitionLaneUniformState {
+    outgoing_elapsed: f32,
+    outgoing_frame: u32,
+    incoming_elapsed: f32,
+    incoming_frame: u32,
+}
+
+struct RendererLane {
+    active_package: Option<Arc<LiveShadePackage>>,
+    custom_uniforms: HashMap<String, kroma_shared::ipc::UniformValue>,
+    custom_uniform_indices: HashMap<String, usize>,
+    custom_uniform_data: Vec<f32>,
+    custom_uniform_buffer: Option<wgpu::Buffer>,
+    pipeline: Option<wgpu::RenderPipeline>,
+    bind_group: Option<wgpu::BindGroup>,
+    bind_group_layout: Option<wgpu::BindGroupLayout>,
+    pipeline_layout: Option<wgpu::PipelineLayout>,
+    texture_bind_group: Option<wgpu::BindGroup>,
+    texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    textures: Vec<LoadedTexture>,
+    texture_sources: Vec<Option<Box<dyn TextureSource>>>,
+    current_frag_wgsl: String,
+    buffer_passes: Vec<BufferPassState>,
+}
+
+impl RendererLane {
+    fn blank() -> Self {
+        Self {
+            active_package: None,
+            custom_uniforms: HashMap::new(),
+            custom_uniform_indices: HashMap::new(),
+            custom_uniform_data: vec![0.0; MAX_CUSTOM_UNIFORMS],
+            custom_uniform_buffer: None,
+            pipeline: None,
+            bind_group: None,
+            bind_group_layout: None,
+            pipeline_layout: None,
+            texture_bind_group: None,
+            texture_bind_group_layout: None,
+            textures: Vec::new(),
+            texture_sources: Vec::new(),
+            current_frag_wgsl: INIT_FRAG_WGSL.to_string(),
+            buffer_passes: Vec::new(),
+        }
+    }
+}
+
+pub(crate) struct PreparedTransitionLane {
+    lane: RendererLane,
 }
 
 /// State for a single render buffer pass (multi-pass rendering).
@@ -154,6 +218,12 @@ pub struct Renderer {
     texture_sources: Vec<Option<Box<dyn TextureSource>>>,
     /// Current fragment shader source (WGSL).
     current_frag_wgsl: String,
+    /// Active transition tag while daemon runs a transition handoff.
+    transition_spec: Option<String>,
+    /// Normalized transition progress in [0, 1].
+    transition_progress: f32,
+    transition_state: Option<TransitionRenderState>,
+    transition_lane_uniforms: Option<TransitionLaneUniformState>,
 
     /// Multi-pass buffer states (Shadertoy-style Buffer A/B/C/D).
     buffer_passes: Vec<BufferPassState>,
@@ -173,8 +243,346 @@ impl Renderer {
             textures: Vec::new(),
             texture_sources: Vec::new(),
             current_frag_wgsl: INIT_FRAG_WGSL.to_string(),
+            transition_spec: None,
+            transition_progress: 0.0,
+            transition_state: None,
+            transition_lane_uniforms: None,
             buffer_passes: Vec::new(),
         })
+    }
+
+    pub fn surface_dimensions(&self) -> (u32, u32) {
+        self.gpu
+            .surface_config
+            .as_ref()
+            .map(|c| (c.width.max(1), c.height.max(1)))
+            .unwrap_or((
+                self.uniforms.u_resolution[0].max(1.0) as u32,
+                self.uniforms.u_resolution[1].max(1.0) as u32,
+            ))
+    }
+
+    fn take_active_lane(&mut self) -> RendererLane {
+        RendererLane {
+            active_package: self.active_package.take(),
+            custom_uniforms: std::mem::take(&mut self.custom_uniforms),
+            custom_uniform_indices: std::mem::take(&mut self.custom_uniform_indices),
+            custom_uniform_data: std::mem::take(&mut self.custom_uniform_data),
+            custom_uniform_buffer: self.custom_uniform_buffer.take(),
+            pipeline: self.gpu.pipeline.take(),
+            bind_group: self.gpu.bind_group.take(),
+            bind_group_layout: self.gpu.bind_group_layout.take(),
+            pipeline_layout: self.gpu.pipeline_layout.take(),
+            texture_bind_group: self.gpu.texture_bind_group.take(),
+            texture_bind_group_layout: self.gpu.texture_bind_group_layout.take(),
+            textures: std::mem::take(&mut self.textures),
+            texture_sources: std::mem::take(&mut self.texture_sources),
+            current_frag_wgsl: std::mem::take(&mut self.current_frag_wgsl),
+            buffer_passes: std::mem::take(&mut self.buffer_passes),
+        }
+    }
+
+    fn install_active_lane(&mut self, lane: RendererLane) {
+        let RendererLane {
+            active_package,
+            custom_uniforms,
+            custom_uniform_indices,
+            custom_uniform_data,
+            custom_uniform_buffer,
+            pipeline,
+            bind_group,
+            bind_group_layout,
+            pipeline_layout,
+            texture_bind_group,
+            texture_bind_group_layout,
+            textures,
+            texture_sources,
+            current_frag_wgsl,
+            buffer_passes,
+        } = lane;
+
+        self.active_package = active_package;
+        self.custom_uniforms = custom_uniforms;
+        self.custom_uniform_indices = custom_uniform_indices;
+        self.custom_uniform_data = custom_uniform_data;
+        self.custom_uniform_buffer = custom_uniform_buffer;
+        self.gpu.pipeline = pipeline;
+        self.gpu.bind_group = bind_group;
+        self.gpu.bind_group_layout = bind_group_layout;
+        self.gpu.pipeline_layout = pipeline_layout;
+        self.gpu.texture_bind_group = texture_bind_group;
+        self.gpu.texture_bind_group_layout = texture_bind_group_layout;
+        self.textures = textures;
+        self.texture_sources = texture_sources;
+        self.current_frag_wgsl = current_frag_wgsl;
+        self.buffer_passes = buffer_passes;
+    }
+
+    fn begin_transition_internal(
+        &mut self,
+        spec: &str,
+        transition_wgsl: &str,
+        incoming_lane: RendererLane,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let device = self.gpu.device.as_ref().context("GPU not initialised")?;
+        let bgl0 = self
+            .gpu
+            .bind_group_layout
+            .as_ref()
+            .context("Uniform BGL missing")?;
+
+        let fmt = self.active_surface_format();
+        let w = width.max(1);
+        let h = height.max(1);
+
+        let prev_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kroma-transition-prev-target"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: fmt,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let prev_view = prev_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let prev_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("kroma-transition-prev-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let next_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("kroma-transition-dynamic-target"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: fmt,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let next_view = next_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let next_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("kroma-transition-next-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let texture_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("kroma-transition-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let transition_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("kroma-transition-bg"),
+            layout: &texture_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&prev_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&prev_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&next_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&next_sampler),
+                },
+            ],
+        });
+
+        let transition_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("kroma-transition-pl"),
+            bind_group_layouts: &[Some(bgl0), Some(&texture_bgl)],
+            immediate_size: 0,
+        });
+
+        let vert_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("kroma-transition-vert"),
+            source: wgpu::ShaderSource::Wgsl(FULLSCREEN_VERT_WGSL.into()),
+        });
+        let frag_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("kroma-transition-frag"),
+            source: wgpu::ShaderSource::Wgsl(transition_wgsl.into()),
+        });
+
+        let pipeline = Self::create_fullscreen_pipeline(
+            device,
+            &transition_layout,
+            &vert_module,
+            &frag_module,
+            fmt,
+            "kroma-transition-pipeline",
+        );
+
+        self.transition_spec = Some(spec.to_string());
+        self.transition_progress = 0.0;
+        self.transition_state = Some(TransitionRenderState {
+            _spec: spec.to_string(),
+            pipeline,
+            texture_bind_group: transition_bg,
+            _prev_texture: prev_texture,
+            prev_view,
+            _next_texture: next_texture,
+            next_view,
+            _width: w,
+            _height: h,
+            incoming_lane,
+        });
+        self.transition_lane_uniforms = Some(TransitionLaneUniformState {
+            outgoing_elapsed: 0.0,
+            outgoing_frame: 0,
+            incoming_elapsed: 0.0,
+            incoming_frame: 0,
+        });
+
+        Ok(())
+    }
+
+    pub(crate) fn preflight_transition_lane(
+        &mut self,
+        pkg: Arc<LiveShadePackage>,
+        phase: ShadePhase,
+        precompiled_wgsl: Option<&str>,
+        shade_path: Option<&str>,
+    ) -> Result<PreparedTransitionLane> {
+        let outgoing_lane = self.take_active_lane();
+        self.install_active_lane(RendererLane::blank());
+        self.rebuild_bind_group_0()
+            .with_context(|| "Failed to initialize incoming lane uniform bindings")?;
+
+        let load_result = self.load_phase(pkg, phase, precompiled_wgsl, shade_path);
+        let incoming_lane = self.take_active_lane();
+        self.install_active_lane(outgoing_lane);
+
+        let outcome = load_result?;
+        match outcome {
+            ShadeLoadOutcome::Success => Ok(PreparedTransitionLane {
+                lane: incoming_lane,
+            }),
+            ShadeLoadOutcome::TextureError(failures) => {
+                let summary = failures
+                    .iter()
+                    .map(|f| format!("{} ({}): {}", f.name, f.source, f.error))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                anyhow::bail!(
+                    "Incoming transition lane preflight failed due to texture errors: {}",
+                    summary
+                );
+            }
+            ShadeLoadOutcome::CompileError(msg) => {
+                anyhow::bail!(
+                    "Incoming transition lane preflight shader compile failed: {}",
+                    msg
+                );
+            }
+        }
+    }
+
+    pub(crate) fn begin_transition_with_preflighted_lane(
+        &mut self,
+        spec: &str,
+        transition_wgsl: &str,
+        prepared: PreparedTransitionLane,
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        self.begin_transition_internal(spec, transition_wgsl, prepared.lane, width, height)
+    }
+
+    /// Updates normalized transition progress.
+    pub fn set_transition_progress(&mut self, progress: f32) {
+        self.transition_progress = progress.clamp(0.0, 1.0);
+    }
+
+    pub fn set_transition_lane_progress(
+        &mut self,
+        outgoing_elapsed: f64,
+        outgoing_frame: u32,
+        incoming_elapsed: f64,
+        incoming_frame: u32,
+    ) {
+        self.transition_lane_uniforms = Some(TransitionLaneUniformState {
+            outgoing_elapsed: outgoing_elapsed.max(0.0) as f32,
+            outgoing_frame,
+            incoming_elapsed: incoming_elapsed.max(0.0) as f32,
+            incoming_frame,
+        });
+    }
+
+    /// Ends an active daemon transition handoff.
+    pub fn end_transition(&mut self) {
+        self.transition_progress = 0.0;
+        self.transition_spec = None;
+        self.transition_state = None;
+        self.transition_lane_uniforms = None;
+    }
+
+    pub fn promote_live_transition_incoming(&mut self) -> Result<bool> {
+        let Some(transition) = self.transition_state.take() else {
+            return Ok(false);
+        };
+
+        self.install_active_lane(transition.incoming_lane);
+
+        self.transition_progress = 0.0;
+        self.transition_spec = None;
+        self.transition_state = None;
+        self.transition_lane_uniforms = None;
+
+        Ok(true)
     }
 
     /// Returns the active surface format used for pipeline and texture setup.
@@ -201,41 +609,9 @@ impl Renderer {
         )
     }
 
-    /// Encodes a fullscreen pass against a target view.
-    fn encode_fullscreen_pass(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        target_view: &wgpu::TextureView,
-        label: &str,
-        require_pipeline: bool,
-    ) -> Result<()> {
-        render_flow::encode_fullscreen_pass(self, encoder, target_view, label, require_pipeline)
-    }
-
     /// Writes one uniform block into GPU uniform memory.
     fn write_uniform_buffer(&self, uniforms: &ShaderUniforms) {
         render_flow::write_uniform_buffer(self, uniforms)
-    }
-
-    /// Uploads per-frame uniforms and custom uniform storage.
-    fn upload_frame_uniforms(&self) {
-        render_flow::upload_frame_uniforms(self)
-    }
-
-    /// Uploads preview uniforms with a temporary resolution override.
-    fn upload_preview_uniforms(&self, width: u32, height: u32) {
-        render_flow::upload_preview_uniforms(self, width, height)
-    }
-
-    /// Creates an offscreen color target and view for preview rendering.
-    fn create_offscreen_render_target(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-        format: wgpu::TextureFormat,
-        label: &str,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
-        render_flow::create_offscreen_render_target(device, width, height, format, label)
     }
 
     pub fn init_gpu_with_surface(
@@ -823,22 +1199,49 @@ impl Renderer {
         for (name, def) in &tex_defs {
             // Create the texture source (all types including AudioSpectrum, Shader)
             match textures::create_texture_source(pkg, def, Some(&gpu_ctx)) {
-                Ok(Some(source)) => {
+                Ok(Some(mut source)) => {
                     let (w, h) = source.dimensions();
                     let gpu_format = source.format().wgpu_format();
-                    // Create a 1×1 placeholder in the correct format
-                    let placeholder_data: Vec<u8> =
+
+                    let mut init_width = 1;
+                    let mut init_height = 1;
+                    let mut init_data: Vec<u8> =
                         vec![0u8; source.format().bytes_per_pixel() as usize];
-                    let placeholder = Self::create_gpu_texture(
+
+                    match source.update(0.0) {
+                        Ok(TextureUpdate::NewFrame {
+                            data,
+                            width,
+                            height,
+                        }) if width > 0 && height > 0 => {
+                            init_width = width;
+                            init_height = height;
+                            init_data = data;
+                        }
+                        Ok(TextureUpdate::Unchanged)
+                        | Ok(TextureUpdate::NewFrame {
+                            data: _,
+                            width: _,
+                            height: _,
+                        }) => {}
+                        Err(e) => {
+                            warn!(
+                                "Texture '{}' initial frame prefetch failed (using placeholder): {}",
+                                name, e
+                            );
+                        }
+                    }
+
+                    let initial_texture = Self::create_gpu_texture(
                         device,
                         queue,
-                        &placeholder_data,
-                        1,
-                        1,
+                        &init_data,
+                        init_width,
+                        init_height,
                         gpu_format,
                         name,
                     );
-                    self.textures.push(placeholder);
+                    self.textures.push(initial_texture);
                     self.texture_sources.push(Some(source));
                     info!(
                         "Texture '{}' ({}) queued ({}x{})",
@@ -899,7 +1302,7 @@ impl Renderer {
     /// Advance all texture sources and upload changed frames to the GPU.
     ///
     /// Called once per frame from the render loop.
-    pub fn update_textures(&mut self, dt: f64) -> Result<()> {
+    fn update_active_lane_textures(&mut self, dt: f64) -> Result<()> {
         let queue = match self.gpu.queue.as_ref() {
             Some(q) => q,
             None => return Ok(()),
@@ -997,6 +1400,27 @@ impl Renderer {
 
         if needs_rebuild {
             self.build_texture_bind_group()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn update_textures(&mut self, dt: f64) -> Result<()> {
+        self.update_active_lane_textures(dt)?;
+
+        if self.transition_state.is_some() {
+            let mut transition = self
+                .transition_state
+                .take()
+                .context("Transition state disappeared while updating textures")?;
+
+            let outgoing_lane = self.take_active_lane();
+            self.install_active_lane(transition.incoming_lane);
+            self.update_active_lane_textures(dt)?;
+            transition.incoming_lane = self.take_active_lane();
+            self.install_active_lane(outgoing_lane);
+
+            self.transition_state = Some(transition);
         }
 
         Ok(())
@@ -1199,14 +1623,6 @@ impl Renderer {
     /// Render a single frame to the surface.
     pub fn render_frame(&mut self) -> Result<()> {
         render_flow::render_frame(self)
-    }
-
-    /// Render the current shader to an offscreen texture and return JPEG bytes.
-    ///
-    /// This is used for the live preview stream — renders at a small resolution
-    /// and returns base64-encoded JPEG data.
-    pub fn capture_preview_frame(&mut self, width: u32, height: u32) -> Result<Vec<u8>> {
-        preview::capture_preview_frame(self, width, height)
     }
 }
 

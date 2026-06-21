@@ -16,14 +16,8 @@ use log::{error, info};
 
 use kroma_shared::ipc::{DaemonCommand, DaemonEvent, DaemonPhase, DaemonWaitReason, socket_path};
 
-use crate::config::PreviewConfig;
-
-/// Return type for [`start`]: join handle, shared status, and preview stream state.
-type IpcStartResult = (
-    JoinHandle<()>,
-    Arc<Mutex<DaemonStatus>>,
-    Arc<Mutex<PreviewStreamState>>,
-);
+/// Return type for [`start`]: join handle and shared daemon status.
+type IpcStartResult = (JoinHandle<()>, Arc<Mutex<DaemonStatus>>);
 
 /// Internal command wrapper that includes an optional response channel.
 ///
@@ -53,25 +47,6 @@ pub struct DaemonStatus {
     pub cursor_y: f32,
 }
 
-/// Shared state for preview frame streaming.
-pub struct PreviewStreamState {
-    /// Whether streaming is active.
-    pub active: bool,
-    /// Target frames per second for the preview stream.
-    pub target_fps: u32,
-    /// Requested preview width.
-    pub width: u32,
-    /// Requested preview height.
-    pub height: u32,
-    /// Writer to send frames back to the connected client.
-    /// Only set when a streaming client is connected.
-    pub writer: Option<Box<dyn std::io::Write + Send>>,
-    /// Last frame send time for throttling.
-    pub last_frame_time: std::time::Instant,
-    /// Max allowed preview stream FPS.
-    pub max_target_fps: u32,
-}
-
 impl Default for DaemonStatus {
     fn default() -> Self {
         Self {
@@ -93,11 +68,8 @@ impl Default for DaemonStatus {
 
 /// Start the IPC listener on a background thread.
 ///
-/// Returns a join handle, shared status, and shared preview stream state.
-pub fn start(
-    cmd_tx: Sender<InternalCommand>,
-    preview_cfg: PreviewConfig,
-) -> Result<IpcStartResult> {
+/// Returns a join handle and shared status.
+pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<IpcStartResult> {
     let path = socket_path();
 
     // Remove stale socket if it exists
@@ -114,17 +86,6 @@ pub fn start(
     let status = Arc::new(Mutex::new(DaemonStatus::default()));
     let status_clone = Arc::clone(&status);
 
-    let preview_state = Arc::new(Mutex::new(PreviewStreamState {
-        active: false,
-        target_fps: preview_cfg.default_target_fps.max(1),
-        width: preview_cfg.default_width.max(1),
-        height: preview_cfg.default_height.max(1),
-        writer: None,
-        last_frame_time: std::time::Instant::now(),
-        max_target_fps: preview_cfg.max_target_fps.max(1),
-    }));
-    let preview_state_clone = Arc::clone(&preview_state);
-
     let handle = std::thread::Builder::new()
         .name("kroma-ipc".into())
         .spawn(move || {
@@ -133,7 +94,6 @@ pub fn start(
                     Ok(stream) => {
                         let tx = cmd_tx.clone();
                         let status = Arc::clone(&status_clone);
-                        let preview = Arc::clone(&preview_state_clone);
                         std::thread::spawn(move || {
                             let writer = match stream.try_clone() {
                                 Ok(cloned) => cloned,
@@ -181,69 +141,28 @@ pub fn start(
                                                 }
                                             }
                                             Ok(DaemonCommand::StartPreviewStream { width, height, target_fps }) => {
-                                                let stream_writer = match writer.try_clone() {
-                                                    Ok(w) => w,
-                                                    Err(e) => {
-                                                        log::warn!("Failed to clone writer for preview: {}", e);
-                                                        continue;
-                                                    }
+                                                let _ = (width, height, target_fps);
+                                                let event = DaemonEvent::Error {
+                                                    message: "Preview pipeline is disabled in unified renderer mode".into(),
                                                 };
-                                                let clamped_fps;
-                                                {
-                                                    let mut ps = preview.lock().unwrap_or_else(|e| e.into_inner());
-                                                    if ps.writer.is_some() {
-                                                        log::warn!("Preview stream: replacing existing client connection");
-                                                    }
-                                                    clamped_fps = target_fps.clamp(1, ps.max_target_fps);
-                                                    ps.active = true;
-                                                    ps.width = width.max(1);
-                                                    ps.height = height.max(1);
-                                                    ps.target_fps = clamped_fps;
-                                                    ps.writer = Some(Box::new(stream_writer));
-                                                    ps.last_frame_time = std::time::Instant::now();
-                                                }
-                                                log::info!(
-                                                    "Preview stream started: {}x{} @ {} fps (requested: {})",
-                                                    width,
-                                                    height,
-                                                    clamped_fps,
-                                                    target_fps
-                                                );
-                                                let ack = DaemonEvent::Ready;
-                                                if let Ok(json) = serde_json::to_string(&ack) {
+                                                if let Ok(json) = serde_json::to_string(&event) {
                                                     let _ = writeln!(writer, "{}", json);
                                                     let _ = writer.flush();
                                                 }
                                             }
                                             Ok(DaemonCommand::StopPreviewStream) => {
-                                                log::info!("Preview stream stopped");
-                                                {
-                                                    let mut ps = preview.lock().unwrap_or_else(|e| e.into_inner());
-                                                    ps.active = false;
-                                                    ps.writer = None;
-                                                }
-                                                let ack = DaemonEvent::Ready;
-                                                if let Ok(json) = serde_json::to_string(&ack) {
+                                                let event = DaemonEvent::Error {
+                                                    message: "Preview pipeline is disabled in unified renderer mode".into(),
+                                                };
+                                                if let Ok(json) = serde_json::to_string(&event) {
                                                     let _ = writeln!(writer, "{}", json);
                                                     let _ = writer.flush();
                                                 }
                                             }
                                             Ok(DaemonCommand::RequestPreviewFrame { width: _w, height: _h }) => {
-                                                // One-shot frame request — the main loop will
-                                                // capture and send a single frame via response_tx.
-                                                let (resp_tx, resp_rx) = std::sync::mpsc::channel();
-                                                let icmd = InternalCommand {
-                                                    command: DaemonCommand::RequestPreviewFrame { width: _w, height: _h },
-                                                    response_tx: Some(resp_tx),
-                                                };
-                                                if tx.send(icmd).is_err() {
-                                                    return;
-                                                }
-                                                let event = match resp_rx.recv_timeout(Duration::from_secs(5)) {
-                                                    Ok(ev) => ev,
-                                                    Err(_) => DaemonEvent::Error {
-                                                        message: "Preview frame timed out".into(),
-                                                    },
+                                                let _ = (_w, _h);
+                                                let event = DaemonEvent::Error {
+                                                    message: "Preview pipeline is disabled in unified renderer mode".into(),
                                                 };
                                                 if let Ok(json) = serde_json::to_string(&event) {
                                                     let _ = writeln!(writer, "{}", json);
@@ -319,22 +238,9 @@ pub fn start(
                                     }
                                     Err(e) => {
                                         error!("IPC read error: {}", e);
-                                        // Clean up preview state on disconnect
-                                        {
-                                            let mut ps = preview.lock().unwrap_or_else(|e| e.into_inner());
-                                            ps.active = false;
-                                            ps.writer = None;
-                                        }
                                         return;
                                     }
                                 }
-                            }
-
-                            // Client disconnected — clean up preview state
-                            {
-                                let mut ps = preview.lock().unwrap_or_else(|e| e.into_inner());
-                                ps.active = false;
-                                ps.writer = None;
                             }
                         });
                     }
@@ -346,5 +252,5 @@ pub fn start(
         })
         .context("Failed to spawn IPC thread")?;
 
-    Ok((handle, status, preview_state))
+    Ok((handle, status))
 }

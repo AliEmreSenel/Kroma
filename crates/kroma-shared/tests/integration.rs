@@ -15,13 +15,42 @@ fn daemon_command_load_roundtrip() {
     let cmd = DaemonCommand::LoadShade {
         path: "/home/user/my_shader.shade".into(),
         force: false,
+        transition: None,
     };
     let json = serde_json::to_string(&cmd).unwrap();
     let deserialized: DaemonCommand = serde_json::from_str(&json).unwrap();
     match deserialized {
-        DaemonCommand::LoadShade { path, force } => {
+        DaemonCommand::LoadShade {
+            path,
+            force,
+            transition,
+        } => {
             assert_eq!(path, "/home/user/my_shader.shade");
             assert!(!force);
+            assert!(transition.is_none());
+        }
+        _ => panic!("Expected LoadShade"),
+    }
+}
+
+#[test]
+fn daemon_command_load_roundtrip_with_transition() {
+    let cmd = DaemonCommand::LoadShade {
+        path: "/home/user/next.shade".into(),
+        force: true,
+        transition: Some("kroma.fade:0.6".into()),
+    };
+    let json = serde_json::to_string(&cmd).unwrap();
+    let deserialized: DaemonCommand = serde_json::from_str(&json).unwrap();
+    match deserialized {
+        DaemonCommand::LoadShade {
+            path,
+            force,
+            transition,
+        } => {
+            assert_eq!(path, "/home/user/next.shade");
+            assert!(force);
+            assert_eq!(transition.as_deref(), Some("kroma.fade:0.6"));
         }
         _ => panic!("Expected LoadShade"),
     }
@@ -93,6 +122,125 @@ fn daemon_event_load_rejected_roundtrip() {
             assert_eq!(message, "unload phase is running");
         }
         _ => panic!("Expected LoadRejected"),
+    }
+}
+
+#[test]
+fn daemon_event_load_rejected_busy_transitioning_roundtrip() {
+    let event = DaemonEvent::LoadRejected {
+        code: LoadRejectCode::BusyTransitioning,
+        message: "transition is running".into(),
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let deserialized: DaemonEvent = serde_json::from_str(&json).unwrap();
+    match deserialized {
+        DaemonEvent::LoadRejected { code, message } => {
+            assert_eq!(code, LoadRejectCode::BusyTransitioning);
+            assert_eq!(message, "transition is running");
+        }
+        _ => panic!("Expected LoadRejected"),
+    }
+}
+
+#[test]
+fn daemon_event_load_rejected_invalid_transition_spec_roundtrip() {
+    let event = DaemonEvent::LoadRejected {
+        code: LoadRejectCode::InvalidTransitionSpec,
+        message: "transition spec is invalid".into(),
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let deserialized: DaemonEvent = serde_json::from_str(&json).unwrap();
+    match deserialized {
+        DaemonEvent::LoadRejected { code, message } => {
+            assert_eq!(code, LoadRejectCode::InvalidTransitionSpec);
+            assert_eq!(message, "transition spec is invalid");
+        }
+        _ => panic!("Expected LoadRejected"),
+    }
+}
+
+#[test]
+fn daemon_event_load_rejected_transition_timing_infeasible_roundtrip() {
+    let event = DaemonEvent::LoadRejected {
+        code: LoadRejectCode::TransitionTimingInfeasible,
+        message: "timing infeasible".into(),
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let deserialized: DaemonEvent = serde_json::from_str(&json).unwrap();
+    match deserialized {
+        DaemonEvent::LoadRejected { code, message } => {
+            assert_eq!(code, LoadRejectCode::TransitionTimingInfeasible);
+            assert_eq!(message, "timing infeasible");
+        }
+        _ => panic!("Expected LoadRejected"),
+    }
+}
+
+#[test]
+fn daemon_event_load_rejected_incoming_preload_failed_roundtrip() {
+    let event = DaemonEvent::LoadRejected {
+        code: LoadRejectCode::IncomingPreloadFailed,
+        message: "incoming preload failed".into(),
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let deserialized: DaemonEvent = serde_json::from_str(&json).unwrap();
+    match deserialized {
+        DaemonEvent::LoadRejected { code, message } => {
+            assert_eq!(code, LoadRejectCode::IncomingPreloadFailed);
+            assert_eq!(message, "incoming preload failed");
+        }
+        _ => panic!("Expected LoadRejected"),
+    }
+}
+
+#[test]
+fn daemon_event_status_transitioning_phase_roundtrip() {
+    let event = DaemonEvent::Status {
+        fps: 60.0,
+        paused: false,
+        loaded_shade: Some("Transition Demo".into()),
+        current_phase: DaemonPhase::Transitioning,
+        pending_request_path: Some("/tmp/next.shade".into()),
+        wait_reason: DaemonWaitReason::Idle,
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let deserialized: DaemonEvent = serde_json::from_str(&json).unwrap();
+    match deserialized {
+        DaemonEvent::Status {
+            current_phase,
+            pending_request_path,
+            ..
+        } => {
+            assert_eq!(current_phase, DaemonPhase::Transitioning);
+            assert_eq!(pending_request_path.as_deref(), Some("/tmp/next.shade"));
+        }
+        _ => panic!("Expected Status"),
+    }
+}
+
+#[test]
+fn daemon_event_status_waiting_preload_roundtrip() {
+    let event = DaemonEvent::Status {
+        fps: 30.0,
+        paused: false,
+        loaded_shade: Some("Queued Demo".into()),
+        current_phase: DaemonPhase::Active,
+        pending_request_path: Some("/tmp/queued.shade".into()),
+        wait_reason: DaemonWaitReason::WaitingIncomingPreload,
+    };
+
+    let json = serde_json::to_string(&event).unwrap();
+    let deserialized: DaemonEvent = serde_json::from_str(&json).unwrap();
+    match deserialized {
+        DaemonEvent::Status { wait_reason, .. } => {
+            assert_eq!(wait_reason, DaemonWaitReason::WaitingIncomingPreload);
+        }
+        _ => panic!("Expected Status"),
     }
 }
 
@@ -352,4 +500,22 @@ height = 180
     assert_eq!(detail.seed, Some(1337));
     assert_eq!(base.width, Some(320));
     assert_eq!(base.height, Some(180));
+}
+
+#[test]
+fn parse_rejects_unknown_transitions_usage_key() {
+    let toml_str = r#"
+[meta]
+name = "Invalid Transition Usage"
+author = "Tester"
+
+[states.active]
+length = 0.0
+
+[transitions_usage]
+on_unload_to_terminal = "kroma.fade:0.5"
+"#;
+
+    let parsed = toml::from_str::<ShadeConfig>(toml_str);
+    assert!(parsed.is_err());
 }

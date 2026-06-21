@@ -114,19 +114,20 @@ Newline-delimited JSON.
 
 Commands include:
 
-1. `LoadShade { path, force }`
+1. `LoadShade { path, force, transition }`
 2. `UnloadShade`
 3. `SetUniform`
 4. `Pause`, `Resume`, `Reload`, `LiveReload`, `StatusQuery`, `Shutdown`
 
 Status payload includes lifecycle telemetry:
 
-1. `current_phase` (`load|active|unload|terminal|none`)
+1. `current_phase` (`load|active|unload|transitioning|terminal|none`)
 2. `pending_request_path`
 3. `wait_reason` (`waiting_active_boundary|running_unload|running_load|idle`)
 
 Daemon may return `LoadRejected { code, message }` for lifecycle policy rejections
-(for example while waiting for active loop boundary and `force=false`).
+(for example while waiting for active loop boundary and `force=false`, or while a transition
+handoff is currently running).
 
 ## 7. Implementation Status
 

@@ -38,6 +38,30 @@ Behavioral rules:
 3. Phase-local shader time/frame counters reset on phase entry.
 4. After the last defined phase completes, daemon holds final rendered frame.
 
+### Transition Config
+
+Runtime config may define reusable transition effects and lifecycle transition hooks:
+
+1. `[transitions.<id>]` defines a transition shader and default duration.
+2. `[transitions_usage]` defines lifecycle handoff usage keys:
+3. `on_load_to_active`
+4. `on_active_to_unload`
+
+Transition references use strict scoped syntax:
+
+1. `kroma.<id>[:seconds]` for builtin transitions.
+2. `incoming.<id>[:seconds]` for transitions in the shade being entered.
+3. `outgoing.<id>[:seconds]` for transitions in the shade being exited.
+
+Duration resolution is strict:
+
+1. Explicit `:seconds` override wins.
+2. Otherwise transition definition `duration` is used.
+3. Missing/invalid transition references fail loading.
+
+Slideshow textures can also set `transition = "scope.id[:seconds]"` and the transition
+window is consumed from the end of each fixed slideshow `interval`.
+
 ## File Header
 
 Header size: 64 bytes
@@ -106,6 +130,7 @@ Use `kroma inspect` for format introspection and validation:
 2. `verify --mode fast|checksum|decode` for integrity checks
 3. `list` for entry table metadata
 4. `summary`/`list` include lifecycle phase metadata (`load|active|unload`, lengths, shader path)
-5. `chunks --depth 1..4` for chunk-level diagnostics
-6. `stats` for compression analytics
-7. `dump-entry` / `dump-chunk` for byte-level debugging
+5. `summary` includes transition definitions and `transitions_usage` lifecycle mapping
+6. `chunks --depth 1..4` for chunk-level diagnostics
+7. `stats` for compression analytics
+8. `dump-entry` / `dump-chunk` for byte-level debugging

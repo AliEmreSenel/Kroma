@@ -7,7 +7,7 @@ use serde::Serialize;
 use kroma_shared::shade::{
     ChunkDebugInfo, CompressionStats, LiveShadePackage, PackageMetadata, VerifyMode, VerifyReport,
 };
-use kroma_shared::types::{ShadeConfig, ShadeStateDef};
+use kroma_shared::types::{ShadeConfig, ShadeStateDef, ShadeTransitionsUsage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InspectOutputFormat {
@@ -94,6 +94,8 @@ struct SummaryOutput {
     stats: CompressionStats,
     entry_count: usize,
     phases: Vec<PhaseOutput>,
+    transitions_usage: TransitionUsageOutput,
+    transitions: Vec<TransitionOutput>,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +104,22 @@ struct PhaseOutput {
     length: f64,
     is_loop: bool,
     shader: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransitionUsageOutput {
+    on_load_to_active: Option<String>,
+    on_active_to_unload: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransitionOutput {
+    id: String,
+    shader: String,
+    duration: f64,
+    uniform_count: usize,
+    texture_count: usize,
+    buffer_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -163,6 +181,8 @@ fn cmd_summary(pkg: &LiveShadePackage, format: InspectOutputFormat) -> Result<()
     let stats = pkg.compression_stats()?;
     let entries = pkg.entry_debug_infos()?;
     let phases = collect_phase_outputs(&pkg.config);
+    let transitions_usage = collect_transition_usage_output(&pkg.config.transitions_usage);
+    let transitions = collect_transition_outputs(&pkg.config);
 
     match format {
         InspectOutputFormat::Json => {
@@ -171,6 +191,8 @@ fn cmd_summary(pkg: &LiveShadePackage, format: InspectOutputFormat) -> Result<()
                 stats,
                 entry_count: entries.len(),
                 phases,
+                transitions_usage,
+                transitions,
             };
             println!("{}", serde_json::to_string_pretty(&out)?);
         }
@@ -220,10 +242,61 @@ fn cmd_summary(pkg: &LiveShadePackage, format: InspectOutputFormat) -> Result<()
                     }
                 }
             }
+
+            println!(
+                "transition usage  : load->active={} active->unload={}",
+                transitions_usage
+                    .on_load_to_active
+                    .as_deref()
+                    .unwrap_or("<none>"),
+                transitions_usage
+                    .on_active_to_unload
+                    .as_deref()
+                    .unwrap_or("<none>")
+            );
+
+            if transitions.is_empty() {
+                println!("transitions       : none");
+            } else {
+                println!("transitions       : {}", transitions.len());
+                for transition in transitions {
+                    println!(
+                        "  - {:<16} duration={:.3}s shader={} (u:{} t:{} b:{})",
+                        transition.id,
+                        transition.duration,
+                        transition.shader,
+                        transition.uniform_count,
+                        transition.texture_count,
+                        transition.buffer_count
+                    );
+                }
+            }
         }
     }
 
     Ok(())
+}
+
+fn collect_transition_usage_output(usage: &ShadeTransitionsUsage) -> TransitionUsageOutput {
+    TransitionUsageOutput {
+        on_load_to_active: usage.on_load_to_active.clone(),
+        on_active_to_unload: usage.on_active_to_unload.clone(),
+    }
+}
+
+fn collect_transition_outputs(config: &ShadeConfig) -> Vec<TransitionOutput> {
+    config
+        .transitions
+        .iter()
+        .map(|(id, def)| TransitionOutput {
+            id: id.clone(),
+            shader: def.shader.clone(),
+            duration: def.duration,
+            uniform_count: def.uniforms.len(),
+            texture_count: def.textures.len(),
+            buffer_count: def.buffers.len(),
+        })
+        .collect()
 }
 
 fn cmd_verify(
@@ -581,7 +654,7 @@ fn print_verify_report_text(report: &VerifyReport) {
     }
 }
 
-fn select_preview<'a>(bytes: &'a [u8], max_bytes: usize, full: bool) -> (&'a [u8], bool) {
+fn select_preview(bytes: &[u8], max_bytes: usize, full: bool) -> (&[u8], bool) {
     if full {
         (bytes, false)
     } else {
@@ -613,7 +686,7 @@ fn hex_preview(bytes: &[u8], max_bytes: usize) -> String {
     let end = std::cmp::min(max_bytes, bytes.len());
     let mut hex = hex_encode(&bytes[0..end]);
     if end < bytes.len() {
-        hex.push_str("…");
+        hex.push('…');
     }
     hex
 }
@@ -649,5 +722,47 @@ fn format_bytes(value: u64) -> String {
         format!("{:.2}KiB", v / KB)
     } else {
         format!("{}B", value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_transition_outputs, collect_transition_usage_output};
+    use kroma_shared::types::ShadeConfig;
+
+    #[test]
+    fn collects_transition_usage_and_defs() {
+        let config: ShadeConfig = toml::from_str(
+            r#"
+[meta]
+name = "Inspect Transition Test"
+author = "Kroma"
+
+[states.active]
+length = 0.0
+
+[transitions.fade]
+shader = "assets/fade.frag"
+duration = 0.6
+
+[transitions_usage]
+on_load_to_active = "kroma.fade"
+on_active_to_unload = "incoming.fade:0.2"
+"#,
+        )
+        .expect("valid config");
+
+        let usage = collect_transition_usage_output(&config.transitions_usage);
+        assert_eq!(usage.on_load_to_active.as_deref(), Some("kroma.fade"));
+        assert_eq!(
+            usage.on_active_to_unload.as_deref(),
+            Some("incoming.fade:0.2")
+        );
+
+        let transitions = collect_transition_outputs(&config);
+        assert_eq!(transitions.len(), 1);
+        assert_eq!(transitions[0].id, "fade");
+        assert_eq!(transitions[0].shader, "assets/fade.frag");
+        assert!((transitions[0].duration - 0.6).abs() < 1e-6);
     }
 }

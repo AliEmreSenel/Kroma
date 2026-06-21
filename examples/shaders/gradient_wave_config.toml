@@ -3,9 +3,16 @@ name = "Gradient Wave"
 author = "Kroma Team"
 version = "1.0"
 
+[states.load]
+length = 0.75
+shader = "gradient_wave.frag"
+
 [states.active]
 length = 0.0
 shader = "gradient_wave.frag"
+
+[transitions_usage]
+on_load_to_active = "kroma.fade:0.75"
 
 [states.active.uniforms]
 speed = { type = "float", min = 0.1, max = 5.0, default = 1.0 }
