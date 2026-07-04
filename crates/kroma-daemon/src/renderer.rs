@@ -1207,6 +1207,7 @@ impl Renderer {
                     let mut init_height = 1;
                     let mut init_data: Vec<u8> =
                         vec![0u8; source.format().bytes_per_pixel() as usize];
+                    let mut recycle_init_data = false;
 
                     match source.update(0.0) {
                         Ok(TextureUpdate::NewFrame {
@@ -1217,6 +1218,7 @@ impl Renderer {
                             init_width = width;
                             init_height = height;
                             init_data = data;
+                            recycle_init_data = true;
                         }
                         Ok(TextureUpdate::Unchanged)
                         | Ok(TextureUpdate::NewFrame {
@@ -1241,6 +1243,9 @@ impl Renderer {
                         gpu_format,
                         name,
                     );
+                    if recycle_init_data {
+                        source.recycle_frame(init_data);
+                    }
                     self.textures.push(initial_texture);
                     self.texture_sources.push(Some(source));
                     info!(
@@ -1333,55 +1338,70 @@ impl Renderer {
                     width,
                     height,
                 } => {
-                    // GPU-managed sources handle their own textures
+                    // GPU-managed sources handle their own textures.  Keep the
+                    // owned frame buffer available for recycling after any CPU
+                    // upload path has borrowed from it.
+                    let mut recycle_data = Some(data);
                     if source.is_gpu_managed() {
-                        // No CPU upload path for GPU-managed sources.
-                    } else {
-                        if i >= self.textures.len() {
-                            continue;
+                        // GPU-managed sources have already updated their own
+                        // texture. A NewFrame here means their exposed
+                        // view/sampler may have changed, so rebuild bind group.
+                        if i < self.textures.len() {
+                            self.textures[i].width = width;
+                            self.textures[i].height = height;
                         }
-                        let tex_format = self.textures[i].format;
-                        let bpp = match tex_format {
-                            wgpu::TextureFormat::R32Float => 4u32,
-                            _ => 4u32, // Rgba8UnormSrgb
-                        };
+                        needs_rebuild = true;
+                    } else {
+                        if i < self.textures.len() {
+                            let data = recycle_data.as_ref().expect("frame data present");
+                            let tex_format = self.textures[i].format;
+                            let bpp = match tex_format {
+                                wgpu::TextureFormat::R32Float => 4u32,
+                                _ => 4u32, // Rgba8UnormSrgb
+                            };
 
-                        // Check if we need to resize the GPU texture
-                        if self.textures[i].width != width || self.textures[i].height != height {
-                            // Recreate the GPU texture at the new size
-                            let new_tex = Self::create_gpu_texture(
-                                device,
-                                queue,
-                                &data,
-                                width,
-                                height,
-                                tex_format,
-                                &format!("texture-{}", i),
-                            );
-                            self.textures[i] = new_tex;
-                            needs_rebuild = true;
-                        } else {
-                            // Just upload new data to the existing texture
-                            queue.write_texture(
-                                wgpu::TexelCopyTextureInfo {
-                                    texture: &self.textures[i].texture,
-                                    mip_level: 0,
-                                    origin: wgpu::Origin3d::ZERO,
-                                    aspect: wgpu::TextureAspect::All,
-                                },
-                                &data,
-                                wgpu::TexelCopyBufferLayout {
-                                    offset: 0,
-                                    bytes_per_row: Some(bpp * width),
-                                    rows_per_image: Some(height),
-                                },
-                                wgpu::Extent3d {
+                            // Check if we need to resize the GPU texture
+                            if self.textures[i].width != width || self.textures[i].height != height
+                            {
+                                // Recreate the GPU texture at the new size
+                                let new_tex = Self::create_gpu_texture(
+                                    device,
+                                    queue,
+                                    data,
                                     width,
                                     height,
-                                    depth_or_array_layers: 1,
-                                },
-                            );
+                                    tex_format,
+                                    &format!("texture-{}", i),
+                                );
+                                self.textures[i] = new_tex;
+                                needs_rebuild = true;
+                            } else {
+                                // Just upload new data to the existing texture
+                                queue.write_texture(
+                                    wgpu::TexelCopyTextureInfo {
+                                        texture: &self.textures[i].texture,
+                                        mip_level: 0,
+                                        origin: wgpu::Origin3d::ZERO,
+                                        aspect: wgpu::TextureAspect::All,
+                                    },
+                                    data,
+                                    wgpu::TexelCopyBufferLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(bpp * width),
+                                        rows_per_image: Some(height),
+                                    },
+                                    wgpu::Extent3d {
+                                        width,
+                                        height,
+                                        depth_or_array_layers: 1,
+                                    },
+                                );
+                            }
                         }
+                    }
+
+                    if let Some(data) = recycle_data.take() {
+                        source.recycle_frame(data);
                     }
                 }
             }

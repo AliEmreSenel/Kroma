@@ -939,6 +939,8 @@ impl TextureSource for ShaderTexture {
                             },
                         );
                     }
+
+                    source.recycle_frame(data);
                 }
             }
 

@@ -21,7 +21,7 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
-    Connection, Proxy, QueueHandle,
+    Connection, EventQueue, Proxy, QueueHandle,
     globals::registry_queue_init,
     protocol::{wl_output, wl_surface},
 };
@@ -138,6 +138,10 @@ pub struct WaylandSurfaceProvider {
     monitors: Vec<MonitorConfig>,
     /// Created surfaces keyed by monitor id.
     surfaces: HashMap<u32, CreatedSurface>,
+    /// Event queue/state must be kept alive and pumped; otherwise Wayland/Vulkan
+    /// presentation events accumulate while rendering.
+    event_queue: Option<EventQueue<WaylandShellState>>,
+    shell_state: Option<WaylandShellState>,
 }
 
 impl WaylandSurfaceProvider {
@@ -146,6 +150,8 @@ impl WaylandSurfaceProvider {
             connection: None,
             monitors: Vec::new(),
             surfaces: HashMap::new(),
+            event_queue: None,
+            shell_state: None,
         }
     }
 
@@ -321,7 +327,16 @@ impl WaylandSurfaceProvider {
             }
         }
 
+        drop(configured);
+
         self.monitors = discovered_monitors.into_iter().map(|(m, _)| m).collect();
+
+        // Keep the event queue and state alive after setup. The render loop calls
+        // SurfaceProvider::dispatch() every frame; if this queue is dropped or not
+        // pumped, compositor/presentation events can accumulate in the client and
+        // in the Vulkan Wayland present path.
+        self.event_queue = Some(event_queue);
+        self.shell_state = Some(state);
 
         info!(
             "All {} layer shell surface(s) created and configured",
@@ -383,9 +398,23 @@ impl SurfaceProvider for WaylandSurfaceProvider {
     }
 
     fn dispatch(&mut self) -> Result<()> {
+        if let (Some(event_queue), Some(state)) =
+            (self.event_queue.as_mut(), self.shell_state.as_mut())
+        {
+            // Pump all already-read Wayland events without blocking. This mirrors
+            // the X11 backend's per-frame event drain and prevents presentation
+            // related events from accumulating over long runs.
+            while event_queue
+                .dispatch_pending(state)
+                .context("Failed to dispatch pending Wayland events")?
+                > 0
+            {}
+        }
+
         if let Some(ref conn) = self.connection {
             conn.flush().context("Failed to flush Wayland connection")?;
         }
+
         Ok(())
     }
 }

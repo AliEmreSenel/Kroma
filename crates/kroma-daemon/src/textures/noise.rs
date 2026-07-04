@@ -44,7 +44,7 @@ fn generate_noise_rgba(width: u32, height: u32, seed: u64) -> Vec<u8> {
 
 /// A static procedural noise texture.
 pub struct NoiseTexture {
-    rgba: Vec<u8>,
+    rgba: Option<Vec<u8>>,
     width: u32,
     height: u32,
     needs_upload: bool,
@@ -74,7 +74,7 @@ impl NoiseTexture {
         );
 
         Ok(Self {
-            rgba,
+            rgba: Some(rgba),
             width,
             height,
             needs_upload: true,
@@ -86,11 +86,13 @@ impl TextureSource for NoiseTexture {
     fn update(&mut self, _dt: f64) -> Result<TextureUpdate> {
         if self.needs_upload {
             self.needs_upload = false;
-            return Ok(TextureUpdate::NewFrame {
-                data: self.rgba.clone(),
-                width: self.width,
-                height: self.height,
-            });
+            if let Some(data) = self.rgba.take() {
+                return Ok(TextureUpdate::NewFrame {
+                    data,
+                    width: self.width,
+                    height: self.height,
+                });
+            }
         }
         Ok(TextureUpdate::Unchanged)
     }

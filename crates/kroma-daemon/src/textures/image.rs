@@ -17,7 +17,7 @@ use super::{TextureSource, TextureUpdate};
 /// A static image texture.
 pub struct ImageTexture {
     /// Decoded RGBA8 pixel data.
-    pub(crate) rgba: Vec<u8>,
+    pub(crate) rgba: Option<Vec<u8>>,
     pub(crate) width: u32,
     pub(crate) height: u32,
     /// True only on the first frame (initial upload).
@@ -38,7 +38,7 @@ impl ImageTexture {
         let bytes = std::fs::read(path)
             .with_context(|| format!("Failed to read updated image '{}'", path.display()))?;
         let (rgba, width, height) = Self::decode(&bytes)?;
-        self.rgba = rgba;
+        self.rgba = Some(rgba);
         self.width = width;
         self.height = height;
         info!(
@@ -88,7 +88,7 @@ impl ImageTexture {
         };
 
         let mut tex = Self {
-            rgba: vec![0u8; 4], // 1×1 transparent placeholder
+            rgba: Some(vec![0u8; 4]), // 1×1 transparent placeholder
             width: 1,
             height: 1,
             needs_upload: true,
@@ -105,7 +105,7 @@ impl ImageTexture {
             tex.reload_from_source(path)
         } else if !bytes.is_empty() {
             Self::decode(bytes).map(|(rgba, w, h)| {
-                tex.rgba = rgba;
+                tex.rgba = Some(rgba);
                 tex.width = w;
                 tex.height = h;
             })
@@ -153,21 +153,28 @@ impl TextureSource for ImageTexture {
             if let Err(e) = self.reload_from_source(&path) {
                 warn!("ImageTexture reload failed: {}", e);
             } else {
-                return Ok(TextureUpdate::NewFrame {
-                    data: self.rgba.clone(),
-                    width: self.width,
-                    height: self.height,
-                });
+                self.needs_upload = false;
+                if let Some(data) = self.rgba.take() {
+                    return Ok(TextureUpdate::NewFrame {
+                        data,
+                        width: self.width,
+                        height: self.height,
+                    });
+                }
             }
         }
 
         if self.needs_upload {
             self.needs_upload = false;
-            Ok(TextureUpdate::NewFrame {
-                data: self.rgba.clone(),
-                width: self.width,
-                height: self.height,
-            })
+            if let Some(data) = self.rgba.take() {
+                Ok(TextureUpdate::NewFrame {
+                    data,
+                    width: self.width,
+                    height: self.height,
+                })
+            } else {
+                Ok(TextureUpdate::Unchanged)
+            }
         } else {
             Ok(TextureUpdate::Unchanged)
         }

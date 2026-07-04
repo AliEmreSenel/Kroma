@@ -109,6 +109,13 @@ pub trait TextureSource {
     /// re-uploaded, or [`TextureUpdate::Unchanged`] otherwise.
     fn update(&mut self, dt: f64) -> Result<TextureUpdate>;
 
+    /// Reclaim an owned pixel buffer after the renderer has uploaded it.
+    ///
+    /// Most texture sources can simply drop the buffer. Video textures use this
+    /// hook to recycle large per-frame RGBA allocations back to the decode
+    /// worker instead of allocating a fresh `Vec<u8>` every frame.
+    fn recycle_frame(&mut self, _data: Vec<u8>) {}
+
     /// Current pixel dimensions `(width, height)`.
     fn dimensions(&self) -> (u32, u32);
 
@@ -211,7 +218,7 @@ pub fn create_texture_source(
                 .source
                 .as_ref()
                 .context("Video texture requires a `source` path")?;
-            let tex = create_video_source(pkg, source, def.looping, def.hot_reload, def.optional)?;
+            let tex = create_video_source(pkg, source, def.looping, def.hot_reload, def.optional, gpu)?;
             Ok(Some(Box::new(tex)))
         }
         TextureType::Font => {
@@ -321,6 +328,7 @@ pub fn create_video_source(
     looping: bool,
     hot_reload: bool,
     optional: bool,
+    gpu: Option<&GpuContext>,
 ) -> Result<self::video::VideoTexture> {
     let (video_source, is_external_disk) = match resolve_video_source_with_origin(pkg, source) {
         Ok(result) => result,
@@ -336,6 +344,7 @@ pub fn create_video_source(
         looping,
         hot_reload && is_external_disk,
         optional,
+        gpu,
     )
 }
 

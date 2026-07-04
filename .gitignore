@@ -1,2 +1,6 @@
 /target
 *.shade
+*.zst
+perf-export
+/*.svg
+/perf.data*

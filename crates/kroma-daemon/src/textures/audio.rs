@@ -47,6 +47,13 @@ impl SharedAudioState {
     pub fn writer_handles(&self) -> (Arc<Mutex<Vec<f32>>>, Arc<Mutex<f32>>) {
         (Arc::clone(&self.spectrum), Arc::clone(&self.level))
     }
+
+    pub fn copy_spectrum_into(&self, out: &mut [f32]) {
+        let spectrum = self.spectrum.lock().unwrap_or_else(|e| e.into_inner());
+        out.fill(0.0);
+        let len = spectrum.len().min(out.len());
+        out[..len].copy_from_slice(&spectrum[..len]);
+    }
 }
 
 impl AudioProvider for SharedAudioState {
@@ -222,19 +229,23 @@ impl CpalAudioProvider {
                             - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32).cos())
                     })
                     .collect();
+                let mut samples = vec![0.0f32; FFT_SIZE];
+                let mut spectrum = vec![0.0f32; bands];
 
                 loop {
                     // Update at ~60Hz
                     std::thread::sleep(std::time::Duration::from_millis(16));
 
                     // 1. Snapshot the Ring Buffer (Sliding Window)
-                    let samples: Vec<f32> = {
+                    {
                         let buf = buf_read.lock().unwrap();
                         if buf.len() < FFT_SIZE {
                             continue;
                         } // Wait for buffer to fill
-                        buf.iter().copied().collect()
-                    };
+                        for (dst, src) in samples.iter_mut().zip(buf.iter().copied()) {
+                            *dst = src;
+                        }
+                    }
 
                     // 2. Compute RMS Level
                     let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
@@ -251,7 +262,7 @@ impl CpalAudioProvider {
                     fft.process_with_scratch(&mut input, &mut scratch);
 
                     // 5. Compute Magnitude Spectrum (Logarithmic Mapping)
-                    let mut spectrum = vec![0.0f32; bands];
+                    spectrum.fill(0.0);
                     let half_size = FFT_SIZE / 2;
 
                     // --- NEW MATH ---
@@ -290,7 +301,13 @@ impl CpalAudioProvider {
                         *spectrum_val = ((db + 60.0) / 60.0).max(0.0);
                     }
 
-                    *spec_write.lock().unwrap() = spectrum;
+                    {
+                        let mut dst = spec_write.lock().unwrap();
+                        if dst.len() != bands {
+                            dst.resize(bands, 0.0);
+                        }
+                        dst.copy_from_slice(&spectrum);
+                    }
                 }
             })?;
         // --- Input Stream ---
@@ -359,6 +376,12 @@ where
     }
 }
 
+impl CpalAudioProvider {
+    fn copy_spectrum_into(&self, out: &mut [f32]) {
+        self.state.copy_spectrum_into(out);
+    }
+}
+
 impl AudioProvider for CpalAudioProvider {
     fn get_spectrum(&self) -> Vec<f32> {
         self.state.get_spectrum()
@@ -377,6 +400,8 @@ impl AudioProvider for CpalAudioProvider {
 pub struct AudioTexture {
     provider: CpalAudioProvider,
     bands: usize,
+    spectrum_scratch: Vec<f32>,
+    upload_bytes: Vec<u8>,
 }
 
 impl AudioTexture {
@@ -398,14 +423,24 @@ impl AudioTexture {
         match provider.switch(&audio_conf) {
             Ok(()) => {
                 info!("AudioTexture loaded: source='{}', bands={}", source, bands);
-                Ok(Self { provider, bands })
+                Ok(Self {
+                    provider,
+                    bands,
+                    spectrum_scratch: vec![0.0; bands],
+                    upload_bytes: vec![0u8; bands * std::mem::size_of::<f32>()],
+                })
             }
             Err(e) if optional => {
                 warn!(
                     "Optional audio '{}' failed to load (using silent placeholder): {}",
                     source, e
                 );
-                Ok(Self { provider, bands })
+                Ok(Self {
+                    provider,
+                    bands,
+                    spectrum_scratch: vec![0.0; bands],
+                    upload_bytes: vec![0u8; bands * std::mem::size_of::<f32>()],
+                })
             }
             Err(e) => Err(e),
         }
@@ -414,13 +449,19 @@ impl AudioTexture {
 
 impl TextureSource for AudioTexture {
     fn update(&mut self, _dt: f64) -> Result<TextureUpdate> {
-        let spectrum = self.provider.get_spectrum();
-        // Pad or truncate to exactly `self.bands` values
-        let mut padded = vec![0.0f32; self.bands];
-        let len = spectrum.len().min(self.bands);
-        padded[..len].copy_from_slice(&spectrum[..len]);
-        // Cast f32 slice to raw bytes
-        let data = bytemuck::cast_slice(&padded).to_vec();
+        if self.spectrum_scratch.len() != self.bands {
+            self.spectrum_scratch.resize(self.bands, 0.0);
+        }
+        self.provider.copy_spectrum_into(&mut self.spectrum_scratch);
+
+        let required = self.bands * std::mem::size_of::<f32>();
+        if self.upload_bytes.len() != required {
+            self.upload_bytes.resize(required, 0);
+        }
+        self.upload_bytes
+            .copy_from_slice(bytemuck::cast_slice(&self.spectrum_scratch));
+
+        let data = std::mem::take(&mut self.upload_bytes);
         Ok(TextureUpdate::NewFrame {
             data,
             width: self.bands as u32,
@@ -434,6 +475,14 @@ impl TextureSource for AudioTexture {
 
     fn format(&self) -> TextureFormat {
         TextureFormat::R32Float
+    }
+
+    fn recycle_frame(&mut self, data: Vec<u8>) {
+        let required = self.bands * std::mem::size_of::<f32>();
+        if data.capacity() >= required {
+            self.upload_bytes = data;
+            self.upload_bytes.clear();
+        }
     }
 
     fn audio_level(&self) -> f32 {

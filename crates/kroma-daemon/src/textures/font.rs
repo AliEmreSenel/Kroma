@@ -258,7 +258,7 @@ pub fn rasterize_font8x8_atlas() -> FontAtlas {
 /// A rasterized font atlas texture.
 pub struct FontTexture {
     /// RGBA8 atlas pixel data.
-    rgba: Vec<u8>,
+    rgba: Option<Vec<u8>>,
     width: u32,
     height: u32,
     /// True only on the first frame (initial upload).
@@ -282,7 +282,7 @@ impl FontTexture {
                     width, height, font_size
                 );
                 Ok(Self {
-                    rgba,
+                    rgba: Some(rgba),
                     width,
                     height,
                     needs_upload: true,
@@ -297,7 +297,7 @@ impl FontTexture {
                 Ok(Self {
                     width: atlas.width,
                     height: atlas.height,
-                    rgba: atlas.rgba_data,
+                    rgba: Some(atlas.rgba_data),
                     needs_upload: true,
                 })
             }
@@ -310,11 +310,15 @@ impl TextureSource for FontTexture {
     fn update(&mut self, _dt: f64) -> Result<TextureUpdate> {
         if self.needs_upload {
             self.needs_upload = false;
-            Ok(TextureUpdate::NewFrame {
-                data: self.rgba.clone(),
-                width: self.width,
-                height: self.height,
-            })
+            if let Some(data) = self.rgba.take() {
+                Ok(TextureUpdate::NewFrame {
+                    data,
+                    width: self.width,
+                    height: self.height,
+                })
+            } else {
+                Ok(TextureUpdate::Unchanged)
+            }
         } else {
             Ok(TextureUpdate::Unchanged)
         }
