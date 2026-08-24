@@ -1,12 +1,14 @@
+pub mod gravitywm;
 pub mod hyprland;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use glam::Vec2;
-use log::{info, warn};
+use log::{debug, info, warn};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -29,16 +31,34 @@ use wayland_client::{
 use kroma_shared::traits::SurfaceProvider;
 use kroma_shared::types::{MonitorConfig, MonitorId};
 
-use crate::backend::wayland::hyprland::HyprlandEvent;
+/// Compositor events that affect Kroma rendering policy.
+#[derive(Debug, Clone)]
+pub enum WaylandEvent {
+    /// A window entered or exited fullscreen on the current workspace.
+    Fullscreen { fullscreen: bool },
+    /// The active workspace changed.
+    WorkspaceChanged { id: i64 },
+    /// The active monitor changed.
+    MonitorChanged { name: String },
+    /// The compositor event source disconnected.
+    Disconnected,
+}
 
 pub enum WaylandBackend {
+    Gravitywm {
+        surface: WaylandSurfaceProvider,
+        _cursor_handle: JoinHandle<()>,
+        cursor_pos: Arc<Mutex<Vec2>>,
+        cursor_height: f32,
+        rx: mpsc::Receiver<WaylandEvent>,
+    },
     Hyprland {
         surface: WaylandSurfaceProvider,
         _handle: JoinHandle<()>,
         _cursor_handle: JoinHandle<()>,
         cursor_pos: Arc<Mutex<Vec2>>,
         cursor_height: f32,
-        rx: mpsc::Receiver<HyprlandEvent>,
+        rx: mpsc::Receiver<WaylandEvent>,
     },
     Generic {
         surface: WaylandSurfaceProvider,
@@ -48,6 +68,7 @@ pub enum WaylandBackend {
 impl WaylandBackend {
     pub fn surface(&self) -> Option<&dyn SurfaceProvider> {
         match self {
+            WaylandBackend::Gravitywm { surface, .. } => Some(surface),
             WaylandBackend::Hyprland { surface, .. } => Some(surface),
             WaylandBackend::Generic { surface, .. } => Some(surface),
         }
@@ -55,6 +76,7 @@ impl WaylandBackend {
 
     pub fn surface_mut(&mut self) -> Option<&mut dyn SurfaceProvider> {
         match self {
+            WaylandBackend::Gravitywm { surface, .. } => Some(surface),
             WaylandBackend::Hyprland { surface, .. } => Some(surface),
             WaylandBackend::Generic { surface, .. } => Some(surface),
         }
@@ -62,35 +84,49 @@ impl WaylandBackend {
 
     pub fn cursor_pos(&self) -> Option<Vec2> {
         match self {
-            WaylandBackend::Hyprland {
+            WaylandBackend::Gravitywm {
                 cursor_pos,
                 cursor_height,
                 ..
-            } => {
-                let mut pos = *cursor_pos.lock().unwrap_or_else(|e| e.into_inner());
-                pos.y = *cursor_height - pos.y;
-                Some(pos)
             }
+            | WaylandBackend::Hyprland {
+                cursor_pos,
+                cursor_height,
+                ..
+            } => Some(cursor_position(cursor_pos, *cursor_height)),
             WaylandBackend::Generic { .. } => None,
         }
     }
 
     pub fn new(_session_type: &str, desktop_env: &str) -> Result<Self> {
         info!("Detected Wayland session — using layer shell backend");
-        let backend = match desktop_env {
-            "Hyprland" => {
-                let mut surface_provider = WaylandSurfaceProvider::new();
-                surface_provider
-                    .connect()
-                    .and_then(|_| surface_provider.create_all_surfaces())?;
-                let cursor_height = surface_provider
-                    .list_monitors()?
-                    .first()
-                    .map(|m| m.height as f32)
-                    .unwrap_or(1080.0);
+        let surface_provider = connected_surface_provider()?;
 
-                let (hypr_tx, hypr_rx) = mpsc::channel();
-                let handle = hyprland::start_listener(hypr_tx)?;
+        let backend = match desktop_env {
+            "GravityWM" | "gravitywm" => {
+                let cursor_height = cursor_height(&surface_provider)?;
+                let (tx, rx) = mpsc::channel();
+
+                match gravitywm::start_state_tracker(tx) {
+                    Ok((cursor_pos, cursor_handle)) => WaylandBackend::Gravitywm {
+                        surface: surface_provider,
+                        _cursor_handle: cursor_handle,
+                        cursor_pos,
+                        cursor_height,
+                        rx,
+                    },
+                    Err(err) => {
+                        warn!("GravityWM state tracking disabled: {err}");
+                        WaylandBackend::Generic {
+                            surface: surface_provider,
+                        }
+                    }
+                }
+            }
+            "Hyprland" => {
+                let cursor_height = cursor_height(&surface_provider)?;
+                let (tx, rx) = mpsc::channel();
+                let handle = hyprland::start_listener(tx)?;
                 let (cursor_pos, cursor_handle) = hyprland::start_cursor_tracker()?;
                 WaylandBackend::Hyprland {
                     surface: surface_provider,
@@ -98,21 +134,73 @@ impl WaylandBackend {
                     _cursor_handle: cursor_handle,
                     cursor_pos,
                     cursor_height,
-                    rx: hypr_rx,
+                    rx,
                 }
             }
-            _ => {
-                let mut surface_provider = WaylandSurfaceProvider::new();
-                surface_provider
-                    .connect()
-                    .and_then(|_| surface_provider.create_all_surfaces())?;
-                WaylandBackend::Generic {
-                    surface: surface_provider,
-                }
-            }
+            _ => WaylandBackend::Generic {
+                surface: surface_provider,
+            },
         };
         Ok(backend)
     }
+}
+
+pub fn backend_events(backend: &mut WaylandBackend) -> Option<&mut mpsc::Receiver<WaylandEvent>> {
+    match backend {
+        WaylandBackend::Gravitywm { rx, .. } | WaylandBackend::Hyprland { rx, .. } => Some(rx),
+        WaylandBackend::Generic { .. } => None,
+    }
+}
+
+fn connected_surface_provider() -> Result<WaylandSurfaceProvider> {
+    let mut surface_provider = WaylandSurfaceProvider::new();
+    surface_provider
+        .connect()
+        .and_then(|_| surface_provider.create_all_surfaces())?;
+    Ok(surface_provider)
+}
+
+fn cursor_height(surface_provider: &WaylandSurfaceProvider) -> Result<f32> {
+    Ok(surface_provider
+        .list_monitors()?
+        .first()
+        .map(|m| m.height as f32)
+        .unwrap_or(1080.0))
+}
+
+fn cursor_position(cursor_pos: &Arc<Mutex<Vec2>>, cursor_height: f32) -> Vec2 {
+    let mut pos = *cursor_pos.lock().unwrap_or_else(|e| e.into_inner());
+    pos.y = cursor_height - pos.y;
+    pos
+}
+
+pub(super) fn start_cursor_tracker<F>(
+    name: &'static str,
+    query: F,
+) -> Result<(Arc<Mutex<Vec2>>, JoinHandle<()>)>
+where
+    F: FnMut() -> Result<Vec2> + Send + 'static,
+{
+    let mut query = query;
+    let cursor_pos = Arc::new(Mutex::new(Vec2::new(0.5, 0.5)));
+    let cursor_clone = Arc::clone(&cursor_pos);
+
+    let handle = std::thread::Builder::new()
+        .name(format!("kroma-{name}-cursor"))
+        .spawn(move || {
+            loop {
+                match query() {
+                    Ok(pos) => {
+                        *cursor_clone.lock().unwrap_or_else(|e| e.into_inner()) = pos;
+                    }
+                    Err(err) => debug!("Could not query {name} cursor position: {err}"),
+                }
+                std::thread::sleep(Duration::from_millis(33));
+            }
+        })
+        .with_context(|| format!("Failed to spawn {name} cursor tracker thread"))?;
+
+    Ok((cursor_pos, handle))
 }
 
 // ---------------------------------------------------------------------------

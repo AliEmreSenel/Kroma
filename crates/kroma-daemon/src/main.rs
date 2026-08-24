@@ -43,7 +43,7 @@ use kroma_shared::{
 use crate::{
     backend::{
         Backend,
-        wayland::{WaylandBackend, hyprland::HyprlandEvent},
+        wayland::{WaylandEvent, backend_events},
     },
     data::SystemDataProvider,
     renderer::{PreparedTransitionLane, Renderer, ShadeLoadOutcome},
@@ -1127,28 +1127,27 @@ impl Daemon {
     }
 
     fn process_backend_events(&mut self) {
-        if let Backend::Wayland {
-            backend: WaylandBackend::Hyprland { rx: hypr_rx, .. },
-            ..
-        } = &mut self.backend
-        {
-            while let Ok(event) = hypr_rx.try_recv() {
+        if let Backend::Wayland { backend, .. } = &mut self.backend {
+            let Some(rx) = backend_events(backend) else {
+                return;
+            };
+            while let Ok(event) = rx.try_recv() {
                 match event {
-                    HyprlandEvent::Fullscreen { fullscreen } if self.config.pause_on_fullscreen => {
+                    WaylandEvent::Fullscreen { fullscreen } if self.config.pause_on_fullscreen => {
                         self.paused = fullscreen;
                     }
-                    HyprlandEvent::WorkspaceChanged { id } => {
+                    WaylandEvent::WorkspaceChanged { id } => {
                         info!(
                             "Workspace changed to {} (was {})",
                             id, self.active_workspace_id
                         );
                         self.active_workspace_id = id;
                     }
-                    HyprlandEvent::MonitorChanged { ref name } => {
+                    WaylandEvent::MonitorChanged { ref name } => {
                         info!("Active monitor: {}", name);
                     }
-                    HyprlandEvent::Disconnected => {
-                        log::warn!("Hyprland event socket disconnected");
+                    WaylandEvent::Disconnected => {
+                        log::warn!("Wayland compositor event source disconnected");
                     }
                     _ => {}
                 }

@@ -2,7 +2,7 @@
 
 **A high-performance, modular wallpaper engine for Linux.**
 
-Kroma renders real-time, data-driven shaders and video streams directly to your desktop background. Built for Wayland (Hyprland primary), with a trait-driven architecture designed for portability to KDE, GNOME, and X11.
+Kroma renders real-time, data-driven shaders and video streams directly to your desktop background. Built for Wayland (Hyprland and GravityWM primary), with a trait-driven architecture designed for portability to KDE, GNOME, and X11.
 
 ## Features
 
@@ -11,7 +11,7 @@ Kroma renders real-time, data-driven shaders and video streams directly to your 
 - **Shadertoy translator** — Import shaders from Shadertoy with automatic transpilation
 - **`.shade` v2 packages** — Chunked container format with strict magic/version checks and per-entry compression
 - **Video textures** — Use video files as shader inputs (ffmpeg/gstreamer backend)
-- **Compositor awareness** — Auto-pauses on fullscreen apps and inactive workspaces (Hyprland IPC)
+- **Compositor awareness** — Auto-pauses on fullscreen apps and inactive workspaces, with cursor tracking on Hyprland and GravityWM
 - **Modular architecture** — Every subsystem is a swappable Rust trait
 
 ## Architecture

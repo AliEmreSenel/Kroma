@@ -7,25 +7,13 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use glam::Vec2;
 use log::{debug, error, info, warn};
 
-/// Events produced by the Hyprland IPC listener.
-#[derive(Debug, Clone)]
-pub enum HyprlandEvent {
-    /// A window entered or exited fullscreen on the given workspace.
-    Fullscreen { fullscreen: bool },
-    /// The active workspace changed.
-    WorkspaceChanged { id: i64 },
-    /// The active monitor changed.
-    MonitorChanged { name: String },
-    /// Hyprland is shutting down / socket disconnected.
-    Disconnected,
-}
+use super::WaylandEvent;
 
 /// Returns the path to Hyprland's event socket (socket2).
 fn hyprland_socket2_path() -> Result<String> {
@@ -42,7 +30,7 @@ fn hyprland_socket2_path() -> Result<String> {
 ///
 /// Events are sent through `tx`. The returned `JoinHandle` can be used
 /// to monitor the thread, but it runs indefinitely until disconnected.
-pub fn start_listener(tx: Sender<HyprlandEvent>) -> Result<std::thread::JoinHandle<()>> {
+pub fn start_listener(tx: Sender<WaylandEvent>) -> Result<std::thread::JoinHandle<()>> {
     let socket_path = hyprland_socket2_path()?;
     info!("Connecting to Hyprland event socket: {}", socket_path);
 
@@ -70,7 +58,7 @@ pub fn start_listener(tx: Sender<HyprlandEvent>) -> Result<std::thread::JoinHand
                                 "Giving up on Hyprland event socket after {} attempts",
                                 retry_count
                             );
-                            let _ = tx.send(HyprlandEvent::Disconnected);
+                            let _ = tx.send(WaylandEvent::Disconnected);
                             return;
                         }
                     }
@@ -86,7 +74,7 @@ pub fn start_listener(tx: Sender<HyprlandEvent>) -> Result<std::thread::JoinHand
 }
 
 /// Read and parse events from the stream until disconnection.
-fn process_events(stream: &UnixStream, tx: &Sender<HyprlandEvent>) {
+fn process_events(stream: &UnixStream, tx: &Sender<WaylandEvent>) {
     let reader = BufReader::new(stream);
 
     for line in reader.lines() {
@@ -108,30 +96,30 @@ fn process_events(stream: &UnixStream, tx: &Sender<HyprlandEvent>) {
             }
             Err(e) => {
                 warn!("Error reading Hyprland socket: {}", e);
-                let _ = tx.send(HyprlandEvent::Disconnected);
+                let _ = tx.send(WaylandEvent::Disconnected);
                 return;
             }
         }
     }
 
     // Stream ended
-    let _ = tx.send(HyprlandEvent::Disconnected);
+    let _ = tx.send(WaylandEvent::Disconnected);
 }
 
 /// Parse a single Hyprland event line.
 ///
 /// Hyprland socket2 events have the format: `EVENT>>DATA`
-fn parse_event(line: &str) -> Option<HyprlandEvent> {
+fn parse_event(line: &str) -> Option<WaylandEvent> {
     let (event_name, data) = line.split_once(">>")?;
 
     match event_name {
         "fullscreen" => {
             let fullscreen = data.trim() == "1";
-            Some(HyprlandEvent::Fullscreen { fullscreen })
+            Some(WaylandEvent::Fullscreen { fullscreen })
         }
         "workspace" => {
             if let Ok(id) = data.trim().parse::<i64>() {
-                Some(HyprlandEvent::WorkspaceChanged { id })
+                Some(WaylandEvent::WorkspaceChanged { id })
             } else {
                 debug!("Could not parse workspace id: {}", data);
                 None
@@ -140,7 +128,7 @@ fn parse_event(line: &str) -> Option<HyprlandEvent> {
         "focusedmon" => {
             // Format: "MONITORNAME,WORKSPACEID"
             let name = data.split(',').next().unwrap_or(data).trim().to_string();
-            Some(HyprlandEvent::MonitorChanged { name })
+            Some(WaylandEvent::MonitorChanged { name })
         }
         _ => {
             // Ignore other events (activewindow, openwindow, etc.)
@@ -152,28 +140,11 @@ fn parse_event(line: &str) -> Option<HyprlandEvent> {
 /// Start polling Hyprland cursor position on a background thread.
 ///
 /// Returns shared cursor state and a handle for the polling thread.
-pub fn start_cursor_tracker() -> Result<(Arc<Mutex<Vec2>>, std::thread::JoinHandle<()>)> {
-    let cursor_pos = Arc::new(Mutex::new(Vec2::new(0.5, 0.5)));
-    let cursor_clone = Arc::clone(&cursor_pos);
-
-    let handle = std::thread::Builder::new()
-        .name("kroma-hypr-cursor".into())
-        .spawn(move || {
-            loop {
-                match query_hyprland_cursor() {
-                    Ok(pos) => {
-                        *cursor_clone.lock().unwrap_or_else(|e| e.into_inner()) = pos;
-                    }
-                    Err(_) => {
-                        debug!("Could not query Hyprland cursor position");
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(33));
-            }
-        })
-        .context("Failed to spawn Hyprland cursor tracker thread")?;
-
-    Ok((cursor_pos, handle))
+pub fn start_cursor_tracker() -> Result<(
+    std::sync::Arc<std::sync::Mutex<Vec2>>,
+    std::thread::JoinHandle<()>,
+)> {
+    super::start_cursor_tracker("hypr", query_hyprland_cursor)
 }
 
 /// Query cursor position via Hyprland IPC socket directly (no process spawning).
@@ -218,13 +189,13 @@ mod tests {
     fn parse_fullscreen_event() {
         let event = parse_event("fullscreen>>1").unwrap();
         match event {
-            HyprlandEvent::Fullscreen { fullscreen } => assert!(fullscreen),
+            WaylandEvent::Fullscreen { fullscreen } => assert!(fullscreen),
             _ => panic!("Expected Fullscreen event"),
         }
 
         let event = parse_event("fullscreen>>0").unwrap();
         match event {
-            HyprlandEvent::Fullscreen { fullscreen } => assert!(!fullscreen),
+            WaylandEvent::Fullscreen { fullscreen } => assert!(!fullscreen),
             _ => panic!("Expected Fullscreen event"),
         }
     }
@@ -233,7 +204,7 @@ mod tests {
     fn parse_workspace_event() {
         let event = parse_event("workspace>>3").unwrap();
         match event {
-            HyprlandEvent::WorkspaceChanged { id } => assert_eq!(id, 3),
+            WaylandEvent::WorkspaceChanged { id } => assert_eq!(id, 3),
             _ => panic!("Expected WorkspaceChanged event"),
         }
     }
@@ -242,7 +213,7 @@ mod tests {
     fn parse_focusedmon_event() {
         let event = parse_event("focusedmon>>DP-1,2").unwrap();
         match event {
-            HyprlandEvent::MonitorChanged { name } => assert_eq!(name, "DP-1"),
+            WaylandEvent::MonitorChanged { name } => assert_eq!(name, "DP-1"),
             _ => panic!("Expected MonitorChanged event"),
         }
     }
