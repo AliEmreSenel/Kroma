@@ -4,7 +4,7 @@
 //! rendering. Renders to a real Wayland or X11 surface via wgpu.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
@@ -12,6 +12,7 @@ use kroma_shared::traits::SurfaceProvider;
 use log::{info, warn};
 
 use kroma_shared::shade::LiveShadePackage;
+use kroma_shared::traits::LightingFrame;
 use kroma_shared::types::{ShadePhase, ShaderUniforms, TextureDef, UniformDef};
 
 mod render_flow;
@@ -36,11 +37,23 @@ const FALLBACK_ERROR_FRAG_WGSL: &str = include_str!("shaders/fallback_error.frag
 /// fallback (which needs a texture bind group) is set up.
 const INIT_FRAG_WGSL: &str = include_str!("shaders/init.frag.wgsl");
 
+/// Texture-copy shader used for final presentation and lighting downsampling.
+const OUTPUT_BLIT_FRAG_WGSL: &str = include_str!("shaders/output_blit.frag.wgsl");
+
 /// The preferred surface texture format.
 const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
 
 /// Maximum number of custom uniform float slots.
 const MAX_CUSTOM_UNIFORMS: usize = 32;
+
+/// Width of the exact final-output lighting capture.
+const LIGHTING_CAPTURE_WIDTH: u32 = 128;
+
+/// Height of the exact final-output lighting capture.
+const LIGHTING_CAPTURE_HEIGHT: u32 = 64;
+
+/// Padded byte width of one lighting-capture row.
+const LIGHTING_CAPTURE_BYTES_PER_ROW: u32 = 512;
 
 // ---------------------------------------------------------------------------
 // Shade load outcome
@@ -95,6 +108,20 @@ struct TransitionRenderState {
     _width: u32,
     _height: u32,
     incoming_lane: RendererLane,
+}
+
+struct OutputCaptureState {
+    _final_texture: wgpu::Texture,
+    final_view: wgpu::TextureView,
+    output_bind_group: wgpu::BindGroup,
+    surface_pipeline: wgpu::RenderPipeline,
+    capture_texture: wgpu::Texture,
+    capture_view: wgpu::TextureView,
+    capture_pipeline: wgpu::RenderPipeline,
+    readback_buffer: wgpu::Buffer,
+    completion_tx: mpsc::Sender<std::result::Result<(), wgpu::BufferAsyncError>>,
+    completion_rx: mpsc::Receiver<std::result::Result<(), wgpu::BufferAsyncError>>,
+    mapping_pending: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -190,6 +217,7 @@ pub(crate) struct GpuResources {
     surface_config: Option<wgpu::SurfaceConfiguration>,
     texture_bind_group: Option<wgpu::BindGroup>,
     texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
+    output_capture: Option<OutputCaptureState>,
 }
 
 /// Orchestrates rendering, shader loading, uniforms, and texture updates.
@@ -765,7 +793,6 @@ impl Renderer {
         self.gpu.bind_group_layout = Some(bind_group_layout);
         self.gpu.pipeline_layout = Some(pipeline_layout);
         self.gpu.vert_module = Some(vert_module);
-
         info!(
             "GPU pipeline initialised with real surface ({}x{})",
             width, height
@@ -979,13 +1006,8 @@ impl Renderer {
                 self.custom_uniform_data[idx] = match default {
                     toml::Value::Float(v) => *v as f32,
                     toml::Value::Integer(v) => *v as f32,
-                    toml::Value::Boolean(v) => {
-                        if *v {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    }
+                    toml::Value::Boolean(true) => 1.0,
+                    toml::Value::Boolean(false) => 0.0,
                     _ => 0.0,
                 };
             }
@@ -1640,9 +1662,11 @@ impl Renderer {
         render_flow::rebuild_pipeline_layout(self)
     }
 
-    /// Render a single frame to the surface.
-    pub fn render_frame(&mut self) -> Result<()> {
-        render_flow::render_frame(self)
+    /// Renders one frame and optionally starts an exact final-output capture.
+    ///
+    /// Completed captures are returned asynchronously on a later render call.
+    pub fn render_frame(&mut self, capture_lighting: bool) -> Result<Option<LightingFrame>> {
+        render_flow::render_frame(self, capture_lighting)
     }
 }
 

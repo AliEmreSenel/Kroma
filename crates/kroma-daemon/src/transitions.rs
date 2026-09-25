@@ -3,6 +3,7 @@ use kroma_shared::types::TransitionDef;
 
 pub struct BuiltinTransitionEntry {
     pub id: &'static str,
+    #[allow(dead_code)]
     pub group: &'static str,
     pub wgsl: &'static str,
 }
@@ -34,6 +35,7 @@ pub fn builtin_transition_wgsl(id: &str) -> Option<&'static str> {
         .map(|entry| entry.wgsl)
 }
 
+#[allow(dead_code)]
 pub fn builtin_transition_group(id: &str) -> Option<&'static str> {
     BUILTIN_TRANSITIONS
         .iter()

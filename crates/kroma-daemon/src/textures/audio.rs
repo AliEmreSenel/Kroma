@@ -178,12 +178,6 @@ pub struct CpalAudioProvider {
 }
 
 impl CpalAudioProvider {
-    pub fn close(&mut self) {
-        self.source = "none".to_string();
-        self.stream = None;
-        self.state = SharedAudioState::new(self.bands);
-    }
-
     pub fn switch(&mut self, config: &AudioConfig) -> Result<()> {
         let source = &config.source;
         self.bands = config.fft_bands;

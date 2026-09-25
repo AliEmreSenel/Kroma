@@ -167,9 +167,48 @@ fps_log_interval_secs = 5
 [runtime]
 persist_current_shade = true
 
+[openrgb]
+enabled = false
+host = "127.0.0.1"
+port = 6742
+update_fps = 30
+brightness = 1.0
+gamma = 1.0
+
+[[openrgb.keyboards]]
+name = "*keyboard*"
+# serial = "exact-serial-if-needed"
+# monitor = "DP-1"
+
 [[monitors]]
 name = "DP-1"
 enabled = true
+```
+
+### OpenRGB keyboard output
+
+Kroma can mirror the exact final wallpaper output—including lifecycle and
+shade-to-shade transitions—to per-key OpenRGB keyboard lighting. Enable the SDK
+server in OpenRGB, enable the configuration above, and add at least one
+`[[openrgb.keyboards]]` selector.
+
+- `name` is a case-insensitive glob supporting `*` and `?`.
+- `serial`, when set and non-empty, must match exactly.
+- `monitor`, when set, must match the currently rendered primary monitor.
+- Only keyboards with OpenRGB matrix metadata are controlled.
+- `update_fps` is hard-limited to 30; `0` disables lighting output.
+- `brightness` is clamped to `0.0..=1.0`; `gamma` is clamped to `0.1..=4.0`.
+
+OpenRGB I/O runs on a dedicated worker with an overwrite-latest frame queue.
+Connection failures do not interrupt rendering and are retried with exponential
+backoff. Kroma leaves the last mode and colors unchanged when a shade unloads
+or the daemon exits, then closes its SDK connection.
+
+To inspect controller names, serials, and matrix metadata without changing any
+colors, run:
+
+```bash
+cargo run -p openrgb-client --example list_controllers -- 127.0.0.1 6742
 ```
 
 ## Development

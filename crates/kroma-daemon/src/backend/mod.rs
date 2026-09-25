@@ -10,6 +10,7 @@ use glam::Vec2;
 use kroma_shared::traits::SurfaceProvider;
 use log::{info, warn};
 
+#[allow(clippy::large_enum_variant)]
 pub enum Backend {
     Wayland { backend: WaylandBackend },
     X11 { surface: X11SurfaceProvider },

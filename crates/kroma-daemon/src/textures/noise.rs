@@ -31,7 +31,7 @@ fn generate_noise_rgba(width: u32, height: u32, seed: u64) -> Vec<u8> {
     let mut state = seed;
     let mut rgba = vec![0u8; (width * height * 4) as usize];
 
-    for px in rgba.chunks_exact_mut(4) {
+    for px in rgba.as_chunks_mut::<4>().0 {
         let n = splitmix64_next(&mut state);
         px[0] = (n & 0xFF) as u8;
         px[1] = ((n >> 8) & 0xFF) as u8;

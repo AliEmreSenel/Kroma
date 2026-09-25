@@ -8,6 +8,7 @@ mod config;
 mod data;
 mod fallback;
 mod ipc_server;
+mod lighting;
 mod renderer;
 mod textures;
 mod transitions;
@@ -32,7 +33,7 @@ use kroma_shared::{
         maybe_send,
     },
     shade::LiveShadePackage,
-    traits::DataProvider,
+    traits::{DataProvider, LightingSink},
     transition::{parse_transition_spec, resolve_transition_spec},
     types::{
         ShadeConfig, ShadeMeta, ShadePhase, ShadeStateDef, ShadeStates, TextureDef, TextureType,
@@ -46,6 +47,7 @@ use crate::{
         wayland::{WaylandEvent, backend_events},
     },
     data::SystemDataProvider,
+    lighting::OpenRgbLightingSink,
     renderer::{PreparedTransitionLane, Renderer, ShadeLoadOutcome},
 };
 
@@ -294,6 +296,10 @@ struct Daemon {
     frame_budget: Duration,
     fps_counter: u32,
     fps_timer: Instant,
+    lighting_sink: Option<Box<dyn LightingSink>>,
+    lighting_capture_interval: Duration,
+    last_lighting_capture: Instant,
+    lighting_was_active: bool,
 }
 
 impl Daemon {
@@ -1023,7 +1029,7 @@ impl Daemon {
         let data_provider = SystemDataProvider::new()?;
         let mut renderer = Renderer::new()?;
 
-        let (surf_w, surf_h) = {
+        let (surf_w, surf_h, primary_monitor_name) = {
             let surface = backend.surface().context("A surface must exist")?;
             info!("Initializing GPU with surface...");
 
@@ -1039,7 +1045,8 @@ impl Daemon {
                 .cloned()
                 .context("At least one monitor should exist")?;
 
-            surface.size(primary_monitor.id)?
+            let (width, height) = surface.size(primary_monitor.id)?;
+            (width, height, primary_monitor.name)
         };
 
         renderer.uniforms.u_resolution = [surf_w as f32, surf_h as f32];
@@ -1047,6 +1054,37 @@ impl Daemon {
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (ipc_handle, ipc_status) = ipc_server::start(cmd_tx)?;
         info!("IPC server listening");
+
+        let openrgb_fps = config.openrgb.effective_update_fps();
+        if config.openrgb.update_fps > 30 {
+            log::warn!(
+                "OpenRGB update_fps {} exceeds the 30 FPS limit; clamping to 30",
+                config.openrgb.update_fps
+            );
+        }
+        let lighting_capture_interval = if openrgb_fps == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(1.0 / f64::from(openrgb_fps))
+        };
+        let lighting_sink: Option<Box<dyn LightingSink>> =
+            if config.openrgb.enabled && openrgb_fps > 0 && !config.openrgb.keyboards.is_empty() {
+                match OpenRgbLightingSink::start(config.openrgb.clone(), primary_monitor_name) {
+                    Ok(sink) => Some(Box::new(sink)),
+                    Err(error) => {
+                        log::warn!("OpenRGB worker could not start: {error:#}");
+                        None
+                    }
+                }
+            } else {
+                if config.openrgb.enabled && config.openrgb.keyboards.is_empty() {
+                    log::warn!("OpenRGB is enabled but no keyboard selectors are configured");
+                }
+                None
+            };
+        let last_lighting_capture = Instant::now()
+            .checked_sub(lighting_capture_interval)
+            .unwrap_or_else(Instant::now);
 
         let mut daemon = Self {
             frame_budget: config.frame_budget(),
@@ -1076,6 +1114,10 @@ impl Daemon {
             last_frame_time: Instant::now(),
             fps_counter: 0,
             fps_timer: Instant::now(),
+            lighting_sink,
+            lighting_capture_interval,
+            last_lighting_capture,
+            lighting_was_active: false,
         };
 
         daemon.prewarm_builtin_transitions()?;
@@ -2251,7 +2293,39 @@ impl Daemon {
         // Derive audio level from audio texture sources
         self.renderer.uniforms.u_audio_level = self.renderer.get_audio_level();
 
-        self.renderer.render_frame()?;
+        let lighting_active = self.runtime_shade.is_some()
+            && !matches!(
+                self.current_phase,
+                DaemonPhase::None | DaemonPhase::Terminal
+            );
+        if !lighting_active && self.lighting_was_active {
+            if let Some(sink) = self.lighting_sink.as_ref()
+                && let Err(error) = sink.disconnect()
+            {
+                log::warn!("Failed to disconnect OpenRGB lighting sink: {error:#}");
+            }
+            self.lighting_was_active = false;
+        }
+        let capture_lighting = lighting_active
+            && self.lighting_sink.is_some()
+            && self.lighting_capture_interval > Duration::ZERO
+            && frame_start.duration_since(self.last_lighting_capture)
+                >= self.lighting_capture_interval;
+        if capture_lighting {
+            self.last_lighting_capture = frame_start;
+        }
+
+        if let Some(frame) = self.renderer.render_frame(capture_lighting)?
+            && lighting_active
+            && let Some(sink) = self.lighting_sink.as_ref()
+        {
+            match sink.submit_frame(frame) {
+                Ok(()) => self.lighting_was_active = true,
+                Err(error) => {
+                    log::warn!("Failed to submit OpenRGB lighting frame: {error:#}");
+                }
+            }
+        }
         self.frame = self.frame.wrapping_add(1);
 
         self.update_fps_and_status();
@@ -2308,6 +2382,11 @@ impl Daemon {
     }
 
     fn shutdown(&mut self) -> Result<()> {
+        if let Some(sink) = self.lighting_sink.as_ref()
+            && let Err(error) = sink.disconnect()
+        {
+            log::warn!("Failed to disconnect OpenRGB lighting sink: {error:#}");
+        }
         self.cleanup_socket()?;
         info!("Daemon shutdown complete");
         Ok(())

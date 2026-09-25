@@ -5,8 +5,8 @@
 //! hot-reload for external disk-backed files.
 
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, TryRecvError, TrySendError};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError, TrySendError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -298,8 +298,6 @@ struct GpuVideoTarget {
     _texture: Arc<wgpu::Texture>,
     view: wgpu::TextureView,
     sampler: wgpu::Sampler,
-    width: u32,
-    height: u32,
 }
 
 struct VideoWorkerReady {
@@ -390,8 +388,6 @@ impl VideoTexture {
             _texture: texture,
             view,
             sampler,
-            width,
-            height,
         }
     }
 
@@ -513,7 +509,9 @@ impl VideoTexture {
                         });
                     }
                 } else {
-                    let Some(mut data) = Self::take_recycled_buffer(&recycle_rx, frame_len, &stop_rx) else {
+                    let Some(mut data) =
+                        Self::take_recycled_buffer(&recycle_rx, frame_len, &stop_rx)
+                    else {
                         return;
                     };
                     if Self::decode_with_looping_into(&mut decoder, looping, &mut data).is_some() {
@@ -571,10 +569,13 @@ impl VideoTexture {
                         }
                     } else {
                         let frame_len = (fw as usize).saturating_mul(fh as usize).saturating_mul(4);
-                        let Some(mut data) = Self::take_recycled_buffer(&recycle_rx, frame_len, &stop_rx) else {
+                        let Some(mut data) =
+                            Self::take_recycled_buffer(&recycle_rx, frame_len, &stop_rx)
+                        else {
                             return;
                         };
-                        if Self::decode_with_looping_into(&mut decoder, looping, &mut data).is_none()
+                        if Self::decode_with_looping_into(&mut decoder, looping, &mut data)
+                            .is_none()
                         {
                             Self::recycle_buffer_to(&worker_recycle_tx, data);
                             std::thread::sleep(Duration::from_millis(5));
@@ -726,7 +727,10 @@ impl VideoTexture {
                                 watch_path.display()
                             );
                         } else {
-                            info!("VideoTexture loaded: {}x{}, looping={}", ready.width, ready.height, looping);
+                            info!(
+                                "VideoTexture loaded: {}x{}, looping={}",
+                                ready.width, ready.height, looping
+                            );
                         }
                         Ok(Self {
                             worker: Some(worker),
@@ -851,16 +855,11 @@ impl TextureSource for VideoTexture {
         };
 
         let mut latest: Option<DecodedVideoFrame> = None;
-        loop {
-            match worker.frame_rx.try_recv() {
-                Ok(frame) => {
-                    if let Some(old) = latest.replace(frame)
-                        && let Some(data) = old.data
-                    {
-                        Self::recycle_buffer_to(&worker.recycle_tx, data);
-                    }
-                }
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
+        while let Ok(frame) = worker.frame_rx.try_recv() {
+            if let Some(old) = latest.replace(frame)
+                && let Some(data) = old.data
+            {
+                Self::recycle_buffer_to(&worker.recycle_tx, data);
             }
         }
 

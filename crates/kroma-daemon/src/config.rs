@@ -66,6 +66,10 @@ pub struct DaemonConfig {
     /// Runtime behavior settings.
     #[serde(default)]
     pub runtime: RuntimeConfig,
+
+    /// OpenRGB keyboard integration settings.
+    #[serde(default)]
+    pub openrgb: OpenRgbConfig,
 }
 
 /// Preview stream configuration.
@@ -104,6 +108,70 @@ pub struct RuntimeConfig {
     pub persist_current_shade: bool,
 }
 
+/// OpenRGB SDK connection and color-output configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OpenRgbConfig {
+    /// Enables OpenRGB integration when at least one keyboard matches.
+    #[serde(default)]
+    pub enabled: bool,
+    /// OpenRGB SDK server host.
+    #[serde(default = "default_openrgb_host")]
+    pub host: String,
+    /// OpenRGB SDK server port.
+    #[serde(default = "default_openrgb_port")]
+    pub port: u16,
+    /// Requested keyboard update rate; values above 30 are clamped.
+    #[serde(default = "default_openrgb_update_fps")]
+    pub update_fps: u32,
+    /// Output brightness multiplier in the inclusive range 0.0–1.0.
+    #[serde(default = "default_openrgb_brightness")]
+    pub brightness: f32,
+    /// Output gamma exponent in the inclusive range 0.1–4.0.
+    #[serde(default = "default_openrgb_gamma")]
+    pub gamma: f32,
+    /// Case-insensitive keyboard name glob selectors.
+    #[serde(default)]
+    pub keyboards: Vec<OpenRgbKeyboardConfig>,
+}
+
+impl OpenRgbConfig {
+    /// Returns the configured update rate clamped to the supported maximum.
+    pub fn effective_update_fps(&self) -> u32 {
+        self.update_fps.min(30)
+    }
+
+    /// Returns the brightness clamped to the supported range.
+    pub fn effective_brightness(&self) -> f32 {
+        if self.brightness.is_finite() {
+            self.brightness.clamp(0.0, 1.0)
+        } else {
+            default_openrgb_brightness()
+        }
+    }
+
+    /// Returns gamma clamped to the supported range.
+    pub fn effective_gamma(&self) -> f32 {
+        if self.gamma.is_finite() {
+            self.gamma.clamp(0.1, 4.0)
+        } else {
+            default_openrgb_gamma()
+        }
+    }
+}
+
+/// Selects an OpenRGB keyboard and its monitor assignment.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OpenRgbKeyboardConfig {
+    /// Case-insensitive glob matched against the OpenRGB controller name.
+    pub name: String,
+    /// Optional exact serial number used to disambiguate equal names.
+    #[serde(default)]
+    pub serial: Option<String>,
+    /// Optional monitor name; currently only the primary monitor is rendered.
+    #[serde(default)]
+    pub monitor: Option<String>,
+}
+
 /// Per-monitor configuration override.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitorOverride {
@@ -137,6 +205,21 @@ fn default_preview_max_target_fps() -> u32 {
 fn default_fps_log_interval_secs() -> u32 {
     5
 }
+fn default_openrgb_host() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_openrgb_port() -> u16 {
+    6742
+}
+fn default_openrgb_update_fps() -> u32 {
+    30
+}
+fn default_openrgb_brightness() -> f32 {
+    1.0
+}
+fn default_openrgb_gamma() -> f32 {
+    1.0
+}
 
 impl Default for PreviewConfig {
     fn default() -> Self {
@@ -166,6 +249,20 @@ impl Default for RuntimeConfig {
     }
 }
 
+impl Default for OpenRgbConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            host: default_openrgb_host(),
+            port: default_openrgb_port(),
+            update_fps: default_openrgb_update_fps(),
+            brightness: default_openrgb_brightness(),
+            gamma: default_openrgb_gamma(),
+            keyboards: Vec::new(),
+        }
+    }
+}
+
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
@@ -178,6 +275,7 @@ impl Default for DaemonConfig {
             preview: PreviewConfig::default(),
             logging: LoggingConfig::default(),
             runtime: RuntimeConfig::default(),
+            openrgb: OpenRgbConfig::default(),
         }
     }
 }
@@ -263,6 +361,7 @@ mod tests {
         assert!(s.contains("[preview]"));
         assert!(s.contains("[logging]"));
         assert!(s.contains("[runtime]"));
+        assert!(s.contains("[openrgb]"));
     }
 
     #[test]
@@ -338,5 +437,27 @@ mod tests {
 
         let parsed: DaemonConfig = toml::from_str(&s).unwrap();
         assert!(!parsed.logging.transition_trace);
+    }
+
+    #[test]
+    fn openrgb_defaults_and_limits_are_stable() {
+        let mut cfg = OpenRgbConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert_eq!(cfg.port, 6742);
+        assert_eq!(cfg.effective_update_fps(), 30);
+
+        cfg.update_fps = 120;
+        cfg.brightness = 2.0;
+        cfg.gamma = 0.0;
+        assert_eq!(cfg.effective_update_fps(), 30);
+        assert_eq!(cfg.effective_brightness(), 1.0);
+        assert_eq!(cfg.effective_gamma(), 0.1);
+    }
+
+    #[test]
+    fn legacy_config_gets_openrgb_defaults() {
+        let config: DaemonConfig = toml::from_str("target_fps = 60").unwrap();
+        assert_eq!(config.openrgb, OpenRgbConfig::default());
     }
 }

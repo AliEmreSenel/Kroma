@@ -218,7 +218,8 @@ pub fn create_texture_source(
                 .source
                 .as_ref()
                 .context("Video texture requires a `source` path")?;
-            let tex = create_video_source(pkg, source, def.looping, def.hot_reload, def.optional, gpu)?;
+            let tex =
+                create_video_source(pkg, source, def.looping, def.hot_reload, def.optional, gpu)?;
             Ok(Some(Box::new(tex)))
         }
         TextureType::Font => {

@@ -81,3 +81,78 @@ pub trait AudioProvider: Send + Sync {
     /// Returns the current audio level (RMS, 0.0–1.0).
     fn get_level(&self) -> f32;
 }
+
+// ---------------------------------------------------------------------------
+// LightingSink — external lighting output
+// ---------------------------------------------------------------------------
+
+/// A downsampled RGBA representation of the final composited render output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LightingFrame {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+}
+
+impl LightingFrame {
+    /// Creates a lighting frame after validating its RGBA byte length.
+    pub fn new(width: u32, height: u32, rgba: Vec<u8>) -> Result<Self> {
+        let expected_len = width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or_else(|| anyhow::anyhow!("Lighting frame dimensions overflow"))?;
+        if rgba.len() != expected_len {
+            anyhow::bail!(
+                "Lighting frame contains {} bytes; expected {} for {}x{} RGBA",
+                rgba.len(),
+                expected_len,
+                width,
+                height
+            );
+        }
+        Ok(Self {
+            width,
+            height,
+            rgba,
+        })
+    }
+
+    /// Returns the frame width in pixels.
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Returns the frame height in pixels.
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Returns the row-major RGBA8 pixel data.
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
+}
+
+/// Receives final render frames for an external lighting backend.
+///
+/// Implementations must keep [`Self::submit_frame`] non-blocking so slow
+/// devices or network connections cannot stall the renderer.
+pub trait LightingSink: Send + Sync {
+    /// Queues the newest composited frame, replacing any older pending frame.
+    fn submit_frame(&self, frame: LightingFrame) -> Result<()>;
+
+    /// Relinquishes control without changing the device's last colors.
+    fn disconnect(&self) -> Result<()>;
+}
+
+#[cfg(test)]
+mod lighting_tests {
+    use super::LightingFrame;
+
+    #[test]
+    fn lighting_frame_validates_rgba_length() {
+        assert!(LightingFrame::new(2, 1, vec![0; 8]).is_ok());
+        assert!(LightingFrame::new(2, 1, vec![0; 7]).is_err());
+    }
+}

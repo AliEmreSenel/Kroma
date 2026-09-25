@@ -1,0 +1,10 @@
+[package]
+name = "openrgb-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "A small, reusable client for the OpenRGB SDK protocol"
+
+[dependencies]
+thiserror.workspace = true

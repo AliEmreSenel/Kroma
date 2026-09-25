@@ -156,13 +156,8 @@ impl ShaderTexture {
                 custom_uniform_data[idx] = match default {
                     toml::Value::Float(v) => *v as f32,
                     toml::Value::Integer(v) => *v as f32,
-                    toml::Value::Boolean(v) => {
-                        if *v {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    }
+                    toml::Value::Boolean(true) => 1.0,
+                    toml::Value::Boolean(false) => 0.0,
                     _ => 0.0,
                 };
             }

@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/openrgb-client",
     "crates/kroma-shared",
     "crates/kroma-daemon",
     "crates/kroma-cli",
