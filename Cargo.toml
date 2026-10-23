@@ -44,7 +44,7 @@ naga = { version = "29", features = ["glsl-in", "wgsl-out", "spv-in"] }
 shaderc = "0.10"
 
 # X11 support
-x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr"] }
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "randr", "shape"] }
 
 # IPC
 tokio = { version = "1", features = ["full"] }

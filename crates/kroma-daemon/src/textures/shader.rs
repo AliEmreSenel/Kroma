@@ -65,6 +65,7 @@ pub struct ShaderTexture {
 
     // -- Uniform state --
     uniforms: ShaderUniforms,
+    clock_from_parent: bool,
     custom_uniform_data: Vec<f32>,
 }
 
@@ -332,6 +333,7 @@ impl ShaderTexture {
                 bind_group_0,
                 sub_textures,
                 texture_bind_group: Some(tex_bg),
+                clock_from_parent: false,
                 uniforms: ShaderUniforms {
                     u_resolution: [width as f32, height as f32],
                     ..ShaderUniforms::default()
@@ -369,6 +371,7 @@ impl ShaderTexture {
             bind_group_0,
             sub_textures,
             texture_bind_group,
+            clock_from_parent: false,
             uniforms: ShaderUniforms {
                 u_resolution: [width as f32, height as f32],
                 ..ShaderUniforms::default()
@@ -763,6 +766,7 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             bind_group_0,
             sub_textures: Vec::new(),
             texture_bind_group: None,
+            clock_from_parent: false,
             uniforms: ShaderUniforms::default(),
             custom_uniform_data: vec![0.0; MAX_CUSTOM_UNIFORMS],
         })
@@ -862,9 +866,12 @@ impl TextureSource for ShaderTexture {
         let device = &self.gpu.device;
 
         // Update time uniforms
-        self.uniforms.u_time += dt as f32;
+        if !self.clock_from_parent {
+            self.uniforms.u_time += dt as f32;
+            self.uniforms.u_frame = self.uniforms.u_frame.wrapping_add(1);
+        }
+        self.clock_from_parent = false;
         self.uniforms.u_delta_time = dt as f32;
-        self.uniforms.u_frame += 1;
 
         let mut needs_bind_rebuild = false;
 
@@ -988,6 +995,7 @@ impl TextureSource for ShaderTexture {
         let res = self.uniforms.u_resolution;
         self.uniforms = *uniforms;
         self.uniforms.u_resolution = res;
+        self.clock_from_parent = true;
     }
 
     fn gpu_render(&mut self) -> Result<()> {

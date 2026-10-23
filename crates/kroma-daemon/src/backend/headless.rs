@@ -1,30 +1,29 @@
-use std::collections::HashMap;
-use std::fs::File;
-use std::os::unix::io::AsRawFd;
-
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 use log::info;
-use raw_window_handle::{DrmDisplayHandle, DrmWindowHandle, RawDisplayHandle, RawWindowHandle};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+use std::collections::HashMap;
 
 use kroma_shared::traits::SurfaceProvider;
 use kroma_shared::types::{MonitorConfig, MonitorId};
 
 pub struct HeadlessSurfaceProvider {
-    drm_node: Option<File>,
     monitors: Vec<MonitorConfig>,
     virtual_surfaces: HashMap<u32, (u32, u32)>,
+    disabled_names: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl HeadlessSurfaceProvider {
     pub fn new() -> Self {
         Self {
-            drm_node: None,
             monitors: Vec::new(),
             virtual_surfaces: HashMap::new(),
+            disabled_names: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
     pub fn create_virtual_monitors(&mut self) {
+        self.monitors.clear();
+        self.virtual_surfaces.clear();
         let default_monitor = MonitorConfig {
             id: MonitorId(0),
             name: "headless-virtual-0".into(),
@@ -47,16 +46,12 @@ impl HeadlessSurfaceProvider {
 
 impl SurfaceProvider for HeadlessSurfaceProvider {
     fn connect(&mut self) -> Result<()> {
-        info!("Connecting to DRM render node for Headless DMA-BUF capability...");
-
-        let file = File::open("/dev/dri/renderD128")
-            .context("Failed to open /dev/dri/renderD128. Are graphics drivers installed?")?;
-
-        self.drm_node = Some(file);
         self.create_virtual_monitors();
-
-        info!("Successfully opened DRM render node");
         Ok(())
+    }
+
+    fn is_headless(&self) -> bool {
+        true
     }
 
     fn size(&self, monitor: MonitorId) -> Result<(u32, u32)> {
@@ -67,31 +62,31 @@ impl SurfaceProvider for HeadlessSurfaceProvider {
     }
 
     fn display_handle(&self) -> Result<RawDisplayHandle> {
-        let file = self
-            .drm_node
-            .as_ref()
-            .context("DRM node not initialized. Did you call connect()?")?;
-
-        let fd = file.as_raw_fd();
-
-        let handle = DrmDisplayHandle::new(fd);
-
-        Ok(RawDisplayHandle::Drm(handle))
+        Err(anyhow!("Offscreen targets have no display handle"))
     }
 
-    fn create_surface(&self, monitor: MonitorId) -> Result<RawWindowHandle> {
-        if !self.virtual_surfaces.contains_key(&monitor.0) {
-            return Err(anyhow!("No virtual surface configured for {:?}", monitor));
-        }
-
-        info!("Providing headless generic window handle for {:?}", monitor);
-
-        let handle = DrmWindowHandle::new(0);
-        Ok(RawWindowHandle::Drm(handle))
+    fn create_surface(&self, _monitor: MonitorId) -> Result<RawWindowHandle> {
+        Err(anyhow!("Offscreen targets have no native window"))
     }
 
     fn list_monitors(&self) -> Result<Vec<MonitorConfig>> {
-        Ok(self.monitors.clone())
+        let disabled = self
+            .disabled_names
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default();
+        Ok(self
+            .monitors
+            .iter()
+            .filter(|m| !disabled.iter().any(|d| d == &m.name))
+            .cloned()
+            .collect())
+    }
+
+    fn apply_monitor_policy(&mut self, disabled_names: &[String]) {
+        if let Ok(mut slot) = self.disabled_names.lock() {
+            *slot = disabled_names.to_vec();
+        }
     }
 
     fn dispatch(&mut self) -> Result<()> {

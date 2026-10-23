@@ -246,6 +246,19 @@ impl FfmpegVideoDecoder {
     }
 }
 
+/// Read the nominal frame rate for a video texture, including embedded assets.
+pub fn source_frame_rate(pkg: &kroma_shared::shade::LiveShadePackage, source: &str) -> Option<f64> {
+    let (video, _) = super::resolve_video_source_with_origin(pkg, source).ok()?;
+    let decoder = match video {
+        super::VideoSource::ExternalPath(path) => FfmpegVideoDecoder::load(&path).ok()?,
+        super::VideoSource::EmbeddedStream(stream) => {
+            FfmpegVideoDecoder::load_from_stream(stream, source).ok()?
+        }
+    };
+    let rate = 1.0 / decoder.avg_frame_interval;
+    (rate.is_finite() && rate > 0.0).then_some(rate)
+}
+
 impl VideoDecoder for FfmpegVideoDecoder {
     fn load(path: &Path) -> Result<Self>
     where

@@ -64,7 +64,7 @@ pub fn start_listener(tx: Sender<WaylandEvent>) -> Result<std::thread::JoinHandl
                     }
                 }
 
-                let backoff = Duration::from_secs(retry_count.min(30));
+                let backoff = Duration::from_secs(retry_count.clamp(1, 30));
                 std::thread::sleep(backoff);
             }
         })
@@ -113,10 +113,8 @@ fn parse_event(line: &str) -> Option<WaylandEvent> {
     let (event_name, data) = line.split_once(">>")?;
 
     match event_name {
-        "fullscreen" => {
-            let fullscreen = data.trim() == "1";
-            Some(WaylandEvent::Fullscreen { fullscreen })
-        }
+        // "fullscreen" events are intentionally ignored: occlusion is tracked
+        // per-monitor from `hyprctl` queries, not from this global signal.
         "workspace" => {
             if let Ok(id) = data.trim().parse::<i64>() {
                 Some(WaylandEvent::WorkspaceChanged { id })
@@ -140,86 +138,187 @@ fn parse_event(line: &str) -> Option<WaylandEvent> {
 /// Start polling Hyprland cursor position on a background thread.
 ///
 /// Returns shared cursor state and a handle for the polling thread.
-pub fn start_cursor_tracker() -> Result<(
+pub fn start_cursor_tracker(
+    occluded_names: super::OcclusionSnapshot,
+) -> Result<(
     std::sync::Arc<std::sync::Mutex<Vec2>>,
     std::thread::JoinHandle<()>,
 )> {
-    super::start_cursor_tracker("hypr", query_hyprland_cursor)
+    let mut last_poll = None;
+    super::start_cursor_tracker("hypr", move || {
+        let now = std::time::Instant::now();
+        if last_poll.is_none_or(|last| now.duration_since(last) >= Duration::from_millis(500)) {
+            last_poll = Some(now);
+            let names = query_hyprland_occluded_names().unwrap_or_else(|error| {
+                debug!("Hyprland occlusion query failed: {error}");
+                Vec::new()
+            });
+            // Refresh the timestamp even when the contents are unchanged.
+            if let Ok(mut snapshot) = occluded_names.lock() {
+                *snapshot = (std::time::Instant::now(), names);
+            }
+        }
+        query_hyprland_cursor()
+    })
 }
 
-/// Query cursor position via Hyprland IPC socket directly (no process spawning).
+/// Run one Hyprland IPC command over its unix socket (no process spawning).
 ///
 /// Connects to `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`,
-/// sends `cursorpos`, reads the response.
-pub fn query_hyprland_cursor() -> anyhow::Result<Vec2> {
+/// sends the command, and reads the full response.
+fn hypr_ipc(command: &str) -> anyhow::Result<String> {
     let instance_sig = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
         .map_err(|_| anyhow::anyhow!("HYPRLAND_INSTANCE_SIGNATURE not set"))?;
-
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
-
     let socket_path = format!("{}/hypr/{}/.socket.sock", runtime_dir, instance_sig);
-    let mut stream = UnixStream::connect(&socket_path)?;
-    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
-    stream.set_write_timeout(Some(Duration::from_millis(100)))?;
 
-    stream.write_all(b"cursorpos")?;
+    let mut stream = UnixStream::connect(&socket_path)?;
+    stream.set_read_timeout(Some(Duration::from_millis(250)))?;
+    stream.set_write_timeout(Some(Duration::from_millis(250)))?;
+    stream.write_all(command.as_bytes())?;
     // Shutdown write side so server knows command is complete
     stream.shutdown(std::net::Shutdown::Write)?;
 
-    let mut buf = [0u8; 128];
-    let n = stream.read(&mut buf)?;
-    let response = std::str::from_utf8(&buf[..n]).unwrap_or("");
+    let mut out = Vec::new();
+    stream.take(4 * 1024 * 1024).read_to_end(&mut out)?;
+    anyhow::ensure!(
+        out.len() < 4 * 1024 * 1024,
+        "Hyprland response exceeded size limit"
+    );
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
 
+/// Query cursor position via the Hyprland IPC socket.
+pub fn query_hyprland_cursor() -> anyhow::Result<Vec2> {
     // Response format: "960, 540" or "960, 540\n"
+    let response = hypr_ipc("cursorpos")?;
     let parts: Vec<&str> = response.trim().split(',').collect();
     if parts.len() == 2 {
         let x: f32 = parts[0].trim().parse().unwrap_or(0.0);
         let y: f32 = parts[1].trim().parse().unwrap_or(0.0);
         Ok(Vec2::new(x, y))
     } else {
-        Err(anyhow::anyhow!("Unexpected cursor response: {}", response))
+        Err(anyhow::anyhow!("Unexpected cursor response: {:?}", parts))
     }
+}
+
+/// Returns the names of monitors whose background is covered by a fullscreen
+/// window (or a window that fully spans the monitor), per `hyprctl -j` data.
+///
+/// Best-effort and defensive across Hyprland versions: missing fields degrade
+/// to "not occluded".
+pub fn query_hyprland_occluded_names() -> anyhow::Result<Vec<String>> {
+    let monitors: Vec<serde_json::Value> = serde_json::from_str(&hypr_ipc("j/monitors")?)
+        .map_err(|e| anyhow::anyhow!("Failed to parse hyprctl monitors: {e}"))?;
+    let windows: Vec<serde_json::Value> = serde_json::from_str(&hypr_ipc("j/clients")?)
+        .map_err(|e| anyhow::anyhow!("Failed to parse hyprctl clients: {e}"))?;
+
+    Ok(compute_occluded_names(&monitors, &windows))
+}
+
+/// Computes fullscreen occlusion only for clients on a displayed workspace.
+/// Monitor IDs are identifiers, not positions in the monitors array. Unknown
+/// fullscreen modes and missing visibility fields fail open.
+fn compute_occluded_names(
+    monitors: &[serde_json::Value],
+    windows: &[serde_json::Value],
+) -> Vec<String> {
+    monitors
+        .iter()
+        .filter_map(|monitor| {
+            let id = monitor.get("id")?.as_i64()?;
+            let name = monitor.get("name")?.as_str()?;
+            let workspace = monitor.pointer("/activeWorkspace/id")?.as_i64()?;
+            let special = monitor
+                .pointer("/specialWorkspace/id")
+                .and_then(|v| v.as_i64())
+                .filter(|id| *id != 0);
+            let covered = windows.iter().any(|window| {
+                let client_workspace = window.pointer("/workspace/id").and_then(|v| v.as_i64());
+                let visible_workspace = if let Some(special) = special {
+                    client_workspace == Some(special)
+                } else {
+                    client_workspace == Some(workspace)
+                };
+                // Modern Hyprland: 1 = maximized, 2 = fullscreen, 3 = both.
+                // Older releases exposed a boolean instead.
+                let fullscreen = match window.get("fullscreen") {
+                    Some(serde_json::Value::Bool(value)) => *value,
+                    Some(value) => matches!(value.as_u64(), Some(2 | 3)),
+                    None => false,
+                };
+                window.get("monitor").and_then(|v| v.as_i64()) == Some(id)
+                    && window.get("mapped").and_then(|v| v.as_bool()) == Some(true)
+                    && window.get("hidden").and_then(|v| v.as_bool()) == Some(false)
+                    && visible_workspace
+                    && fullscreen
+            });
+            covered.then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Snapshots older than this are treated as absent (fail-open), so a dead
+/// hyprctl socket cannot keep occluding monitors forever.
+pub const OCCLUSION_SNAPSHOT_TTL: Duration = Duration::from_secs(5);
+
+/// True when the occlusion snapshot taken at `last` is still usable at `now`.
+pub fn is_snapshot_fresh(last: &std::time::Instant, now: &std::time::Instant) -> bool {
+    now.duration_since(*last) <= OCCLUSION_SNAPSHOT_TTL
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn parse_fullscreen_event() {
-        let event = parse_event("fullscreen>>1").unwrap();
-        match event {
-            WaylandEvent::Fullscreen { fullscreen } => assert!(fullscreen),
-            _ => panic!("Expected Fullscreen event"),
+    fn fullscreen_requires_visible_workspace_and_real_monitor_id() {
+        let monitors = vec![
+            json!({"id":7,"name":"DP-1","activeWorkspace":{"id":3},"specialWorkspace":{"id":0}}),
+        ];
+        let mut client =
+            json!({"monitor":7,"workspace":{"id":3},"mapped":true,"hidden":false,"fullscreen":2});
+        assert_eq!(
+            compute_occluded_names(&monitors, &[client.clone()]),
+            vec!["DP-1"]
+        );
+        for mode in [0, 1, 4, 99] {
+            client["fullscreen"] = json!(mode);
+            assert!(compute_occluded_names(&monitors, &[client.clone()]).is_empty());
         }
-
-        let event = parse_event("fullscreen>>0").unwrap();
-        match event {
-            WaylandEvent::Fullscreen { fullscreen } => assert!(!fullscreen),
-            _ => panic!("Expected Fullscreen event"),
-        }
+        client["fullscreen"] = json!(true);
+        assert_eq!(
+            compute_occluded_names(&monitors, &[client.clone()]),
+            vec!["DP-1"]
+        );
+        client["workspace"]["id"] = json!(4);
+        assert!(compute_occluded_names(&monitors, &[client.clone()]).is_empty());
+        client["workspace"]["id"] = json!(3);
+        client["hidden"] = json!(true);
+        assert!(compute_occluded_names(&monitors, &[client]).is_empty());
     }
 
     #[test]
-    fn parse_workspace_event() {
-        let event = parse_event("workspace>>3").unwrap();
-        match event {
-            WaylandEvent::WorkspaceChanged { id } => assert_eq!(id, 3),
-            _ => panic!("Expected WorkspaceChanged event"),
-        }
+    fn unknown_schema_and_special_overlay_fail_open() {
+        assert!(compute_occluded_names(&[json!({})], &[json!({"fullscreen":true})]).is_empty());
+        let monitors = vec![
+            json!({"id":2,"name":"DP-2","activeWorkspace":{"id":3},"specialWorkspace":{"id":-99}}),
+        ];
+        let mut client =
+            json!({"monitor":2,"workspace":{"id":3},"mapped":true,"hidden":false,"fullscreen":2});
+        assert!(compute_occluded_names(&monitors, &[client.clone()]).is_empty());
+        client["workspace"]["id"] = json!(-99);
+        assert_eq!(compute_occluded_names(&monitors, &[client]), vec!["DP-2"]);
     }
 
     #[test]
-    fn parse_focusedmon_event() {
-        let event = parse_event("focusedmon>>DP-1,2").unwrap();
-        match event {
-            WaylandEvent::MonitorChanged { name } => assert_eq!(name, "DP-1"),
-            _ => panic!("Expected MonitorChanged event"),
-        }
-    }
-
-    #[test]
-    fn parse_unknown_event() {
-        assert!(parse_event("activewindow>>kitty,~").is_none());
+    fn snapshots_expire() {
+        let now = std::time::Instant::now();
+        assert!(is_snapshot_fresh(&now, &now));
+        assert!(!is_snapshot_fresh(
+            &now,
+            &(now + OCCLUSION_SNAPSHOT_TTL + Duration::from_secs(1))
+        ));
     }
 }

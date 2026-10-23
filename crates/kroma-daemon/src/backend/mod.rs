@@ -43,39 +43,57 @@ impl Backend {
         }
     }
 
-    pub fn new(session_type: &str, desktop_env: &str) -> Result<Self> {
+    pub fn new(session_type: &str, desktop_env: &str, disabled: &[String]) -> Result<Self> {
         info!("Session: type={}, desktop={}", session_type, desktop_env);
 
-        if desktop_env == "KDE" {
-            let mut headless_provider = HeadlessSurfaceProvider::new();
-            headless_provider
-                .connect()
-                .map(|_| headless_provider.create_virtual_monitors())?;
-            Ok(Backend::Headless {
-                surface: headless_provider,
-            })
-        } else if session_type == "wayland" || std::env::var("WAYLAND_DISPLAY").is_ok() {
-            WaylandBackend::new(session_type, desktop_env)
-                .map(|backend| Backend::Wayland { backend })
-                .or_else(|e| {
-                    warn!(
-                        "Failed to initialize wayland backend: {}. Falling back to X11",
-                        e
-                    );
-                    Backend::new("x11", desktop_env)
-                })
-        } else if session_type == "x11" || std::env::var("DISPLAY").is_ok() {
-            info!("Detected X11 session — using desktop window backend");
-            let mut x11_provider = X11SurfaceProvider::new();
-            x11_provider
-                .connect()
-                .and_then(|_| x11_provider.discover_monitors())
-                .and_then(|_| x11_provider.create_all_windows())?;
-            Ok(Backend::X11 {
-                surface: x11_provider,
-            })
-        } else {
-            Err(anyhow!("No backend found"))
+        let is_wayland = session_type == "wayland" || std::env::var("WAYLAND_DISPLAY").is_ok();
+        let is_x11 = session_type == "x11" || std::env::var("DISPLAY").is_ok();
+
+        // Prefer the declared session type; for hybrid environments (both
+        // WAYLAND_DISPLAY and DISPLAY set) prefer Wayland.
+        let prefer_wayland = match session_type {
+            "wayland" => true,
+            "x11" => false,
+            _ => is_wayland,
+        };
+
+        // XWayland's DISPLAY does not turn a KDE Wayland session into X11.
+        if desktop_env == "KDE" && prefer_wayland {
+            return Self::headless(disabled);
         }
+
+        if prefer_wayland && is_wayland {
+            match WaylandBackend::new(session_type, desktop_env, disabled) {
+                Ok(backend) => return Ok(Backend::Wayland { backend }),
+                Err(error) => warn!("Wayland initialization failed: {error:#}; trying X11"),
+            }
+        }
+        if is_x11 {
+            return Self::x11(disabled);
+        }
+
+        Err(anyhow!(
+            "No display backend available (no Wayland or X11 session found)"
+        ))
+    }
+
+    fn x11(disabled: &[String]) -> Result<Self> {
+        info!("Detected X11 session — using desktop window backend");
+        let mut x11_provider = X11SurfaceProvider::new();
+        x11_provider.apply_monitor_policy(disabled);
+        x11_provider
+            .connect()
+            .and_then(|_| x11_provider.discover_monitors())
+            .and_then(|_| x11_provider.create_all_windows())?;
+        Ok(Backend::X11 {
+            surface: x11_provider,
+        })
+    }
+
+    fn headless(disabled: &[String]) -> Result<Self> {
+        let mut provider = HeadlessSurfaceProvider::new();
+        provider.apply_monitor_policy(disabled);
+        provider.connect()?;
+        Ok(Backend::Headless { surface: provider })
     }
 }

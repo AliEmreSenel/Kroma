@@ -13,7 +13,9 @@ use log::{info, warn};
 
 use kroma_shared::shade::LiveShadePackage;
 use kroma_shared::traits::LightingFrame;
-use kroma_shared::types::{ShadePhase, ShaderUniforms, TextureDef, UniformDef};
+use kroma_shared::types::{
+    MonitorConfig, MonitorId, ShadePhase, ShaderUniforms, TextureDef, UniformDef,
+};
 
 mod render_flow;
 mod shader_translation;
@@ -42,6 +44,45 @@ const OUTPUT_BLIT_FRAG_WGSL: &str = include_str!("shaders/output_blit.frag.wgsl"
 
 /// The preferred surface texture format.
 const SURFACE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+
+/// Builds a `SurfaceConfiguration` whose format, alpha mode, and present
+/// mode are validated against the adapter's reported surface capabilities
+/// (the preferred format is used when supported, the first srgb-capable
+/// one otherwise, and the first reported one as a last resort).
+pub(crate) fn compatible_surface_config(
+    caps: &wgpu::SurfaceCapabilities,
+    preferred: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+) -> Option<wgpu::SurfaceConfiguration> {
+    let format = if caps.formats.contains(&preferred) {
+        preferred
+    } else if let Some(srgb) = caps.formats.iter().find(|f| f.is_srgb()) {
+        *srgb
+    } else {
+        *caps.formats.first()?
+    };
+    let alpha_mode = *caps.alpha_modes.first()?;
+    if width == 0 || height == 0 || !caps.usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
+        return None;
+    }
+    Some(wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: width.max(1),
+        height: height.max(1),
+        present_mode: if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else if caps.present_modes.contains(&wgpu::PresentMode::Fifo) {
+            wgpu::PresentMode::Fifo
+        } else {
+            *caps.present_modes.first()?
+        },
+        alpha_mode,
+        view_formats: vec![],
+        desired_maximum_frame_latency: 2,
+    })
+}
 
 /// Maximum number of custom uniform float slots.
 const MAX_CUSTOM_UNIFORMS: usize = 32;
@@ -100,21 +141,19 @@ struct LoadedTexture {
 struct TransitionRenderState {
     _spec: String,
     pipeline: wgpu::RenderPipeline,
-    texture_bind_group: wgpu::BindGroup,
-    _prev_texture: wgpu::Texture,
-    prev_view: wgpu::TextureView,
-    _next_texture: wgpu::Texture,
-    next_view: wgpu::TextureView,
-    _width: u32,
-    _height: u32,
+    texture_layout: wgpu::BindGroupLayout,
     incoming_lane: RendererLane,
 }
 
+/// Independent monitor output and asynchronous lighting readback.
 struct OutputCaptureState {
     _final_texture: wgpu::Texture,
     final_view: wgpu::TextureView,
     output_bind_group: wgpu::BindGroup,
-    surface_pipeline: wgpu::RenderPipeline,
+    /// Pipeline layout wrapping the canvas sampler/texture bind group.
+    blit_pipeline_layout: wgpu::PipelineLayout,
+    /// Fragment module sampling the canvas (OUTPUT_BLIT_FRAG_WGSL).
+    blit_fragment: wgpu::ShaderModule,
     capture_texture: wgpu::Texture,
     capture_view: wgpu::TextureView,
     capture_pipeline: wgpu::RenderPipeline,
@@ -133,6 +172,8 @@ struct TransitionLaneUniformState {
 }
 
 struct RendererLane {
+    lane_id: u64,
+    shader_defs: Vec<(usize, Arc<LiveShadePackage>, TextureDef)>,
     active_package: Option<Arc<LiveShadePackage>>,
     custom_uniforms: HashMap<String, kroma_shared::ipc::UniformValue>,
     custom_uniform_indices: HashMap<String, usize>,
@@ -153,6 +194,8 @@ struct RendererLane {
 impl RendererLane {
     fn blank() -> Self {
         Self {
+            lane_id: 0,
+            shader_defs: Vec::new(),
             active_package: None,
             custom_uniforms: HashMap::new(),
             custom_uniform_indices: HashMap::new(),
@@ -198,14 +241,52 @@ struct BufferPassState {
     feedback: bool,
 }
 
+/// Presentation resources for a single monitor.
+///
+/// Keyed by monitor *name* (stable across re-enumeration). Each monitor owns
+/// its wgpu surface, the configuration it was last configured with, and the
+/// pipeline that stretches this monitor's independently rendered output.
+pub(crate) struct MonitorTarget {
+    /// Provider-level id of this monitor (for occlusion matching).
+    pub(crate) id: MonitorId,
+    /// Native window handle; kept so a lost wgpu surface can be recreated.
+    pub(crate) window: Option<raw_window_handle::RawWindowHandle>,
+    pub(crate) surface: Option<wgpu::Surface<'static>>,
+    pub(crate) config: Option<wgpu::SurfaceConfiguration>,
+    pub(crate) blit: Option<wgpu::RenderPipeline>,
+    output: OutputCaptureState,
+    globals: [wgpu::Buffer; 3],
+    transition: Option<MonitorTransitionTargets>,
+    shader_sources: HashMap<u64, MonitorShaderSources>,
+    needs_reconfigure: bool,
+    retry_after: std::time::Instant,
+}
+
+type MonitorShaderSources = Vec<(usize, Box<dyn TextureSource>)>;
+
+struct MonitorTransitionTargets {
+    prev_view: wgpu::TextureView,
+    next_view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+}
+
+fn target_ready(target: &MonitorTarget, occluded: &[MonitorId], now: std::time::Instant) -> bool {
+    !occluded.contains(&target.id)
+        && now >= target.retry_after
+        && (target.window.is_none() || target.surface.is_some())
+}
+
 /// GPU-bound resources owned by the renderer.
 ///
 /// This struct groups low-level wgpu handles away from orchestration state,
 /// which keeps [`Renderer`] easier to reason about.
+///
+/// Scene programs and media are shared; each target owns its render attachments.
 #[derive(Default)]
 pub(crate) struct GpuResources {
     instance: Option<wgpu::Instance>,
-    surface: Option<wgpu::Surface<'static>>,
+    /// Kept so surfaces can be re-validated (capabilities) on hotplug.
+    adapter: Option<wgpu::Adapter>,
     device: Option<Arc<wgpu::Device>>,
     queue: Option<Arc<wgpu::Queue>>,
     pipeline: Option<wgpu::RenderPipeline>,
@@ -214,14 +295,20 @@ pub(crate) struct GpuResources {
     bind_group_layout: Option<wgpu::BindGroupLayout>,
     pipeline_layout: Option<wgpu::PipelineLayout>,
     vert_module: Option<wgpu::ShaderModule>,
-    surface_config: Option<wgpu::SurfaceConfiguration>,
     texture_bind_group: Option<wgpu::BindGroup>,
     texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
-    output_capture: Option<OutputCaptureState>,
+    canvas_size: Option<(u32, u32)>,
+    /// Render targets keyed by monitor name.
+    targets: HashMap<String, MonitorTarget>,
+    /// Display handle used to create wgpu surfaces for hotplugged monitors.
+    raw_display: Option<raw_window_handle::RawDisplayHandle>,
 }
 
 /// Orchestrates rendering, shader loading, uniforms, and texture updates.
 pub struct Renderer {
+    lane_id: u64,
+    next_lane_id: u64,
+    shader_defs: Vec<(usize, Arc<LiveShadePackage>, TextureDef)>,
     /// Current shader uniforms (CPU side).
     pub uniforms: ShaderUniforms,
 
@@ -261,6 +348,9 @@ impl Renderer {
     /// Creates a renderer instance without initializing GPU resources.
     pub fn new() -> Result<Self> {
         Ok(Self {
+            lane_id: 0,
+            next_lane_id: 1,
+            shader_defs: Vec::new(),
             active_package: None,
             uniforms: ShaderUniforms::default(),
             custom_uniforms: std::collections::HashMap::new(),
@@ -279,19 +369,22 @@ impl Renderer {
         })
     }
 
+    /// Logical canvas size: the reference monitor's dimensions.
+    ///
+    /// All scene rendering and `u_resolution` are based on this size, and
+    /// each monitor's physical surface is fed by stretching the canvas to
+    /// fit. Falls back to the current uniform resolution before GPU init.
     pub fn surface_dimensions(&self) -> (u32, u32) {
-        self.gpu
-            .surface_config
-            .as_ref()
-            .map(|c| (c.width.max(1), c.height.max(1)))
-            .unwrap_or((
-                self.uniforms.u_resolution[0].max(1.0) as u32,
-                self.uniforms.u_resolution[1].max(1.0) as u32,
-            ))
+        self.gpu.canvas_size.unwrap_or((
+            self.uniforms.u_resolution[0].max(1.0) as u32,
+            self.uniforms.u_resolution[1].max(1.0) as u32,
+        ))
     }
 
     fn take_active_lane(&mut self) -> RendererLane {
         RendererLane {
+            lane_id: self.lane_id,
+            shader_defs: std::mem::take(&mut self.shader_defs),
             active_package: self.active_package.take(),
             custom_uniforms: std::mem::take(&mut self.custom_uniforms),
             custom_uniform_indices: std::mem::take(&mut self.custom_uniform_indices),
@@ -312,6 +405,8 @@ impl Renderer {
 
     fn install_active_lane(&mut self, lane: RendererLane) {
         let RendererLane {
+            lane_id,
+            shader_defs,
             active_package,
             custom_uniforms,
             custom_uniform_indices,
@@ -329,6 +424,8 @@ impl Renderer {
             buffer_passes,
         } = lane;
 
+        self.lane_id = lane_id;
+        self.shader_defs = shader_defs;
         self.active_package = active_package;
         self.custom_uniforms = custom_uniforms;
         self.custom_uniform_indices = custom_uniform_indices;
@@ -362,53 +459,7 @@ impl Renderer {
             .context("Uniform BGL missing")?;
 
         let fmt = self.active_surface_format();
-        let w = width.max(1);
-        let h = height.max(1);
-
-        let prev_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("kroma-transition-prev-target"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: fmt,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let prev_view = prev_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let prev_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("kroma-transition-prev-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        let next_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("kroma-transition-dynamic-target"),
-            size: wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: fmt,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let next_view = next_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let next_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("kroma-transition-next-sampler"),
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
+        let _ = (width, height); // The playback canvas determines all target sizes.
         let texture_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("kroma-transition-bgl"),
             entries: &[
@@ -447,29 +498,6 @@ impl Renderer {
             ],
         });
 
-        let transition_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("kroma-transition-bg"),
-            layout: &texture_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&prev_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&prev_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&next_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&next_sampler),
-                },
-            ],
-        });
-
         let transition_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("kroma-transition-pl"),
             bind_group_layouts: &[Some(bgl0), Some(&texture_bgl)],
@@ -494,18 +522,15 @@ impl Renderer {
             "kroma-transition-pipeline",
         );
 
+        for target in self.gpu.targets.values_mut() {
+            target.transition = None;
+        }
         self.transition_spec = Some(spec.to_string());
         self.transition_progress = 0.0;
         self.transition_state = Some(TransitionRenderState {
             _spec: spec.to_string(),
             pipeline,
-            texture_bind_group: transition_bg,
-            _prev_texture: prev_texture,
-            prev_view,
-            _next_texture: next_texture,
-            next_view,
-            _width: w,
-            _height: h,
+            texture_layout: texture_bgl,
             incoming_lane,
         });
         self.transition_lane_uniforms = Some(TransitionLaneUniformState {
@@ -637,58 +662,49 @@ impl Renderer {
         )
     }
 
-    /// Writes one uniform block into GPU uniform memory.
-    fn write_uniform_buffer(&self, uniforms: &ShaderUniforms) {
-        render_flow::write_uniform_buffer(self, uniforms)
-    }
-
+    /// Initializes one GPU context and independent targets for enabled outputs.
     pub fn init_gpu_with_surface(
         &mut self,
         gpu_pref: &GpuPower,
         surface: &dyn SurfaceProvider,
     ) -> Result<()> {
-        let primary = surface
-            .list_monitors()?
+        let mut monitors = surface.list_monitors()?;
+        monitors.sort_by(|a, b| a.name.cmp(&b.name));
+        let (canvas_w, canvas_h) = monitors
             .first()
-            .cloned()
-            .unwrap_or_else(|| kroma_shared::types::MonitorConfig {
-                id: kroma_shared::types::MonitorId(0),
-                name: "default".into(),
-                width: 1920,
-                height: 1080,
-                x: 0,
-                y: 0,
-                scale: 1.0,
-            });
-
-        let (width, height) = surface
-            .size(primary.id)
-            .unwrap_or((primary.width, primary.height));
-
-        info!("Initializing WGPU (Vulkan)... Headless detected.");
-
+            .map(|m| surface.size(m.id).unwrap_or((m.width, m.height)))
+            .unwrap_or((1920, 1080));
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-
-        let raw_display = surface.display_handle()?;
-        let raw_window = surface.create_surface(primary.id)?;
-
-        let surface_target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: Some(raw_display),
-            raw_window_handle: raw_window,
+        let raw_display = if surface.is_headless() {
+            None
+        } else {
+            Some(surface.display_handle()?)
         };
-
-        let wgpu_surface = unsafe { instance.create_surface_unsafe(surface_target) }.ok();
-
+        // Select against an actual presentation surface when one is ready.
+        // SAFETY: the provider owns these native handles throughout initialization.
+        let compatible = raw_display.and_then(|display| {
+            monitors.iter().find_map(|monitor| {
+                let window = surface.create_surface(monitor.id).ok()?;
+                unsafe {
+                    instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                        raw_display_handle: Some(display),
+                        raw_window_handle: window,
+                    })
+                }
+                .ok()
+            })
+        });
         let adapter = pollster_block(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: gpu_pref.into(),
-            compatible_surface: wgpu_surface.as_ref(),
+            compatible_surface: compatible.as_ref(),
             force_fallback_adapter: false,
         }))
         .context("No GPU adapter found")?;
-
+        log::info!("Selected GPU: {:?}", adapter.get_info());
+        drop(compatible);
         let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: wgpu::Features::FLOAT32_FILTERABLE,
             label: Some("kroma-device"),
@@ -697,33 +713,7 @@ impl Renderer {
         .context("Failed to create GPU device")?;
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-
-        let mut format = wgpu::TextureFormat::Rgba8UnormSrgb;
-
-        if let Some(ref s) = wgpu_surface {
-            let surface_caps = s.get_capabilities(&adapter);
-            format = surface_caps
-                .formats
-                .iter()
-                .find(|f| f.is_srgb())
-                .copied()
-                .unwrap_or(surface_caps.formats[0]);
-
-            let surface_config = wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format,
-                width: width.max(1),
-                height: height.max(1),
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
-            };
-            s.configure(&device, &surface_config);
-            self.gpu.surface_config = Some(surface_config);
-        } else {
-            self.gpu.surface_config = None;
-        }
+        let format = SURFACE_FORMAT;
         // Create uniform buffer
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("kroma-uniforms"),
@@ -784,8 +774,9 @@ impl Renderer {
         );
 
         self.gpu.instance = Some(instance);
-        self.gpu.surface = wgpu_surface;
-        self.gpu.device = Some(device);
+        self.gpu.adapter = Some(adapter);
+        self.gpu.raw_display = raw_display;
+        self.gpu.device = Some(Arc::clone(&device));
         self.gpu.queue = Some(queue);
         self.gpu.pipeline = Some(pipeline);
         self.gpu.uniform_buffer = Some(uniform_buffer);
@@ -793,9 +784,16 @@ impl Renderer {
         self.gpu.bind_group_layout = Some(bind_group_layout);
         self.gpu.pipeline_layout = Some(pipeline_layout);
         self.gpu.vert_module = Some(vert_module);
+        let canvas_w = canvas_w.clamp(1, device.limits().max_texture_dimension_2d);
+        let canvas_h = canvas_h.clamp(1, device.limits().max_texture_dimension_2d);
+        self.gpu.canvas_size = Some((canvas_w, canvas_h));
+        self.uniforms.u_resolution = [canvas_w.max(1) as f32, canvas_h.max(1) as f32];
+        self.sync_targets(surface, &monitors);
         info!(
-            "GPU pipeline initialised with real surface ({}x{})",
-            width, height
+            "GPU initialized: canvas {}x{}, {} independent monitor targets",
+            canvas_w,
+            canvas_h,
+            self.gpu.targets.len()
         );
         Ok(())
     }
@@ -1189,6 +1187,9 @@ impl Renderer {
         pkg: &Arc<LiveShadePackage>,
         textures: &IndexMap<String, TextureDef>,
     ) -> Result<Vec<TextureLoadFailure>> {
+        self.lane_id = self.next_lane_id;
+        self.next_lane_id += 1;
+        self.shader_defs.clear();
         let device = self
             .gpu
             .device
@@ -1222,6 +1223,13 @@ impl Renderer {
             // Create the texture source (all types including AudioSpectrum, Shader)
             match textures::create_texture_source(pkg, def, Some(&gpu_ctx)) {
                 Ok(Some(mut source)) => {
+                    if def.ty == kroma_shared::types::TextureType::Shader {
+                        self.shader_defs.push((
+                            self.textures.len(),
+                            Arc::clone(pkg),
+                            (*def).clone(),
+                        ));
+                    }
                     let (w, h) = source.dimensions();
                     let gpu_format = source.format().wgpu_format();
 
@@ -1329,19 +1337,23 @@ impl Renderer {
     /// Advance all texture sources and upload changed frames to the GPU.
     ///
     /// Called once per frame from the render loop.
-    fn update_active_lane_textures(&mut self, dt: f64) -> Result<()> {
+    fn update_active_lane_textures(&mut self, dt: f64) -> Result<bool> {
         let queue = match self.gpu.queue.as_ref() {
             Some(q) => q,
-            None => return Ok(()),
+            None => return Ok(false),
         };
         let device = match self.gpu.device.as_ref() {
             Some(d) => d,
-            None => return Ok(()),
+            None => return Ok(false),
         };
 
         let mut needs_rebuild = false;
+        let mut changed = false;
 
         for (i, source_opt) in self.texture_sources.iter_mut().enumerate() {
+            if self.shader_defs.iter().any(|(index, _, _)| *index == i) {
+                continue;
+            }
             let Some(source) = source_opt.as_mut() else {
                 continue;
             };
@@ -1360,6 +1372,7 @@ impl Renderer {
                     width,
                     height,
                 } => {
+                    changed = true;
                     // GPU-managed sources handle their own textures.  Keep the
                     // owned frame buffer available for recycling after any CPU
                     // upload path has borrowed from it.
@@ -1444,11 +1457,11 @@ impl Renderer {
             self.build_texture_bind_group()?;
         }
 
-        Ok(())
+        Ok(changed || needs_rebuild)
     }
 
-    pub fn update_textures(&mut self, dt: f64) -> Result<()> {
-        self.update_active_lane_textures(dt)?;
+    pub fn update_textures(&mut self, dt: f64) -> Result<bool> {
+        let mut changed = self.update_active_lane_textures(dt)?;
 
         if self.transition_state.is_some() {
             let mut transition = self
@@ -1458,14 +1471,14 @@ impl Renderer {
 
             let outgoing_lane = self.take_active_lane();
             self.install_active_lane(transition.incoming_lane);
-            self.update_active_lane_textures(dt)?;
+            changed |= self.update_active_lane_textures(dt)?;
             transition.incoming_lane = self.take_active_lane();
             self.install_active_lane(outgoing_lane);
 
             self.transition_state = Some(transition);
         }
 
-        Ok(())
+        Ok(changed)
     }
 
     /// Build the bind group layout and bind group for loaded textures.
@@ -1575,15 +1588,14 @@ impl Renderer {
             .as_ref()
             .context("GPU queue not initialised")?;
 
-        let (width, height) = self
-            .gpu
-            .surface_config
-            .as_ref()
-            .map(|c| (c.width, c.height))
-            .unwrap_or((1920, 1080));
+        let (width, height) = self.surface_dimensions();
 
         let text_bitmap = render_fn(paths, width, height);
 
+        // Retire any per-monitor shader histories belonging to the previous lane.
+        self.lane_id = self.next_lane_id;
+        self.next_lane_id += 1;
+        self.shader_defs.clear();
         // Replace all textures with the single text-bitmap texture.
         self.textures.clear();
         self.texture_sources.clear();
@@ -1662,11 +1674,160 @@ impl Renderer {
         render_flow::rebuild_pipeline_layout(self)
     }
 
-    /// Renders one frame and optionally starts an exact final-output capture.
-    ///
-    /// Completed captures are returned asynchronously on a later render call.
-    pub fn render_frame(&mut self, capture_lighting: bool) -> Result<Option<LightingFrame>> {
-        render_flow::render_frame(self, capture_lighting)
+    /// True when no target can currently render, including an empty inventory.
+    pub fn all_targets_occluded(&self, occluded: &[MonitorId]) -> bool {
+        !self
+            .gpu
+            .targets
+            .values()
+            .any(|target| target_ready(target, occluded, std::time::Instant::now()))
+    }
+
+    /// Polls asynchronous work without waiting, even while rendering is paused.
+    pub fn poll_gpu(&self) {
+        if let Some(device) = &self.gpu.device {
+            let _ = device.poll(wgpu::wgt::PollType::Poll);
+        }
+    }
+
+    /// Drops GPU surfaces before the backend's native handles are released.
+    pub fn clear_targets(&mut self) {
+        self.gpu.targets.clear();
+    }
+
+    /// Reconciles native handles and sizes, including recovery from zero targets.
+    pub fn sync_targets(
+        &mut self,
+        provider: &dyn SurfaceProvider,
+        monitors: &[MonitorConfig],
+    ) -> bool {
+        let (Some(device), Some(instance), Some(adapter), Some(vert)) = (
+            self.gpu.device.as_ref(),
+            self.gpu.instance.as_ref(),
+            self.gpu.adapter.as_ref(),
+            self.gpu.vert_module.as_ref(),
+        ) else {
+            return false;
+        };
+        let size = self.surface_dimensions();
+        let mut changed = false;
+        self.gpu.targets.retain(|name, target| {
+            let keep = monitors.iter().any(|m| {
+                m.name == *name
+                    && m.id == target.id
+                    && (provider.is_headless()
+                        || provider.create_surface(m.id).ok() == target.window)
+            });
+            changed |= !keep;
+            keep
+        });
+        for monitor in monitors {
+            let Ok((width, height)) = provider.size(monitor.id) else {
+                continue;
+            };
+            if width == 0
+                || height == 0
+                || width > device.limits().max_texture_dimension_2d
+                || height > device.limits().max_texture_dimension_2d
+            {
+                continue;
+            }
+            if let Some(target) = self.gpu.targets.get_mut(&monitor.name) {
+                if let (Some(surface), Some(config)) = (&target.surface, &mut target.config) {
+                    if target.needs_reconfigure || config.width != width || config.height != height
+                    {
+                        changed = true;
+                        config.width = width;
+                        config.height = height;
+                        surface.configure(device, config);
+                        target.needs_reconfigure = false;
+                    }
+                    continue;
+                }
+                if provider.is_headless() {
+                    continue;
+                }
+            }
+            let created = (|| -> Result<MonitorTarget> {
+                let (window, surface, config) = if provider.is_headless() {
+                    (None, None, None)
+                } else {
+                    let window = provider.create_surface(monitor.id)?;
+                    // SAFETY: providers retain retired windows until sync_targets returns;
+                    // Daemon drops its renderer before its backend on every exit path.
+                    let surface = unsafe {
+                        instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                            raw_display_handle: self.gpu.raw_display,
+                            raw_window_handle: window,
+                        })
+                    }?;
+                    let config = compatible_surface_config(
+                        &surface.get_capabilities(adapter),
+                        SURFACE_FORMAT,
+                        width,
+                        height,
+                    )
+                    .context("Monitor is incompatible with the selected GPU")?;
+                    surface.configure(device, &config);
+                    (Some(window), Some(surface), Some(config))
+                };
+                let output = render_flow::create_output_capture_state(
+                    device,
+                    vert,
+                    SURFACE_FORMAT,
+                    size.0,
+                    size.1,
+                );
+                let blit = config.as_ref().map(|config| {
+                    Self::create_fullscreen_pipeline(
+                        device,
+                        &output.blit_pipeline_layout,
+                        vert,
+                        &output.blit_fragment,
+                        config.format,
+                        "kroma-monitor-present",
+                    )
+                });
+                let globals = std::array::from_fn(|_| {
+                    device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("kroma-monitor-globals"),
+                        size: std::mem::size_of::<ShaderUniforms>() as u64,
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    })
+                });
+                Ok(MonitorTarget {
+                    id: monitor.id,
+                    window,
+                    surface,
+                    config,
+                    blit,
+                    output,
+                    globals,
+                    transition: None,
+                    shader_sources: HashMap::new(),
+                    needs_reconfigure: false,
+                    retry_after: std::time::Instant::now(),
+                })
+            })();
+            match created {
+                Ok(target) => {
+                    self.gpu.targets.insert(monitor.name.clone(), target);
+                    changed = true;
+                }
+                Err(error) => warn!("Cannot initialize monitor {}: {error:#}", monitor.name),
+            }
+        }
+        changed
+    }
+
+    /// Renders each visible monitor and returns completed captures with their monitor names.
+    pub fn render_frame(
+        &mut self,
+        capture_lighting: &[String],
+        occluded: &[MonitorId],
+    ) -> Result<Vec<(String, LightingFrame)>> {
+        render_flow::render_frame(self, capture_lighting, occluded)
     }
 }
 
@@ -1684,4 +1845,245 @@ pub fn glsl_to_wgsl(glsl_source: &str) -> Result<String> {
 /// instant on native backends).
 fn pollster_block<F: std::future::Future>(f: F) -> F::Output {
     shader_translation::pollster_block(f)
+}
+
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+    use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
+
+    struct OffscreenMonitors(Vec<MonitorConfig>);
+
+    impl SurfaceProvider for OffscreenMonitors {
+        fn connect(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn size(&self, id: MonitorId) -> Result<(u32, u32)> {
+            self.0
+                .iter()
+                .find(|m| m.id == id)
+                .map(|m| (m.width, m.height))
+                .context("Unknown output")
+        }
+        fn display_handle(&self) -> Result<RawDisplayHandle> {
+            anyhow::bail!("No display")
+        }
+        fn create_surface(&self, _: MonitorId) -> Result<RawWindowHandle> {
+            anyhow::bail!("No window")
+        }
+        fn list_monitors(&self) -> Result<Vec<MonitorConfig>> {
+            Ok(self.0.clone())
+        }
+        fn dispatch(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn is_headless(&self) -> bool {
+            true
+        }
+    }
+
+    fn monitor(id: u32, name: &str, width: u32) -> MonitorConfig {
+        MonitorConfig {
+            id: MonitorId(id),
+            name: name.into(),
+            width,
+            height: 32,
+            x: 0,
+            y: 0,
+            scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn unsupported_surface_capabilities_fail_without_panicking() {
+        assert!(
+            compatible_surface_config(
+                &wgpu::SurfaceCapabilities {
+                    formats: vec![],
+                    present_modes: vec![],
+                    alpha_modes: vec![],
+                    usages: wgpu::TextureUsages::empty(),
+                },
+                SURFACE_FORMAT,
+                100,
+                100
+            )
+            .is_none()
+        );
+        let caps = wgpu::SurfaceCapabilities {
+            formats: vec![wgpu::TextureFormat::Rgba8Unorm],
+            present_modes: vec![wgpu::PresentMode::Mailbox],
+            alpha_modes: vec![wgpu::CompositeAlphaMode::PostMultiplied],
+            usages: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        };
+        let config = compatible_surface_config(&caps, SURFACE_FORMAT, 100, 100).unwrap();
+        assert_eq!(config.format, caps.formats[0]);
+        assert_eq!(config.present_mode, caps.present_modes[0]);
+        assert_eq!(config.alpha_mode, caps.alpha_modes[0]);
+        assert!(compatible_surface_config(&caps, SURFACE_FORMAT, 0, 100).is_none());
+    }
+
+    #[test]
+    fn gpu_targets_hotplug_and_transition_uniforms_are_independent() {
+        let mut provider =
+            OffscreenMonitors(vec![monitor(7, "left", 64), monitor(42, "right", 96)]);
+        let mut renderer = Renderer::new().unwrap();
+        if let Err(error) = renderer.init_gpu_with_surface(&GpuPower::Low, &provider) {
+            if error.to_string().contains("No GPU adapter") {
+                eprintln!("Skipping GPU regression: no Vulkan adapter available");
+                return;
+            }
+            panic!("GPU initialization failed: {error:#}");
+        }
+        assert!(!renderer.all_targets_occluded(&[MonitorId(7)]));
+        assert!(renderer.all_targets_occluded(&[MonitorId(7), MonitorId(42)]));
+        assert!(!renderer.all_targets_occluded(&[MonitorId(999)]));
+        let left = renderer.gpu.targets["left"].output._final_texture.clone();
+        assert_ne!(left, renderer.gpu.targets["right"].output._final_texture);
+        assert_ne!(
+            renderer.gpu.targets["left"].globals[0],
+            renderer.gpu.targets["right"].globals[0]
+        );
+        provider.0.remove(1);
+        renderer.sync_targets(&provider, &provider.0);
+        assert_eq!(renderer.gpu.targets["left"].output._final_texture, left);
+        provider.0.clear();
+        renderer.sync_targets(&provider, &provider.0);
+        assert!(renderer.gpu.targets.is_empty());
+        assert!(renderer.all_targets_occluded(&[]));
+        provider.0 = vec![monitor(99, "left", 128), monitor(101, "right", 96)];
+        renderer.sync_targets(&provider, &provider.0);
+        assert_eq!(renderer.gpu.targets.len(), 2);
+        assert_eq!(renderer.surface_dimensions(), (64, 32));
+        assert_ne!(renderer.gpu.targets["left"].output._final_texture, left);
+
+        let shader = |color: &str| {
+            format!(
+                r#"
+            struct Globals {{ time: f32, delta: f32, frame: u32, pad: u32 }};
+            @group(0) @binding(0) var<uniform> globals: Globals;
+            @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {{ return {color}; }}
+        "#
+            )
+        };
+        renderer
+            .rebuild_pipeline_with_frag(&shader("vec4<f32>(globals.time, 0.0, 0.0, 1.0)"))
+            .unwrap();
+        let device = renderer.gpu.device.as_ref().unwrap().clone();
+        let incoming_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(
+                shader("vec4<f32>(0.0, globals.time, 0.0, 1.0)").into(),
+            ),
+        });
+        let mut incoming = RendererLane::blank();
+        incoming.pipeline = Some(Renderer::create_fullscreen_pipeline(
+            &device,
+            renderer.gpu.pipeline_layout.as_ref().unwrap(),
+            renderer.gpu.vert_module.as_ref().unwrap(),
+            &incoming_module,
+            SURFACE_FORMAT,
+            "test-incoming",
+        ));
+        incoming.bind_group_layout = renderer.gpu.bind_group_layout.clone();
+        renderer.begin_transition_internal("test", r#"
+            @group(1) @binding(0) var prev: texture_2d<f32>;
+            @group(1) @binding(1) var prev_sampler: sampler;
+            @group(1) @binding(2) var next: texture_2d<f32>;
+            @group(1) @binding(3) var next_sampler: sampler;
+            @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                return textureSample(prev, prev_sampler, uv) + textureSample(next, next_sampler, uv);
+            }
+        "#, incoming, 64, 32).unwrap();
+        renderer.transition_lane_uniforms = Some(TransitionLaneUniformState {
+            outgoing_elapsed: 0.2,
+            outgoing_frame: 1,
+            incoming_elapsed: 0.8,
+            incoming_frame: 2,
+        });
+        renderer.uniforms.u_time = 0.5;
+        renderer
+            .render_frame(&["left".into(), "right".into()], &[MonitorId(101)])
+            .unwrap();
+        assert!(!renderer.gpu.targets["right"].output.mapping_pending);
+        device
+            .poll(wgpu::wgt::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(10)),
+            })
+            .unwrap();
+        let frames = renderer
+            .render_frame(&[], &[MonitorId(99), MonitorId(101)])
+            .unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, "left");
+        let pixel = &frames[0].1.rgba()[..4];
+        assert!((110..=140).contains(&pixel[0]), "Outgoing lane: {pixel:?}");
+        assert!((220..=245).contains(&pixel[1]), "Incoming lane: {pixel:?}");
+
+        // Feedback must advance only on the monitor being rendered.
+        renderer.transition_state = None;
+        renderer.transition_lane_uniforms = None;
+        let config: kroma_shared::types::ShadeConfig = toml::from_str(
+            r#"
+            [meta]
+            name = "feedback regression"
+            author = "test"
+            [states.active.textures.history]
+            type = "shader"
+            shader = "feedback.frag"
+            width = 8
+            height = 8
+            [states.active.textures.history.textures.previous]
+            type = "shader"
+            input = "t-1"
+        "#,
+        )
+        .unwrap();
+        let mut package = LiveShadePackage::new_empty(config);
+        package.add_asset(
+            "feedback.frag".into(),
+            br#"#version 450
+layout(set = 1, binding = 0) uniform texture2D previous;
+layout(set = 1, binding = 1) uniform sampler previous_sampler;
+layout(location = 0) in vec2 uv;
+layout(location = 0) out vec4 color;
+void main() {
+    color = vec4(texture(sampler2D(previous, previous_sampler), uv).r + 0.05, 0.0, 0.0, 1.0);
+}
+"#
+            .to_vec(),
+        );
+        renderer
+            .load_phase(Arc::new(package), ShadePhase::Active, None, None)
+            .unwrap();
+        renderer.render_frame(&[], &[]).unwrap();
+        renderer.render_frame(&[], &[MonitorId(101)]).unwrap();
+        renderer
+            .render_frame(&["left".into(), "right".into()], &[])
+            .unwrap();
+        device
+            .poll(wgpu::wgt::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(10)),
+            })
+            .unwrap();
+        let frames = renderer
+            .render_frame(&[], &[MonitorId(99), MonitorId(101)])
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        let red = |name: &str| frames.iter().find(|(n, _)| n == name).unwrap().1.rgba()[0];
+        assert!(
+            red("left") > red("right") + 10,
+            "Feedback history leaked between monitors"
+        );
+        assert_ne!(
+            renderer.gpu.targets["left"].shader_sources[&renderer.lane_id][0]
+                .1
+                .gpu_texture_view(),
+            renderer.gpu.targets["right"].shader_sources[&renderer.lane_id][0]
+                .1
+                .gpu_texture_view()
+        );
+    }
 }

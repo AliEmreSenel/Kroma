@@ -2,6 +2,7 @@
 //!
 //! This binary holds the wgpu context, manages the render loop,
 //! data aggregation threads, and IPC communication with the GUI.
+#![recursion_limit = "256"]
 
 mod backend;
 mod config;
@@ -23,7 +24,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use indexmap::IndexMap;
-use log::info;
+use log::{info, warn};
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +55,12 @@ use crate::{
 enum LoopControl {
     Continue,
     Shutdown,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FramePacing {
+    Continuous(Duration),
+    Static,
 }
 
 #[derive(Default)]
@@ -247,6 +254,55 @@ impl RuntimeShade {
         }
     }
 
+    fn frame_pacing(&self, phase: ShadePhase, default_fps: u32) -> FramePacing {
+        let fps = if self.package.config.rendering.target_fps > 0 {
+            self.package.config.rendering.target_fps
+        } else {
+            default_fps.max(1)
+        };
+        let Some(state) = self.state(phase) else {
+            return FramePacing::Continuous(Duration::from_secs_f64(1.0 / f64::from(fps)));
+        };
+        let simple_surface = state.shader.is_none();
+        let static_textures = state.textures.values().all(|texture| {
+            matches!(
+                texture.ty,
+                TextureType::Image | TextureType::Font | TextureType::Noise
+            )
+        });
+        if phase == ShadePhase::Active && state.length == 0.0 && simple_surface && static_textures {
+            return FramePacing::Static;
+        }
+
+        // Plain video has no new visual content between source frames.
+        if phase == ShadePhase::Active
+            && simple_surface
+            && state
+                .textures
+                .values()
+                .all(|texture| matches!(texture.ty, TextureType::Video | TextureType::Image))
+        {
+            let source_fps = state
+                .textures
+                .values()
+                .filter_map(|texture| {
+                    (texture.ty == TextureType::Video)
+                        .then_some(texture.source.as_deref())
+                        .flatten()
+                        .and_then(|source| {
+                            textures::video::source_frame_rate(&self.package, source)
+                        })
+                })
+                .fold(0.0_f64, f64::max);
+            if source_fps > 0.0 {
+                return FramePacing::Continuous(Duration::from_secs_f64(
+                    (1.0 / f64::from(fps)).max(1.0 / source_fps),
+                ));
+            }
+        }
+        FramePacing::Continuous(Duration::from_secs_f64(1.0 / f64::from(fps)))
+    }
+
     fn wgsl(&self, phase: ShadePhase) -> Option<&str> {
         match phase {
             ShadePhase::Load => self.cache.load.as_deref(),
@@ -270,9 +326,9 @@ impl RuntimeShade {
 
 struct Daemon {
     config: config::DaemonConfig,
+    renderer: Renderer,
     backend: Backend,
     data_provider: SystemDataProvider,
-    renderer: Renderer,
     cmd_rx: mpsc::Receiver<ipc_server::InternalCommand>,
     ipc_status: Arc<Mutex<ipc_server::DaemonStatus>>,
     _ipc_handle: JoinHandle<()>,
@@ -288,18 +344,25 @@ struct Daemon {
     phase_frame: u32,
     loaded_phase: Option<ShadePhase>,
     paused: bool,
+    /// Set after a display-connection error so the event pump stops retrying
+    /// (and logging) on a dead connection.
+    pump_dead: bool,
     current_phase: DaemonPhase,
     pending_request_path: Option<String>,
     wait_reason: DaemonWaitReason,
     active_workspace_id: i64,
     last_frame_time: Instant,
     frame_budget: Duration,
+    frame_pacing: FramePacing,
+    static_rendered: bool,
     fps_counter: u32,
     fps_timer: Instant,
-    lighting_sink: Option<Box<dyn LightingSink>>,
+    lighting_sinks: std::collections::HashMap<String, Box<dyn LightingSink>>,
+    lighting_reference: String,
     lighting_capture_interval: Duration,
     last_lighting_capture: Instant,
     lighting_was_active: bool,
+    last_target_sync: Instant,
 }
 
 impl Daemon {
@@ -1025,7 +1088,11 @@ impl Daemon {
         let session_type = env::var("XDG_SESSION_TYPE").unwrap_or_default();
         let desktop_env = env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
 
-        let backend = Backend::new(&session_type, &desktop_env)?;
+        let policy = config::resolve_monitors(&[], &config.monitors)?;
+        for warning in &policy.warnings {
+            warn!("Monitor policy: {warning}");
+        }
+        let backend = Backend::new(&session_type, &desktop_env, &policy.disabled)?;
         let data_provider = SystemDataProvider::new()?;
         let mut renderer = Renderer::new()?;
 
@@ -1033,23 +1100,15 @@ impl Daemon {
             let surface = backend.surface().context("A surface must exist")?;
             info!("Initializing GPU with surface...");
 
-            if let Err(e) = renderer.init_gpu_with_surface(&config.gpu_power, surface) {
-                log::error!("GPU init with surface failed: {}", e);
-            } else {
-                info!("GPU initialized with surface");
-            }
-
-            let primary_monitor = surface
+            renderer.init_gpu_with_surface(&config.gpu_power, surface)?;
+            let (width, height) = renderer.surface_dimensions();
+            let primary_name = surface
                 .list_monitors()?
                 .first()
-                .cloned()
-                .context("At least one monitor should exist")?;
-
-            let (width, height) = surface.size(primary_monitor.id)?;
-            (width, height, primary_monitor.name)
+                .map(|m| m.name.clone())
+                .unwrap_or_default();
+            (width, height, primary_name)
         };
-
-        renderer.uniforms.u_resolution = [surf_w as f32, surf_h as f32];
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (ipc_handle, ipc_status) = ipc_server::start(cmd_tx)?;
@@ -1067,27 +1126,36 @@ impl Daemon {
         } else {
             Duration::from_secs_f64(1.0 / f64::from(openrgb_fps))
         };
-        let lighting_sink: Option<Box<dyn LightingSink>> =
-            if config.openrgb.enabled && openrgb_fps > 0 && !config.openrgb.keyboards.is_empty() {
-                match OpenRgbLightingSink::start(config.openrgb.clone(), primary_monitor_name) {
-                    Ok(sink) => Some(Box::new(sink)),
-                    Err(error) => {
-                        log::warn!("OpenRGB worker could not start: {error:#}");
-                        None
+        let mut lighting_sinks: std::collections::HashMap<String, Box<dyn LightingSink>> =
+            std::collections::HashMap::new();
+        if config.openrgb.enabled && openrgb_fps > 0 {
+            let names: std::collections::HashSet<_> = config
+                .openrgb
+                .keyboards
+                .iter()
+                .map(|keyboard| keyboard.monitor.clone().unwrap_or_default())
+                .collect();
+            for name in names {
+                let mut settings = config.openrgb.clone();
+                settings
+                    .keyboards
+                    .retain(|keyboard| keyboard.monitor.as_deref().unwrap_or_default() == name);
+                match OpenRgbLightingSink::start(settings, name.clone()) {
+                    Ok(sink) => {
+                        lighting_sinks.insert(name, Box::new(sink));
                     }
+                    Err(error) => warn!("OpenRGB worker could not start: {error:#}"),
                 }
-            } else {
-                if config.openrgb.enabled && config.openrgb.keyboards.is_empty() {
-                    log::warn!("OpenRGB is enabled but no keyboard selectors are configured");
-                }
-                None
-            };
+            }
+        }
         let last_lighting_capture = Instant::now()
             .checked_sub(lighting_capture_interval)
             .unwrap_or_else(Instant::now);
 
         let mut daemon = Self {
             frame_budget: config.frame_budget(),
+            frame_pacing: FramePacing::Continuous(config.frame_budget()),
+            static_rendered: false,
             config,
             backend,
             data_provider,
@@ -1107,6 +1175,7 @@ impl Daemon {
             phase_frame: 0,
             loaded_phase: None,
             paused: false,
+            pump_dead: false,
             current_phase: DaemonPhase::None,
             pending_request_path: None,
             wait_reason: DaemonWaitReason::Idle,
@@ -1114,10 +1183,12 @@ impl Daemon {
             last_frame_time: Instant::now(),
             fps_counter: 0,
             fps_timer: Instant::now(),
-            lighting_sink,
+            lighting_sinks,
+            lighting_reference: primary_monitor_name,
             lighting_capture_interval,
             last_lighting_capture,
             lighting_was_active: false,
+            last_target_sync: Instant::now(),
         };
 
         daemon.prewarm_builtin_transitions()?;
@@ -1142,6 +1213,8 @@ impl Daemon {
         info!("Entering render loop");
 
         loop {
+            self.pump_display_events();
+
             self.process_backend_events();
 
             match self.process_ipc_commands() {
@@ -1155,16 +1228,57 @@ impl Daemon {
                 }
             }
 
-            if self.paused {
+            self.sync_monitor_targets();
+            self.renderer.poll_gpu();
+            let occluded = if self.config.pause_on_fullscreen {
+                self.backend
+                    .surface()
+                    .map(|s| s.occluded_monitors())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+
+            // Suspend (not just pause) when every presentable monitor is
+            // occluded; the pump above keeps events flowing while we sleep.
+            // Fail-open: an unknown compositor yields no occlusion data.
+            let suspended = self.renderer.all_targets_occluded(&occluded);
+
+            if self.paused || suspended || self.pump_dead {
+                self.static_rendered = false;
                 self.last_frame_time = Instant::now();
+                self.update_fps_and_status();
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
             }
 
-            if let Err(e) = self.render_tick() {
+            if let Err(e) = self.render_tick(&occluded) {
                 log::error!("Render tick failed: {}", e);
+                self.last_frame_time = Instant::now();
                 std::thread::sleep(Duration::from_millis(100));
             }
+            self.update_fps_and_status();
+        }
+    }
+
+    /// Pump the display-server event queue. Runs on every loop iteration —
+    /// including while rendering is paused or fully occluded — so socket
+    /// traffic, configure acknowledgements, and lifecycle events never pile up.
+    /// On a connection failure the pump is disabled once (logged) instead of
+    /// retrying in an unbounded error loop.
+    fn pump_display_events(&mut self) {
+        if self.pump_dead {
+            return;
+        }
+
+        let Some(surface) = self.backend.surface_mut() else {
+            return;
+        };
+
+        if let Err(err) = surface.dispatch() {
+            warn!("Display event pump failed: {err:#} — disabling pump for this session");
+            self.pump_dead = true;
+            self.renderer.clear_targets();
         }
     }
 
@@ -1175,9 +1289,8 @@ impl Daemon {
             };
             while let Ok(event) = rx.try_recv() {
                 match event {
-                    WaylandEvent::Fullscreen { fullscreen } if self.config.pause_on_fullscreen => {
-                        self.paused = fullscreen;
-                    }
+                    // Fullscreen no longer drives a global pause; per-monitor
+                    // occlusion is handled by each backend's occluded_monitors().
                     WaylandEvent::WorkspaceChanged { id } => {
                         info!(
                             "Workspace changed to {} (was {})",
@@ -1191,7 +1304,6 @@ impl Daemon {
                     WaylandEvent::Disconnected => {
                         log::warn!("Wayland compositor event source disconnected");
                     }
-                    _ => {}
                 }
             }
         }
@@ -1808,6 +1920,7 @@ impl Daemon {
             ShadePhase::Unload => DaemonPhase::Unload,
         };
         self.loaded_phase = Some(phase);
+        self.refresh_frame_pacing(phase);
         self.wait_reason = match phase {
             ShadePhase::Load => DaemonWaitReason::RunningLoad,
             ShadePhase::Unload => DaemonWaitReason::RunningUnload,
@@ -1815,6 +1928,17 @@ impl Daemon {
         };
 
         Ok(outcome)
+    }
+
+    // Transition promotion bypasses enter_phase, but must update pacing and repaint too.
+    fn refresh_frame_pacing(&mut self, phase: ShadePhase) {
+        self.frame_pacing = self
+            .runtime_shade
+            .as_ref()
+            .expect("runtime shade present")
+            .frame_pacing(phase, self.config.target_fps);
+        info!("Phase {:?} frame pacing: {:?}", phase, self.frame_pacing);
+        self.static_rendered = false;
     }
 
     fn load_runtime_phase_for_transition(&mut self, phase: ShadePhase) -> Result<ShadeLoadOutcome> {
@@ -2166,6 +2290,7 @@ impl Daemon {
                             self.pending_request_path = None;
                             self.unload_requested = false;
                             self.loaded_phase = Some(promoted_phase);
+                            self.refresh_frame_pacing(promoted_phase);
                             self.current_phase = match promoted_phase {
                                 ShadePhase::Load => DaemonPhase::Load,
                                 ShadePhase::Active => DaemonPhase::Active,
@@ -2206,6 +2331,7 @@ impl Daemon {
 
                             if let Some(phase) = promoted_phase {
                                 self.loaded_phase = Some(phase);
+                                self.refresh_frame_pacing(phase);
                             }
                             self.current_phase = resume_phase;
                             self.wait_reason = match self.current_phase {
@@ -2249,13 +2375,43 @@ impl Daemon {
         Ok(())
     }
 
-    fn render_tick(&mut self) -> Result<()> {
-        let frame_start = Instant::now();
+    /// Reconciles targets even while paused, occluded, or without any outputs.
+    fn sync_monitor_targets(&mut self) {
+        if self.pump_dead || self.last_target_sync.elapsed() < Duration::from_millis(500) {
+            return;
+        }
+        self.last_target_sync = Instant::now();
+        if let Some(surface) = self.backend.surface()
+            && let Ok(monitors) = surface.list_monitors()
+        {
+            if self.lighting_reference.is_empty() {
+                self.lighting_reference = monitors
+                    .iter()
+                    .map(|m| m.name.clone())
+                    .min()
+                    .unwrap_or_default();
+            }
+            for (name, sink) in &self.lighting_sinks {
+                let monitor = if name.is_empty() {
+                    &self.lighting_reference
+                } else {
+                    name
+                };
+                if !monitors.iter().any(|m| &m.name == monitor) {
+                    let _ = sink.disconnect();
+                }
+            }
+            if self.renderer.sync_targets(surface, &monitors) {
+                self.static_rendered = false;
+            }
+            if let Some(surface) = self.backend.surface_mut() {
+                surface.release_retired_surfaces();
+            }
+        }
+    }
 
-        self.backend
-            .surface_mut()
-            .context("There must be a surface")?
-            .dispatch()?;
+    fn render_tick(&mut self, occluded: &[kroma_shared::types::MonitorId]) -> Result<()> {
+        let frame_start = Instant::now();
 
         let dt = frame_start
             .duration_since(self.last_frame_time)
@@ -2288,7 +2444,15 @@ impl Daemon {
         self.renderer.uniforms.apply_cursor(cursor);
 
         // Advance all texture sources (video decoding, slideshow timers, audio, etc.)
-        self.renderer.update_textures(dt as f64)?;
+        let textures_changed = self.renderer.update_textures(dt as f64)?;
+        if self.active_transition.is_none()
+            && matches!(self.frame_pacing, FramePacing::Static)
+            && self.static_rendered
+            && !textures_changed
+        {
+            std::thread::sleep(Duration::from_millis(100));
+            return Ok(());
+        }
 
         // Derive audio level from audio texture sources
         self.renderer.uniforms.u_audio_level = self.renderer.get_audio_level();
@@ -2299,47 +2463,69 @@ impl Daemon {
                 DaemonPhase::None | DaemonPhase::Terminal
             );
         if !lighting_active && self.lighting_was_active {
-            if let Some(sink) = self.lighting_sink.as_ref()
-                && let Err(error) = sink.disconnect()
-            {
-                log::warn!("Failed to disconnect OpenRGB lighting sink: {error:#}");
+            for sink in self.lighting_sinks.values() {
+                if let Err(error) = sink.disconnect() {
+                    warn!("Failed to disconnect lighting: {error:#}");
+                }
             }
             self.lighting_was_active = false;
         }
-        let capture_lighting = lighting_active
-            && self.lighting_sink.is_some()
+        let capture_due = lighting_active
             && self.lighting_capture_interval > Duration::ZERO
             && frame_start.duration_since(self.last_lighting_capture)
                 >= self.lighting_capture_interval;
-        if capture_lighting {
+        let captures: Vec<String> = if capture_due {
             self.last_lighting_capture = frame_start;
-        }
-
-        if let Some(frame) = self.renderer.render_frame(capture_lighting)?
-            && lighting_active
-            && let Some(sink) = self.lighting_sink.as_ref()
-        {
-            match sink.submit_frame(frame) {
-                Ok(()) => self.lighting_was_active = true,
-                Err(error) => {
-                    log::warn!("Failed to submit OpenRGB lighting frame: {error:#}");
-                }
+            self.lighting_sinks
+                .keys()
+                .map(|name| {
+                    if name.is_empty() {
+                        self.lighting_reference.clone()
+                    } else {
+                        name.clone()
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for (name, frame) in self.renderer.render_frame(&captures, occluded)? {
+            if !lighting_active {
+                continue;
+            }
+            // An explicitly assigned sink never follows another monitor.
+            if let Some(sink) = self.lighting_sinks.get(&name) {
+                sink.submit_frame(frame.clone())?;
+                self.lighting_was_active = true;
+            }
+            if name == self.lighting_reference
+                && let Some(sink) = self.lighting_sinks.get("")
+            {
+                sink.submit_frame(frame)?;
+                self.lighting_was_active = true;
             }
         }
         self.frame = self.frame.wrapping_add(1);
-
-        self.update_fps_and_status();
+        self.fps_counter += 1;
+        self.static_rendered = true;
 
         let elapsed = frame_start.elapsed();
-        if elapsed < self.frame_budget {
-            std::thread::sleep(self.frame_budget - elapsed);
+        let budget = if self.active_transition.is_some() {
+            self.frame_budget
+        } else {
+            match self.frame_pacing {
+                FramePacing::Continuous(budget) => budget,
+                FramePacing::Static => Duration::ZERO,
+            }
+        };
+        if elapsed < budget {
+            std::thread::sleep(budget - elapsed);
         }
 
         Ok(())
     }
 
     fn update_fps_and_status(&mut self) {
-        self.fps_counter += 1;
         let elapsed = self.fps_timer.elapsed().as_secs_f32();
 
         if elapsed >= 1.0 {
@@ -2382,10 +2568,10 @@ impl Daemon {
     }
 
     fn shutdown(&mut self) -> Result<()> {
-        if let Some(sink) = self.lighting_sink.as_ref()
-            && let Err(error) = sink.disconnect()
-        {
-            log::warn!("Failed to disconnect OpenRGB lighting sink: {error:#}");
+        for sink in self.lighting_sinks.values() {
+            if let Err(error) = sink.disconnect() {
+                warn!("Failed to disconnect lighting: {error:#}");
+            }
         }
         self.cleanup_socket()?;
         info!("Daemon shutdown complete");
@@ -2423,9 +2609,9 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PhaseWgslCache, RuntimeShade, crossed_active_boundary, load_reject_for_runtime_state,
-        should_wait_for_incoming_preload, solve_handoff_timing_for_runtime,
-        transition_elapsed_complete,
+        FramePacing, PhaseWgslCache, RuntimeShade, crossed_active_boundary,
+        load_reject_for_runtime_state, should_wait_for_incoming_preload,
+        solve_handoff_timing_for_runtime, transition_elapsed_complete,
     };
     use std::sync::Arc;
 
@@ -2477,6 +2663,29 @@ mod tests {
             package: Arc::new(LiveShadePackage::new_empty(config)),
             cache: PhaseWgslCache::default(),
         }
+    }
+
+    #[test]
+    fn static_active_phase_renders_on_demand() {
+        let runtime = mk_runtime(None, Some(0.0), None);
+        assert!(matches!(
+            runtime.frame_pacing(kroma_shared::types::ShadePhase::Active, 60),
+            FramePacing::Static
+        ));
+    }
+
+    #[test]
+    fn manifest_fps_controls_animated_phase() {
+        let mut runtime = mk_runtime(None, Some(0.0), None);
+        let package = Arc::get_mut(&mut runtime.package).unwrap();
+        package.config.rendering.target_fps = 24;
+        package.config.states.active.as_mut().unwrap().shader = Some("animated.glsl".into());
+        let FramePacing::Continuous(interval) =
+            runtime.frame_pacing(kroma_shared::types::ShadePhase::Active, 60)
+        else {
+            panic!("animated shader must keep rendering");
+        };
+        assert!((interval.as_secs_f64() - 1.0 / 24.0).abs() < 0.001);
     }
 
     #[test]

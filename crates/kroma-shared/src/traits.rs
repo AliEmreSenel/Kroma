@@ -22,8 +22,10 @@ pub trait SurfaceProvider {
     /// Initialize the connection to the display server.
     fn connect(&mut self) -> Result<()>;
 
+    /// Returns the current buffer dimensions for a monitor.
     fn size(&self, monitor: MonitorId) -> Result<(u32, u32)>;
 
+    /// Returns the native display handle.
     fn display_handle(&self) -> Result<raw_window_handle::RawDisplayHandle>;
 
     /// Create the drawing surface on the given monitor.
@@ -35,8 +37,37 @@ pub trait SurfaceProvider {
     /// Return the current monitor layout.
     fn list_monitors(&self) -> Result<Vec<MonitorConfig>>;
 
-    /// Dispatch pending events (non-blocking).
+    /// Monitors whose background is currently known to be occluded
+    /// (e.g. a fullscreen window on that monitor's active workspace).
+    ///
+    /// This is best-effort detection, not a guarantee of actual visibility.
+    /// Implementations return a cached snapshot and must perform no external
+    /// I/O here. Missing or unavailable data must yield an empty list —
+    /// callers treat "unknown" as "not occluded" (fail-open, never suppress
+    /// rendering on a guess).
+    fn occluded_monitors(&self) -> Vec<MonitorId> {
+        Vec::new()
+    }
+
+    /// Pump the display-server event queue (non-blocking).
+    ///
+    /// Must flush outgoing requests, read any available socket data, and
+    /// dispatch all resulting events. Called on every daemon loop iteration,
+    /// including while rendering is paused.
     fn dispatch(&mut self) -> Result<()>;
+
+    /// Apply monitor policy: names of monitors excluded by configuration
+    /// (`enabled = false`). Disabled monitors must not get a native surface,
+    /// a render target, or a `list_monitors()` entry. Default: no-op.
+    fn apply_monitor_policy(&mut self, _disabled_names: &[String]) {}
+
+    /// Releases retired native surfaces after the renderer has dropped their GPU targets.
+    fn release_retired_surfaces(&mut self) {}
+
+    /// Whether this provider renders to offscreen targets instead of native windows.
+    fn is_headless(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------

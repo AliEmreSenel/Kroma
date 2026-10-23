@@ -185,6 +185,23 @@ name = "DP-1"
 enabled = true
 ```
 
+### Multiple monitors
+
+The selected wallpaper renders separately on every enabled output. Each output
+stretches the same logical canvas to fill its surface. Outputs can be connected
+or removed while the daemon is running, including while paused.
+
+`[[monitors]]` rules match exact connector names. Unlisted outputs are enabled;
+`enabled = false` prevents creating a wallpaper surface. Rules for disconnected
+outputs apply when they connect. Duplicate names are rejected. Per-monitor
+`shade` assignments and spanning wallpapers are not implemented yet; a `shade`
+override currently produces an explicit warning.
+
+Fullscreen detection pauses only the affected outputs when reliable backend
+data is available. Unknown data keeps rendering. IPC pause/resume is global.
+Generic Wayland has no occlusion source; GravityWM's global flag is used only
+with a single connected output because it cannot identify an output otherwise.
+
 ### OpenRGB keyboard output
 
 Kroma can mirror the exact final wallpaper output—including lifecycle and
@@ -194,7 +211,8 @@ server in OpenRGB, enable the configuration above, and add at least one
 
 - `name` is a case-insensitive glob supporting `*` and `?`.
 - `serial`, when set and non-empty, must match exactly.
-- `monitor`, when set, must match the currently rendered primary monitor.
+- `monitor`, when set, selects that exact output. Disconnection does not redirect
+  its lighting to another output. Without it, the initial reference output is used.
 - Only keyboards with OpenRGB matrix metadata are controlled.
 - `update_fps` is hard-limited to 30; `0` disables lighting output.
 - `brightness` is clamped to `0.0..=1.0`; `gamma` is clamped to `0.1..=4.0`.

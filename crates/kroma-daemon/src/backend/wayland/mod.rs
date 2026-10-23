@@ -1,10 +1,10 @@
 pub mod gravitywm;
 pub mod hyprland;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use glam::Vec2;
@@ -34,8 +34,6 @@ use kroma_shared::types::{MonitorConfig, MonitorId};
 /// Compositor events that affect Kroma rendering policy.
 #[derive(Debug, Clone)]
 pub enum WaylandEvent {
-    /// A window entered or exited fullscreen on the current workspace.
-    Fullscreen { fullscreen: bool },
     /// The active workspace changed.
     WorkspaceChanged { id: i64 },
     /// The active monitor changed.
@@ -50,7 +48,6 @@ pub enum WaylandBackend {
         _cursor_handle: JoinHandle<()>,
         cursor_pos: Arc<Mutex<Vec2>>,
         cursor_height: f32,
-        rx: mpsc::Receiver<WaylandEvent>,
     },
     Hyprland {
         surface: WaylandSurfaceProvider,
@@ -98,22 +95,22 @@ impl WaylandBackend {
         }
     }
 
-    pub fn new(_session_type: &str, desktop_env: &str) -> Result<Self> {
+    pub fn new(_session_type: &str, desktop_env: &str, disabled: &[String]) -> Result<Self> {
         info!("Detected Wayland session — using layer shell backend");
-        let surface_provider = connected_surface_provider()?;
+        let surface_provider = connected_surface_provider(disabled)?;
 
         let backend = match desktop_env {
             "GravityWM" | "gravitywm" => {
                 let cursor_height = cursor_height(&surface_provider)?;
-                let (tx, rx) = mpsc::channel();
 
-                match gravitywm::start_state_tracker(tx) {
+                match gravitywm::start_state_tracker(Arc::clone(
+                    &surface_provider.global_fullscreen,
+                )) {
                     Ok((cursor_pos, cursor_handle)) => WaylandBackend::Gravitywm {
                         surface: surface_provider,
                         _cursor_handle: cursor_handle,
                         cursor_pos,
                         cursor_height,
-                        rx,
                     },
                     Err(err) => {
                         warn!("GravityWM state tracking disabled: {err}");
@@ -127,7 +124,8 @@ impl WaylandBackend {
                 let cursor_height = cursor_height(&surface_provider)?;
                 let (tx, rx) = mpsc::channel();
                 let handle = hyprland::start_listener(tx)?;
-                let (cursor_pos, cursor_handle) = hyprland::start_cursor_tracker()?;
+                let (cursor_pos, cursor_handle) =
+                    hyprland::start_cursor_tracker(Arc::clone(&surface_provider.occluded_names))?;
                 WaylandBackend::Hyprland {
                     surface: surface_provider,
                     _handle: handle,
@@ -147,13 +145,14 @@ impl WaylandBackend {
 
 pub fn backend_events(backend: &mut WaylandBackend) -> Option<&mut mpsc::Receiver<WaylandEvent>> {
     match backend {
-        WaylandBackend::Gravitywm { rx, .. } | WaylandBackend::Hyprland { rx, .. } => Some(rx),
-        WaylandBackend::Generic { .. } => None,
+        WaylandBackend::Hyprland { rx, .. } => Some(rx),
+        WaylandBackend::Gravitywm { .. } | WaylandBackend::Generic { .. } => None,
     }
 }
 
-fn connected_surface_provider() -> Result<WaylandSurfaceProvider> {
+fn connected_surface_provider(disabled: &[String]) -> Result<WaylandSurfaceProvider> {
     let mut surface_provider = WaylandSurfaceProvider::new();
+    surface_provider.apply_monitor_policy(disabled);
     surface_provider
         .connect()
         .and_then(|_| surface_provider.create_all_surfaces())?;
@@ -216,20 +215,31 @@ pub struct CreatedSurface {
     pub width: u32,
     /// The configured height from the compositor.
     pub height: u32,
-    /// Whether the compositor has sent a configure event.
-    pub configured: bool,
 }
 
-/// Wayland-based surface provider targeting Hyprland's Layer Shell.
+/// Shared, timestamped backend occlusion snapshot.
+pub type OcclusionSnapshot = Arc<Mutex<(Instant, Vec<String>)>>;
+
+/// Native surfaces and cached monitor state for Wayland.
 pub struct WaylandSurfaceProvider {
     connection: Option<Connection>,
     monitors: Vec<MonitorConfig>,
     /// Created surfaces keyed by monitor id.
     surfaces: HashMap<u32, CreatedSurface>,
+    retired_surfaces: Vec<CreatedSurface>,
     /// Event queue/state must be kept alive and pumped; otherwise Wayland/Vulkan
     /// presentation events accumulate while rendering.
     event_queue: Option<EventQueue<WaylandShellState>>,
     shell_state: Option<WaylandShellState>,
+    /// `(snapshot time, monitor names currently covered)`; only the
+    /// Hyprland tracker populates this. Stale snapshots are ignored
+    /// (fail-open), and `occluded_monitors()` maps names to ids.
+    pub occluded_names: OcclusionSnapshot,
+    global_fullscreen: Arc<Mutex<(Instant, bool)>>,
+    /// Monitor names excluded by config (`enabled = false`). The daemon
+    /// keeps this in sync; disabled monitors get no surface or target.
+    pub disabled_names: Arc<Mutex<Vec<String>>>,
+    last_output_poll: Instant,
 }
 
 impl WaylandSurfaceProvider {
@@ -238,23 +248,31 @@ impl WaylandSurfaceProvider {
             connection: None,
             monitors: Vec::new(),
             surfaces: HashMap::new(),
+            retired_surfaces: Vec::new(),
             event_queue: None,
             shell_state: None,
+            occluded_names: Arc::new(Mutex::new((Instant::now(), Vec::new()))),
+            global_fullscreen: Arc::new(Mutex::new((Instant::now(), false))),
+            disabled_names: Arc::new(Mutex::new(Vec::new())),
+            last_output_poll: Instant::now(),
         }
     }
 
     /// Get the configured dimensions for a monitor's surface.
     pub fn surface_size(&self, monitor_id: u32) -> Option<(u32, u32)> {
-        self.surfaces.get(&monitor_id).map(|s| (s.width, s.height))
+        let surface = self.surfaces.get(&monitor_id)?;
+        let configured = self.shell_state.as_ref()?.configured_surfaces.lock().ok()?;
+        let &(w, h) = configured.get(&monitor_id)?;
+        Some((
+            if w == 0 { surface.width } else { w },
+            if h == 0 { surface.height } else { h },
+        ))
     }
 
     /// Check if a monitor's surface has been configured by the compositor.
     #[allow(dead_code)]
     pub fn is_configured(&self, monitor_id: u32) -> bool {
-        self.surfaces
-            .get(&monitor_id)
-            .map(|s| s.configured)
-            .unwrap_or(false)
+        self.surface_size(monitor_id).is_some()
     }
 
     /// Create layer shell surfaces on all discovered monitors.
@@ -282,6 +300,8 @@ impl WaylandSurfaceProvider {
             output_state,
             layer_shell,
             configured_surfaces: Arc::new(Mutex::new(HashMap::new())),
+            surface_ids: Arc::new(Mutex::new(HashMap::new())),
+            surfaces_closed: HashSet::new(),
         };
 
         // Roundtrip to discover outputs
@@ -289,136 +309,21 @@ impl WaylandSurfaceProvider {
             .roundtrip(&mut state)
             .context("Wayland roundtrip failed during output discovery")?;
 
-        // Enumerate monitors from output state
-        let outputs: Vec<_> = state.output_state.outputs().collect();
-        let mut discovered_monitors = Vec::new();
-
-        for (idx, output) in outputs.iter().enumerate() {
-            if let Some(info) = state.output_state.info(output) {
-                let (width, height) = info
-                    .modes
-                    .iter()
-                    .find(|m| m.current)
-                    .map(|m| (m.dimensions.0 as u32, m.dimensions.1 as u32))
-                    .unwrap_or((1920, 1080));
-
-                let (x, y) = info.location;
-
-                let monitor = MonitorConfig {
-                    id: MonitorId(idx as u32),
-                    name: info
-                        .name
-                        .clone()
-                        .unwrap_or_else(|| format!("output-{}", idx)),
-                    width,
-                    height,
-                    x,
-                    y,
-                    scale: info.scale_factor as f64,
-                };
-
-                info!(
-                    "Discovered output: {} ({}x{} @ {},{} scale {})",
-                    monitor.name, width, height, x, y, monitor.scale
-                );
-                discovered_monitors.push((monitor, output.clone()));
-            }
-        }
-
-        if discovered_monitors.is_empty() {
-            warn!("No outputs discovered — creating default surface");
-            discovered_monitors.push((
-                MonitorConfig {
-                    id: MonitorId(0),
-                    name: "default".into(),
-                    width: 1920,
-                    height: 1080,
-                    x: 0,
-                    y: 0,
-                    scale: 1.0,
-                },
-                outputs.first().cloned().unwrap_or_else(|| {
-                    state.output_state.outputs().next().unwrap_or_else(|| {
-                        panic!("No Wayland outputs found — is the compositor running?")
-                    })
-                }),
-            ));
-        }
-
-        // Create layer shell surfaces for each monitor
-        for (monitor, output) in &discovered_monitors {
-            info!("Creating layer shell surface for '{}'...", monitor.name);
-
-            let wl_surface = state.compositor_state.create_surface(&qh);
-
-            let layer_surface = state.layer_shell.create_layer_surface(
-                &qh,
-                wl_surface.clone(),
-                Layer::Background,
-                Some("kroma-wallpaper"),
-                Some(output),
-            );
-
-            // Configure the layer surface to cover the entire monitor
-            layer_surface.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
-            layer_surface.set_exclusive_zone(-1);
-            layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
-            layer_surface.set_size(monitor.width, monitor.height);
-
-            // Commit to trigger configure event from compositor
-            wl_surface.commit();
-
-            let created = CreatedSurface {
-                _monitor: monitor.clone(),
-                _layer_surface: layer_surface,
-                wl_surface,
-                width: monitor.width,
-                height: monitor.height,
-                configured: false,
-            };
-
-            self.surfaces.insert(monitor.id.0, created);
-        }
-
-        // Roundtrip to receive configure events
-        event_queue
-            .roundtrip(&mut state)
-            .context("Wayland roundtrip failed during surface configuration")?;
-        event_queue
-            .roundtrip(&mut state)
-            .context("Second Wayland roundtrip failed")?;
-
-        // Update surface configured state
-        let configured = state
-            .configured_surfaces
+        let disabled = self
+            .disabled_names
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        for (id, surface) in self.surfaces.iter_mut() {
-            if let Some(&(w, h)) = configured.get(id) {
-                surface.configured = true;
-                if w > 0 {
-                    surface.width = w;
-                }
-                if h > 0 {
-                    surface.height = h;
-                }
-                info!(
-                    "Surface for monitor {} configured: {}x{}",
-                    id, surface.width, surface.height
-                );
-            } else {
-                surface.configured = true;
-                info!(
-                    "Surface for monitor {} using default size: {}x{}",
-                    id, surface.width, surface.height
-                );
-            }
-        }
-
-        drop(configured);
-
-        self.monitors = discovered_monitors.into_iter().map(|(m, _)| m).collect();
-
+            .map(|v| v.clone())
+            .unwrap_or_default();
+        Self::reconcile_outputs(
+            &mut self.monitors,
+            &mut self.surfaces,
+            &mut self.retired_surfaces,
+            &disabled,
+            &mut event_queue,
+            &mut state,
+        );
+        // Initial setup may roundtrip; the runtime pump never does.
+        event_queue.roundtrip(&mut state)?;
         // Keep the event queue and state alive after setup. The render loop calls
         // SurfaceProvider::dispatch() every frame; if this queue is dropped or not
         // pumped, compositor/presentation events can accumulate in the client and
@@ -431,6 +336,145 @@ impl WaylandSurfaceProvider {
             self.surfaces.len()
         );
         Ok(())
+    }
+
+    /// Creates and commits a layer surface covering `monitor` on `output`.
+    fn create_layer_surface_for(
+        state: &mut WaylandShellState,
+        qh: &QueueHandle<WaylandShellState>,
+        monitor: &MonitorConfig,
+        output: &wl_output::WlOutput,
+    ) -> CreatedSurface {
+        info!("Creating layer shell surface for '{}'...", monitor.name);
+
+        let wl_surface = state.compositor_state.create_surface(qh);
+
+        let layer_surface = state.layer_shell.create_layer_surface(
+            qh,
+            wl_surface.clone(),
+            Layer::Background,
+            Some("kroma-wallpaper"),
+            Some(output),
+        );
+
+        {
+            let mut surface_ids = state.surface_ids.lock().unwrap_or_else(|e| e.into_inner());
+            surface_ids.insert(wl_surface.id().as_ptr() as usize, monitor.id.0);
+        }
+
+        // Configure the layer surface to cover the entire monitor
+        layer_surface.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
+        layer_surface.set_exclusive_zone(-1);
+        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer_surface.set_size(0, 0);
+        // An empty input region makes the wallpaper pointer-transparent.
+        let region = state.compositor_state.wl_compositor().create_region(qh, ());
+        wl_surface.set_input_region(Some(&region));
+        region.destroy();
+
+        // Commit to trigger configure event from compositor
+        wl_surface.commit();
+
+        CreatedSurface {
+            _monitor: monitor.clone(),
+            _layer_surface: layer_surface,
+            wl_surface,
+            width: monitor.width,
+            height: monitor.height,
+        }
+    }
+
+    /// Updates only changed outputs and retains retired handles until GPU teardown.
+    fn reconcile_outputs(
+        monitors: &mut Vec<MonitorConfig>,
+        surfaces: &mut HashMap<u32, CreatedSurface>,
+        retired: &mut Vec<CreatedSurface>,
+        disabled: &[String],
+        event_queue: &mut EventQueue<WaylandShellState>,
+        state: &mut WaylandShellState,
+    ) {
+        let current: Vec<_> = state
+            .output_state
+            .outputs()
+            .filter_map(|output| {
+                let info = state.output_state.info(&output)?;
+                let id = output.id().protocol_id();
+                let name = info.name.clone().unwrap_or_else(|| format!("output-{id}"));
+                if disabled.contains(&name) {
+                    return None;
+                }
+                let (w, h) = info.modes.iter().find(|m| m.current)?.dimensions;
+                let scale = info.scale_factor.max(1);
+                let rotated = matches!(
+                    info.transform,
+                    wl_output::Transform::_90
+                        | wl_output::Transform::_270
+                        | wl_output::Transform::Flipped90
+                        | wl_output::Transform::Flipped270
+                );
+                let (w, h) = if rotated { (h, w) } else { (w, h) };
+                Some((
+                    MonitorConfig {
+                        id: MonitorId(id),
+                        name,
+                        width: (w / scale).max(1) as u32,
+                        height: (h / scale).max(1) as u32,
+                        x: info.location.0,
+                        y: info.location.1,
+                        scale: f64::from(scale),
+                    },
+                    output,
+                ))
+            })
+            .collect();
+        let removed: Vec<_> = surfaces
+            .keys()
+            .copied()
+            .filter(|id| {
+                state.surfaces_closed.contains(id) || !current.iter().any(|(m, _)| m.id.0 == *id)
+            })
+            .collect();
+        for id in removed {
+            if let Some(surface) = surfaces.remove(&id) {
+                state
+                    .surface_ids
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&(surface.wl_surface.id().as_ptr() as usize));
+                state
+                    .configured_surfaces
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&id);
+                retired.push(surface);
+            }
+        }
+        state.surfaces_closed.clear();
+        let qh = event_queue.handle();
+        for (monitor, output) in &current {
+            let surface = surfaces
+                .entry(monitor.id.0)
+                .or_insert_with(|| Self::create_layer_surface_for(state, &qh, monitor, output));
+            surface.width = monitor.width;
+            surface.height = monitor.height;
+            surface._monitor = monitor.clone();
+        }
+        *monitors = current.into_iter().map(|(m, _)| m).collect();
+        monitors.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+}
+
+fn flush_pending(
+    result: std::result::Result<(), wayland_client::backend::WaylandError>,
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(wayland_client::backend::WaylandError::Io(error))
+            if error.kind() == std::io::ErrorKind::WouldBlock =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -447,9 +491,8 @@ impl SurfaceProvider for WaylandSurfaceProvider {
     }
 
     fn size(&self, monitor: MonitorId) -> Result<(u32, u32)> {
-        Ok(self
-            .surface_size(monitor.0)
-            .expect("Error getting surface size"))
+        self.surface_size(monitor.0)
+            .context("Surface is not configured yet")
     }
 
     /// Get the raw display pointer (wl_display*) for wgpu.
@@ -473,6 +516,7 @@ impl SurfaceProvider for WaylandSurfaceProvider {
             .get(&monitor.0)
             .context(format!("No surface created for monitor {:?}", monitor))?;
 
+        self.size(monitor)?;
         let ptr = surface.wl_surface.id().as_ptr() as *mut std::ffi::c_void;
         let non_null = std::ptr::NonNull::new(ptr).context("Wayland surface pointer is null")?;
 
@@ -482,25 +526,113 @@ impl SurfaceProvider for WaylandSurfaceProvider {
     }
 
     fn list_monitors(&self) -> Result<Vec<MonitorConfig>> {
-        Ok(self.monitors.clone())
+        let disabled = self
+            .disabled_names
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default();
+        Ok(self
+            .monitors
+            .iter()
+            .filter(|m| !disabled.iter().any(|d| d == &m.name))
+            .cloned()
+            .collect())
+    }
+
+    fn occluded_monitors(&self) -> Vec<MonitorId> {
+        // GravityWM's global flag cannot identify the covered output when
+        // multiple outputs exist. Only use it when there is exactly one output,
+        // including disabled outputs in that count.
+        let output_count = self
+            .shell_state
+            .as_ref()
+            .map(|s| s.output_state.outputs().count())
+            .unwrap_or(0);
+        if output_count == 1
+            && let Ok(snapshot) = self.global_fullscreen.lock()
+            && snapshot.1
+            && hyprland::is_snapshot_fresh(&snapshot.0, &Instant::now())
+        {
+            return self.monitors.iter().map(|m| m.id).collect();
+        }
+        let (snapshot_time, names) = self
+            .occluded_names
+            .lock()
+            .map(|slot| (slot.0, slot.1.clone()))
+            .unwrap_or((Instant::now(), Vec::new()));
+        // Expire stale snapshots so a dead hyprctl socket cannot keep
+        // occluding monitors forever.
+        if !hyprland::is_snapshot_fresh(&snapshot_time, &Instant::now()) {
+            return Vec::new();
+        }
+        map_occluded_names(&self.monitors, &names)
+    }
+
+    fn apply_monitor_policy(&mut self, disabled_names: &[String]) {
+        if let Ok(mut slot) = self.disabled_names.lock()
+            && *slot != disabled_names
+        {
+            *slot = disabled_names.to_vec();
+        }
+    }
+
+    fn release_retired_surfaces(&mut self) {
+        self.retired_surfaces.clear();
     }
 
     fn dispatch(&mut self) -> Result<()> {
+        // Policy snapshot read up front so the field borrow stays outside
+        // the mutable event-queue/state borrow scope below.
+        let disabled: Vec<String> = self
+            .disabled_names
+            .lock()
+            .map(|d| d.clone())
+            .unwrap_or_default();
+
         if let (Some(event_queue), Some(state)) =
             (self.event_queue.as_mut(), self.shell_state.as_mut())
         {
-            // Pump all already-read Wayland events without blocking. This mirrors
-            // the X11 backend's per-frame event drain and prevents presentation
-            // related events from accumulating over long runs.
+            // Full non-blocking pump: send pending requests, pull in any socket
+            // data that is available (the only code path that reads the socket —
+            // dispatch_pending alone never does), dispatch everything, then flush
+            // any requests the handlers issued (ack_configure, set_size, ...).
+            flush_pending(event_queue.flush())?;
+
+            if let Some(guard) = event_queue.prepare_read() {
+                match guard.read() {
+                    Ok(_) => {}
+                    Err(wayland_client::backend::WaylandError::Io(error))
+                        if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+
             while event_queue
                 .dispatch_pending(state)
                 .context("Failed to dispatch pending Wayland events")?
                 > 0
             {}
+
+            flush_pending(event_queue.flush())?;
+
+            // Reconcile the surface inventory at a limited rate (hotplug,
+            // disabled monitors, composer-closed surfaces).
+            let now = Instant::now();
+            if now.duration_since(self.last_output_poll) >= Duration::from_millis(500) {
+                self.last_output_poll = now;
+                WaylandSurfaceProvider::reconcile_outputs(
+                    &mut self.monitors,
+                    &mut self.surfaces,
+                    &mut self.retired_surfaces,
+                    &disabled,
+                    event_queue,
+                    state,
+                );
+            }
         }
 
         if let Some(ref conn) = self.connection {
-            conn.flush().context("Failed to flush Wayland connection")?;
+            flush_pending(conn.flush())?;
         }
 
         Ok(())
@@ -517,6 +649,11 @@ struct WaylandShellState {
     output_state: OutputState,
     layer_shell: LayerShell,
     configured_surfaces: Arc<Mutex<HashMap<u32, (u32, u32)>>>,
+    /// wl_surface pointer -> monitor id, so configure events can be
+    /// attributed to the surface they belong to.
+    surface_ids: Arc<Mutex<HashMap<usize, u32>>>,
+    /// Closed layer surfaces to replace individually on the next reconciliation.
+    surfaces_closed: HashSet<u32>,
 }
 
 impl CompositorHandler for WaylandShellState {
@@ -602,8 +739,15 @@ impl OutputHandler for WaylandShellState {
 }
 
 impl LayerShellHandler for WaylandShellState {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        info!("Layer surface closed by compositor");
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        if let Some(id) = self
+            .surface_ids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(layer.wl_surface().id().as_ptr() as usize))
+        {
+            self.surfaces_closed.insert(*id);
+        }
     }
 
     fn configure(
@@ -617,16 +761,25 @@ impl LayerShellHandler for WaylandShellState {
         let (w, h) = (configure.new_size.0, configure.new_size.1);
         info!("Layer surface configured: {}x{}", w, h);
 
-        // Store the configure event
+        let monitor_id = {
+            let surface_ids = self.surface_ids.lock().unwrap_or_else(|e| e.into_inner());
+            let ptr = layer.wl_surface().id().as_ptr() as usize;
+            surface_ids.get(&ptr).copied()
+        };
+        // Ignore configure events for surfaces we do not manage
+        let Some(monitor_id) = monitor_id else {
+            return;
+        };
+
+        // Store the configure event, keyed by monitor id
         let mut configured = self
             .configured_surfaces
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let id = configured.len() as u32;
-        configured.insert(id, (w, h));
-
-        // Acknowledge the configure by committing the surface
-        layer.wl_surface().commit();
+        if configured.get(&monitor_id).copied() != Some((w, h)) {
+            configured.insert(monitor_id, (w, h));
+            // SCTK acknowledges configure. Keep compositor-selected sizing.
+        }
     }
 }
 
@@ -642,3 +795,55 @@ delegate_compositor!(WaylandShellState);
 delegate_output!(WaylandShellState);
 delegate_layer!(WaylandShellState);
 delegate_registry!(WaylandShellState);
+
+wayland_client::delegate_noop!(WaylandShellState: ignore wayland_client::protocol::wl_region::WlRegion);
+
+fn map_occluded_names(monitors: &[MonitorConfig], names: &[String]) -> Vec<MonitorId> {
+    monitors
+        .iter()
+        .filter(|m| names.contains(&m.name))
+        .map(|m| m.id)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_occlusion_names_never_pause_other_outputs() {
+        let monitor = MonitorConfig {
+            id: MonitorId(42),
+            name: "DP-1".into(),
+            width: 100,
+            height: 100,
+            x: 0,
+            y: 0,
+            scale: 1.0,
+        };
+        assert!(map_occluded_names(std::slice::from_ref(&monitor), &["unknown".into()]).is_empty());
+        assert_eq!(
+            map_occluded_names(
+                &[monitor],
+                &["unknown".into(), "DP-1".into(), "DP-1".into()]
+            ),
+            vec![MonitorId(42)]
+        );
+    }
+
+    #[test]
+    fn socket_backpressure_is_not_a_dead_display() {
+        assert!(
+            flush_pending(Err(wayland_client::backend::WaylandError::Io(
+                std::io::ErrorKind::WouldBlock.into()
+            )))
+            .is_ok()
+        );
+        assert!(
+            flush_pending(Err(wayland_client::backend::WaylandError::Io(
+                std::io::ErrorKind::BrokenPipe.into()
+            )))
+            .is_err()
+        );
+    }
+}

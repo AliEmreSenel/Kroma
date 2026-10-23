@@ -39,7 +39,7 @@ pub struct DaemonConfig {
     #[serde(default)]
     pub current_shade: Option<String>,
 
-    /// Whether to auto-pause when a fullscreen window is detected.
+    /// Whether known fullscreen occlusion suppresses rendering on that monitor.
     #[serde(default = "default_true")]
     pub pause_on_fullscreen: bool,
 
@@ -167,7 +167,7 @@ pub struct OpenRgbKeyboardConfig {
     /// Optional exact serial number used to disambiguate equal names.
     #[serde(default)]
     pub serial: Option<String>,
-    /// Optional monitor name; currently only the primary monitor is rendered.
+    /// Optional exact output name; otherwise use the initial reference monitor.
     #[serde(default)]
     pub monitor: Option<String>,
 }
@@ -182,6 +182,50 @@ pub struct MonitorOverride {
     /// Whether rendering is enabled on this monitor (default: true).
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+/// Resolved monitor policy: which monitors are disabled, plus human-readable
+/// warnings for rejected or unsupported rules.
+#[derive(Debug, Default)]
+pub struct MonitorPolicy {
+    /// Monitor names that must not get a surface or render target.
+    pub disabled: Vec<String>,
+    /// Warnings for unsupported per-monitor shades
+    /// (unsupported in v1 — the global wallpaper is duplicated there).
+    pub warnings: Vec<String>,
+}
+
+/// Resolves monitor overrides against the current inventory.
+///
+/// Semantics: unlisted monitors are enabled; exact-name matches apply;
+/// duplicate rules for one name are rejected; per-monitor
+/// `shade` is an explicit "unsupported in v1" warning (v1 duplicates the
+/// global wallpaper to every enabled monitor).
+pub fn resolve_monitors(
+    _inventory: &[kroma_shared::types::MonitorConfig],
+    rules: &[MonitorOverride],
+) -> Result<MonitorPolicy> {
+    use std::collections::HashSet;
+
+    let mut policy = MonitorPolicy::default();
+    let mut seen: HashSet<&str> = HashSet::new();
+
+    for rule in rules {
+        if !seen.insert(rule.name.as_str()) {
+            anyhow::bail!("Duplicate monitor rule for '{}'", rule.name);
+        }
+        if let Some(shade) = &rule.shade {
+            policy.warnings.push(format!(
+                "Per-monitor shade '{shade}' on '{}' is not supported yet — the global wallpaper will be duplicated",
+                rule.name
+            ));
+        }
+        if !rule.enabled {
+            policy.disabled.push(rule.name.clone());
+        }
+    }
+
+    Ok(policy)
 }
 
 fn default_fps() -> u32 {
@@ -350,6 +394,40 @@ impl DaemonConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disabled_disconnected_monitor_rule_survives_until_hotplug() {
+        let rules = vec![super::MonitorOverride {
+            name: "DP-2".into(),
+            enabled: false,
+            shade: None,
+        }];
+        let policy = super::resolve_monitors(&[], &rules).unwrap();
+        assert_eq!(policy.disabled, vec!["DP-2"]);
+        assert!(policy.warnings.is_empty());
+    }
+
+    #[test]
+    fn conflicting_monitor_rules_are_rejected() {
+        let rule = super::MonitorOverride {
+            name: "DP-1".into(),
+            enabled: false,
+            shade: None,
+        };
+        assert!(super::resolve_monitors(&[], &[rule.clone(), rule]).is_err());
+    }
+
+    #[test]
+    fn fullscreen_pause_option_is_preserved() {
+        let cfg: super::DaemonConfig = toml::from_str("pause_on_fullscreen = false").unwrap();
+        assert!(!cfg.pause_on_fullscreen);
+        assert!(super::DaemonConfig::default().pause_on_fullscreen);
+        assert!(
+            toml::to_string(&cfg)
+                .unwrap()
+                .contains("pause_on_fullscreen = false")
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -357,7 +435,6 @@ mod tests {
         let cfg = DaemonConfig::default();
         let s = toml::to_string_pretty(&cfg).unwrap();
         assert!(s.contains("target_fps = 60"));
-        assert!(s.contains("pause_on_fullscreen = true"));
         assert!(s.contains("[preview]"));
         assert!(s.contains("[logging]"));
         assert!(s.contains("[runtime]"));
@@ -414,7 +491,6 @@ mod tests {
 
         assert!(path.exists());
         assert_eq!(cfg.target_fps, 60);
-        assert!(cfg.pause_on_fullscreen);
         assert!(cfg.pause_on_inactive);
         assert_eq!(cfg.preview.default_width, 480);
         assert_eq!(cfg.preview.default_height, 270);

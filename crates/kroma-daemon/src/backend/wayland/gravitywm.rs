@@ -3,7 +3,6 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -12,12 +11,13 @@ use anyhow::{Context, Result, anyhow};
 use glam::Vec2;
 use serde::Deserialize;
 
-use super::WaylandEvent;
-
+/// GravityWM state as reported by the control socket's `state` command.
+/// Fullscreen is optional; unknown or failed snapshots never pause rendering.
 #[derive(Debug, Deserialize, PartialEq)]
 struct GravityState {
     cursor: [f32; 2],
-    fullscreen: bool,
+    #[serde(default)]
+    fullscreen: Option<bool>,
 }
 
 impl GravityState {
@@ -26,18 +26,24 @@ impl GravityState {
     }
 }
 
-pub fn start_state_tracker(tx: Sender<WaylandEvent>) -> Result<(Arc<Mutex<Vec2>>, JoinHandle<()>)> {
+pub fn start_state_tracker(
+    fullscreen: Arc<Mutex<(std::time::Instant, bool)>>,
+) -> Result<(Arc<Mutex<Vec2>>, JoinHandle<()>)> {
     let socket = control_socket_path()?;
-    let mut last_fullscreen = None;
 
     super::start_cursor_tracker("gravitywm", move || {
-        let state = query_state(&socket)?;
-        if last_fullscreen.replace(state.fullscreen) != Some(state.fullscreen) {
-            let _ = tx.send(WaylandEvent::Fullscreen {
-                fullscreen: state.fullscreen,
-            });
+        let result = query_state(&socket);
+        if let Ok(mut snapshot) = fullscreen.lock() {
+            *snapshot = (
+                std::time::Instant::now(),
+                result
+                    .as_ref()
+                    .ok()
+                    .and_then(|s| s.fullscreen)
+                    .unwrap_or(false),
+            );
         }
-        Ok(state.cursor_pos())
+        result.map(|state| state.cursor_pos())
     })
 }
 
@@ -85,7 +91,6 @@ mod tests {
         let state: GravityState =
             parse_control_json("ok\n{\"cursor\":[960,540],\"fullscreen\":true}\n").unwrap();
         assert_eq!(state.cursor_pos(), Vec2::new(960.0, 540.0));
-        assert!(state.fullscreen);
     }
 
     #[test]
