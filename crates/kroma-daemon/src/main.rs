@@ -10,6 +10,7 @@ mod data;
 mod fallback;
 mod ipc_server;
 mod lighting;
+mod render_demand;
 mod renderer;
 mod textures;
 mod transitions;
@@ -1230,7 +1231,7 @@ impl Daemon {
 
             self.sync_monitor_targets();
             self.renderer.poll_gpu();
-            let occluded = if self.config.pause_on_fullscreen {
+            let mut occluded = if self.config.pause_on_fullscreen {
                 self.backend
                     .surface()
                     .map(|s| s.occluded_monitors())
@@ -1238,6 +1239,24 @@ impl Daemon {
             } else {
                 Vec::new()
             };
+
+            let demanded = self
+                .ipc_status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .render_demand
+                .monitors();
+            if !demanded.is_empty()
+                && let Some(surface) = self.backend.surface()
+            {
+                let demanded_ids: std::collections::HashSet<_> = surface
+                    .list_monitors()?
+                    .into_iter()
+                    .filter(|monitor| demanded.contains(&monitor.name))
+                    .map(|monitor| monitor.id)
+                    .collect();
+                occluded.retain(|id| !demanded_ids.contains(id));
+            }
 
             // Suspend (not just pause) when every presentable monitor is
             // occluded; the pump above keeps events flowing while we sleep.
@@ -1324,6 +1343,9 @@ impl Daemon {
                 DaemonCommand::Resume => {
                     self.paused = false;
                     info!("Rendering resumed");
+                }
+                DaemonCommand::SetRenderDemand { .. } => {
+                    // Connection-scoped policy is handled in ipc_server.
                 }
                 DaemonCommand::Shutdown => {
                     info!("Shutdown requested");

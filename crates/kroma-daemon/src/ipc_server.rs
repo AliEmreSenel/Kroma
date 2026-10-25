@@ -6,6 +6,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -15,6 +16,25 @@ use anyhow::{Context, Result};
 use log::{error, info};
 
 use kroma_shared::ipc::{DaemonCommand, DaemonEvent, DaemonPhase, DaemonWaitReason, socket_path};
+
+use crate::render_demand::RenderDemand;
+
+static NEXT_CONSUMER: AtomicU64 = AtomicU64::new(1);
+
+struct ConsumerLease {
+    id: u64,
+    status: Arc<Mutex<DaemonStatus>>,
+}
+
+impl Drop for ConsumerLease {
+    fn drop(&mut self) {
+        self.status
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .render_demand
+            .remove(self.id);
+    }
+}
 
 /// Return type for [`start`]: join handle and shared daemon status.
 type IpcStartResult = (JoinHandle<()>, Arc<Mutex<DaemonStatus>>);
@@ -33,6 +53,7 @@ pub struct InternalCommand {
 /// Shared daemon status for IPC queries.
 #[derive(Clone)]
 pub struct DaemonStatus {
+    pub render_demand: RenderDemand,
     pub fps: f32,
     pub paused: bool,
     pub loaded_shade: Option<String>,
@@ -50,6 +71,7 @@ pub struct DaemonStatus {
 impl Default for DaemonStatus {
     fn default() -> Self {
         Self {
+            render_demand: RenderDemand::default(),
             fps: 0.0,
             paused: false,
             loaded_shade: None,
@@ -95,6 +117,10 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<IpcStartResult> {
                         let tx = cmd_tx.clone();
                         let status = Arc::clone(&status_clone);
                         std::thread::spawn(move || {
+                            let consumer = ConsumerLease {
+                                id: NEXT_CONSUMER.fetch_add(1, Ordering::Relaxed),
+                                status: Arc::clone(&status),
+                            };
                             let writer = match stream.try_clone() {
                                 Ok(cloned) => cloned,
                                 Err(e) => {
@@ -110,6 +136,21 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<IpcStartResult> {
                                     Ok(line) if line.trim().is_empty() => continue,
                                     Ok(line) => {
                                         match serde_json::from_str::<DaemonCommand>(&line) {
+                                            Ok(DaemonCommand::SetRenderDemand { monitors }) => {
+                                                let event = if monitors.len() > 64
+                                                    || monitors.iter().any(|name| name.is_empty() || name.len() > 256)
+                                                {
+                                                    DaemonEvent::Error { message: "Invalid render demand outputs".into() }
+                                                } else {
+                                                    status.lock().unwrap_or_else(|e| e.into_inner())
+                                                        .render_demand.set(consumer.id, monitors);
+                                                    DaemonEvent::Ready
+                                                };
+                                                if let Ok(json) = serde_json::to_string(&event) {
+                                                    let _ = writeln!(writer, "{}", json);
+                                                    let _ = writer.flush();
+                                                }
+                                            }
                                             Ok(DaemonCommand::StatusQuery) => {
                                                 let s = status.lock().unwrap_or_else(|e| e.into_inner());
                                                 let event = DaemonEvent::Status {
@@ -253,4 +294,25 @@ pub fn start(cmd_tx: Sender<InternalCommand>) -> Result<IpcStartResult> {
         .context("Failed to spawn IPC thread")?;
 
     Ok((handle, status))
+}
+
+#[cfg(test)]
+mod demand_lifetime_tests {
+    use super::*;
+
+    #[test]
+    fn connection_guard_releases_only_its_own_outputs() {
+        let status = Arc::new(Mutex::new(DaemonStatus::default()));
+        {
+            let _consumer = ConsumerLease {
+                id: 10,
+                status: Arc::clone(&status),
+            };
+            let mut state = status.lock().unwrap();
+            state.render_demand.set(10, vec!["eDP-1".into()]);
+            state.render_demand.set(11, vec!["DP-1".into()]);
+        }
+        let remaining = status.lock().unwrap().render_demand.monitors();
+        assert_eq!(remaining, std::collections::HashSet::from(["DP-1".into()]));
+    }
 }

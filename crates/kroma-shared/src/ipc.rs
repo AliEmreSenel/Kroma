@@ -96,6 +96,11 @@ pub enum DaemonCommand {
     /// Resume rendering.
     Resume,
 
+    /// Request rendering for named outputs visible to this connection's consumer.
+    /// Overrides automatic background occlusion only, not explicit pause or FPS policy.
+    /// Replaces previous demand; an empty list or disconnect releases it.
+    SetRenderDemand { monitors: Vec<String> },
+
     /// Reload the currently loaded shade package.
     Reload,
 
@@ -286,4 +291,27 @@ fn extract_shaderc_line(msg: &str) -> Option<u32> {
         i += 1;
     }
     None
+}
+
+#[cfg(test)]
+mod render_demand_protocol_tests {
+    use super::*;
+
+    #[test]
+    fn named_outputs_round_trip_without_losing_existing_commands() {
+        let command = DaemonCommand::SetRenderDemand {
+            monitors: vec!["eDP-1".into(), "netdisplay-1-1".into()],
+        };
+        let encoded = serde_json::to_string(&command).unwrap();
+        match serde_json::from_str::<DaemonCommand>(&encoded).unwrap() {
+            DaemonCommand::SetRenderDemand { monitors } => {
+                assert_eq!(monitors, vec!["eDP-1", "netdisplay-1-1"]);
+            }
+            _ => panic!("wrong command"),
+        }
+        assert!(matches!(
+            serde_json::from_str::<DaemonCommand>(r#"{"type":"StatusQuery"}"#).unwrap(),
+            DaemonCommand::StatusQuery
+        ));
+    }
 }
