@@ -377,3 +377,10 @@ external/embedded video opening, decoder creation, and first-frame work.
 - [wgpu memory allocation hints](https://docs.rs/wgpu/latest/wgpu/enum.MemoryHints.html)
 
 Validate the sampler with `python3 -m unittest discover -s tools -p 'test_*.py'`.
+
+## Video codecs and container compression
+
+See [the real 1080p/4K comparison](VIDEO_COMPRESSION_RESULTS.md) for original
+media versus `.shade`, verified lossless H.264, and none/LZ4/Zstd entry policies.
+`tools/benchmark_video_compression.py` reproduces byte verification, package
+size/packing costs, and isolated playback CPU/RSS at each input's dimensions.

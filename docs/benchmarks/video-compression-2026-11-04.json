@@ -1,0 +1,881 @@
+{
+  "date": "2026-11-04",
+  "host": {
+    "cpu": "AMD Ryzen 5 5600H",
+    "gpu": "AMD Radeon Graphics (RADV RENOIR)",
+    "driver": "Mesa 26.2.5-arch1.1"
+  },
+  "method": {
+    "process_repetitions": 3,
+    "active_seconds": 4,
+    "resumed_seconds": 4,
+    "pause_seconds": 0.5,
+    "pack_repetitions": 7,
+    "excluded_replaced_samples": 6,
+    "cpu_percent_basis": "one logical CPU",
+    "rss_statistic": "median of six active-phase peak samples",
+    "filesystem_cache": "warm"
+  },
+  "raw_vs_package": {
+    "041.mp4": {
+      "direct": {
+        "cpu_median": 15.132283087213604,
+        "cpu_samples": [
+          15.27615890214106,
+          15.132467400410741,
+          14.27656873007849,
+          14.705600920358176,
+          15.27108104500527,
+          15.13209877401647
+        ],
+        "rss_mib_median": 201.4921875,
+        "startup_median_ms": 285.3515009628609
+      },
+      "shade": {
+        "cpu_median": 14.845083184390607,
+        "cpu_samples": [
+          14.990776374439358,
+          14.990354302304732,
+          14.558728435275142,
+          14.271617147273071,
+          14.843161055292217,
+          14.847005313488996
+        ],
+        "rss_mib_median": 203.849609375,
+        "startup_median_ms": 316.098248003982
+      }
+    },
+    "002.mp4": {
+      "direct": {
+        "cpu_median": 40.32767212480711,
+        "cpu_samples": [
+          42.821878178005406,
+          41.95166845953402,
+          39.260689275666664,
+          40.68417636089691,
+          39.9711678887173,
+          39.68182642801887
+        ],
+        "rss_mib_median": 289.4609375,
+        "startup_median_ms": 326.1581260012463
+      },
+      "shade": {
+        "cpu_median": 41.59657750481652,
+        "cpu_samples": [
+          42.39086662991337,
+          41.66097411787888,
+          40.246285752847825,
+          42.24075733296994,
+          41.53218089175416,
+          40.52958258811449
+        ],
+        "rss_mib_median": 297.490234375,
+        "startup_median_ms": 387.8305910038762
+      }
+    }
+  },
+  "lossless": {
+    "041.mp4": {
+      "source_bytes": 2700343,
+      "source_sha256": "bbebfa309c49bb0cd822926a134382f315fd1ef1c5fac2289a1121f726d4bee6",
+      "stream": {
+        "width": 1920,
+        "height": 1080,
+        "pix_fmt": "yuv420p",
+        "sample_aspect_ratio": "1:1",
+        "r_frame_rate": "30/1",
+        "time_base": "1/30000",
+        "nb_frames": "120",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "field_order": "progressive"
+      },
+      "variants": {
+        "x264-lossless": {
+          "bytes": 4177999,
+          "encode_seconds": 0.8670436310349032,
+          "pixel_hashes_equal": true,
+          "rgba_hashes_equal": true,
+          "timings_equal": true,
+          "metadata_differences": {}
+        },
+        "ffv1": {
+          "bytes": 35020632,
+          "encode_seconds": 2.5470870090066455,
+          "pixel_hashes_equal": true,
+          "rgba_hashes_equal": false,
+          "timings_equal": true,
+          "metadata_differences": {
+            "color_range": [
+              "tv",
+              null
+            ],
+            "color_space": [
+              "bt709",
+              null
+            ],
+            "color_transfer": [
+              "bt709",
+              null
+            ],
+            "color_primaries": [
+              "bt709",
+              null
+            ],
+            "field_order": [
+              "progressive",
+              null
+            ]
+          }
+        },
+        "utvideo": {
+          "bytes": 75345963,
+          "encode_seconds": 0.8782330430112779,
+          "pixel_hashes_equal": true,
+          "rgba_hashes_equal": true,
+          "timings_equal": true,
+          "metadata_differences": {
+            "color_range": [
+              "tv",
+              null
+            ],
+            "color_transfer": [
+              "bt709",
+              null
+            ],
+            "color_primaries": [
+              "bt709",
+              null
+            ],
+            "field_order": [
+              "progressive",
+              null
+            ]
+          }
+        }
+      },
+      "direct_playback": {
+        "original": {
+          "cpu_percent_median": 15.55933431067712,
+          "cpu_percent_samples": [
+            15.846426441892598,
+            15.702614432001837,
+            15.844470849966394,
+            15.4160541893524,
+            14.27491083946915,
+            15.415033976602155
+          ],
+          "rss_mib_median": 202.890625,
+          "rss_mib_samples": [
+            189.03515625,
+            189.0,
+            202.96484375,
+            203.08203125,
+            202.859375,
+            202.921875
+          ]
+        },
+        "lossless": {
+          "cpu_percent_median": 13.0618633861058,
+          "cpu_percent_samples": [
+            13.847668486116682,
+            13.275178195835686,
+            12.847014881777604,
+            13.133276269512521,
+            12.99045050269908,
+            12.84505260914427
+          ],
+          "rss_mib_median": 187.615234375,
+          "rss_mib_samples": [
+            174.23828125,
+            174.31640625,
+            187.55859375,
+            187.671875,
+            187.95703125,
+            188.03125
+          ]
+        }
+      }
+    },
+    "002.mp4": {
+      "source_bytes": 7454767,
+      "source_sha256": "4811a13df477d3f4e00dbd778e73d00bb63f0e736b7fe761373ce223ca7403e6",
+      "stream": {
+        "width": 3840,
+        "height": 2160,
+        "pix_fmt": "yuv420p",
+        "sample_aspect_ratio": "1:1",
+        "r_frame_rate": "30/1",
+        "time_base": "1/30000",
+        "nb_frames": "160",
+        "color_range": "tv",
+        "color_space": "bt709",
+        "color_transfer": "bt709",
+        "color_primaries": "bt709",
+        "field_order": "progressive"
+      },
+      "variants": {
+        "x264-lossless": {
+          "bytes": 15999941,
+          "encode_seconds": 4.086301599047147,
+          "pixel_hashes_equal": true,
+          "rgba_hashes_equal": true,
+          "timings_equal": true,
+          "metadata_differences": {}
+        },
+        "ffv1": {
+          "bytes": 111360005,
+          "encode_seconds": 11.357921553950291,
+          "pixel_hashes_equal": true,
+          "rgba_hashes_equal": false,
+          "timings_equal": true,
+          "metadata_differences": {
+            "color_range": [
+              "tv",
+              null
+            ],
+            "color_space": [
+              "bt709",
+              null
+            ],
+            "color_transfer": [
+              "bt709",
+              null
+            ],
+            "color_primaries": [
+              "bt709",
+              null
+            ],
+            "field_order": [
+              "progressive",
+              null
+            ]
+          }
+        },
+        "utvideo": {
+          "bytes": 346115755,
+          "encode_seconds": 4.12523509201128,
+          "pixel_hashes_equal": true,
+          "rgba_hashes_equal": true,
+          "timings_equal": true,
+          "metadata_differences": {
+            "color_range": [
+              "tv",
+              null
+            ],
+            "color_transfer": [
+              "bt709",
+              null
+            ],
+            "color_primaries": [
+              "bt709",
+              null
+            ],
+            "field_order": [
+              "progressive",
+              null
+            ]
+          }
+        }
+      },
+      "direct_playback": {
+        "original": {
+          "cpu_percent_median": 40.385232272141806,
+          "cpu_percent_samples": [
+            40.96673005814726,
+            41.387314312626785,
+            40.11279581140252,
+            39.96627540043195,
+            40.39145339096028,
+            40.37901115332334
+          ],
+          "rss_mib_median": 290.353515625,
+          "rss_mib_samples": [
+            285.0078125,
+            285.953125,
+            290.4453125,
+            293.5234375,
+            290.26171875,
+            297.52734375
+          ]
+        },
+        "lossless": {
+          "cpu_percent_median": 38.8325217050774,
+          "cpu_percent_samples": [
+            38.96781220852366,
+            38.973993895420065,
+            37.97230781584995,
+            38.831194820826646,
+            37.68279798421785,
+            38.833848589328156
+          ],
+          "rss_mib_median": 239.939453125,
+          "rss_mib_samples": [
+            239.37890625,
+            240.5,
+            238.83203125,
+            242.09375,
+            239.28515625,
+            242.5234375
+          ]
+        }
+      }
+    }
+  },
+  "block_compression": {
+    "041.mp4-original-none": {
+      "source_bytes": 2700343,
+      "package_bytes": 2701363,
+      "codec": "none",
+      "encoding": "original",
+      "pack_seconds_samples": [
+        0.020067055942490697,
+        0.009551091003231704,
+        0.009328073996584862,
+        0.008928149996791035,
+        0.011950417014304549,
+        0.008114443975500762,
+        0.008888283977285028
+      ],
+      "pack_seconds_median": 0.009328073996584862,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 14.234225533823015,
+      "cpu_percent_samples": [
+        14.236398512972253,
+        14.235318976615115,
+        14.233132091030916,
+        13.980386119415423,
+        13.732917136785717,
+        14.725395792737414
+      ],
+      "rss_mib_median": 203.23828125,
+      "rss_mib_samples": [
+        182.57421875,
+        184.7890625,
+        203.33203125,
+        205.41796875,
+        203.14453125,
+        205.296875
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 264.9601340526715,
+      "status_fps_samples": [
+        29.907614,
+        29.90375,
+        29.905441,
+        29.906124,
+        29.914314,
+        29.90267
+      ],
+      "source_sha256": "bbebfa309c49bb0cd822926a134382f315fd1ef1c5fac2289a1121f726d4bee6"
+    },
+    "041.mp4-original-lz4": {
+      "source_bytes": 2700343,
+      "package_bytes": 2506134,
+      "codec": "lz4",
+      "encoding": "original",
+      "pack_seconds_samples": [
+        0.007994494982995093,
+        0.008982222992926836,
+        0.009592588990926743,
+        0.008296051993966103,
+        0.0123924829531461,
+        0.007539463986176997,
+        0.012602554983459413
+      ],
+      "pack_seconds_median": 0.008982222992926836,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 14.603673460266275,
+      "cpu_percent_samples": [
+        14.482956022823032,
+        14.723595976426294,
+        15.480355061782932,
+        15.485352969792508,
+        13.730810659957527,
+        14.483750944106255
+      ],
+      "rss_mib_median": 203.01171875,
+      "rss_mib_samples": [
+        185.78515625,
+        187.50390625,
+        203.0234375,
+        205.17578125,
+        203.0,
+        205.1171875
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 265.3947350336239,
+      "status_fps_samples": [
+        29.9118,
+        29.908487,
+        29.88291,
+        29.906384,
+        29.905659,
+        29.868244
+      ],
+      "source_sha256": "bbebfa309c49bb0cd822926a134382f315fd1ef1c5fac2289a1121f726d4bee6"
+    },
+    "041.mp4-original-zstd-3": {
+      "source_bytes": 2700343,
+      "package_bytes": 2520641,
+      "codec": "zstd:3",
+      "encoding": "original",
+      "pack_seconds_samples": [
+        0.009262368956115097,
+        0.008781840035226196,
+        0.013850770948920399,
+        0.011031389993149787,
+        0.010543618001975119,
+        0.010127481946256012,
+        0.010762055986560881
+      ],
+      "pack_seconds_median": 0.010543618001975119,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 14.7297418308688,
+      "cpu_percent_samples": [
+        14.481511447159688,
+        14.977972214577912,
+        15.977587243955268,
+        15.982371260728609,
+        13.484666710283884,
+        14.230512522742217
+      ],
+      "rss_mib_median": 205.15234375,
+      "rss_mib_samples": [
+        197.94921875,
+        198.28515625,
+        205.31640625,
+        206.1015625,
+        204.98828125,
+        205.78515625
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 274.9363480252214,
+      "status_fps_samples": [
+        29.90692,
+        29.890669,
+        29.900904,
+        29.907549,
+        29.911766,
+        29.91162
+      ],
+      "source_sha256": "bbebfa309c49bb0cd822926a134382f315fd1ef1c5fac2289a1121f726d4bee6"
+    },
+    "041.mp4-lossless-none": {
+      "source_bytes": 4177999,
+      "package_bytes": 4179139,
+      "codec": "none",
+      "encoding": "lossless",
+      "pack_seconds_samples": [
+        0.012982129992451519,
+        0.013964809011667967,
+        0.014578152040485293,
+        0.013433492975309491,
+        0.013231927994638681,
+        0.010070885007735342,
+        0.013044699968304485
+      ],
+      "pack_seconds_median": 0.013231927994638681,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 12.733348755132273,
+      "cpu_percent_samples": [
+        11.738378629527267,
+        13.722495473989794,
+        12.984826130305075,
+        12.98790646356273,
+        12.481871379959472,
+        11.988401326692859
+      ],
+      "rss_mib_median": 191.388671875,
+      "rss_mib_samples": [
+        187.01171875,
+        188.2578125,
+        191.3828125,
+        192.56640625,
+        191.39453125,
+        192.59765625
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 254.59844298893586,
+      "status_fps_samples": [
+        29.905775,
+        29.852262,
+        29.906326,
+        29.906807,
+        29.781801,
+        29.908268
+      ],
+      "source_sha256": "6977a1db077f552c50e910af42051cb0f1527c3b69902716354a182a597c4b4d"
+    },
+    "041.mp4-lossless-lz4": {
+      "source_bytes": 4177999,
+      "package_bytes": 3986656,
+      "codec": "lz4",
+      "encoding": "lossless",
+      "pack_seconds_samples": [
+        0.013011386967264116,
+        0.018426789960358292,
+        0.014596647000871599,
+        0.01639834203524515,
+        0.016182960011065006,
+        0.01672794105252251,
+        0.0154986820416525
+      ],
+      "pack_seconds_median": 0.016182960011065006,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 12.734333980061944,
+      "cpu_percent_samples": [
+        13.734815269016599,
+        14.221985114276638,
+        12.73388822813955,
+        12.734779731984338,
+        11.487560502598642,
+        11.986348642711325
+      ],
+      "rss_mib_median": 191.388671875,
+      "rss_mib_samples": [
+        184.7421875,
+        185.87890625,
+        191.3125,
+        192.453125,
+        191.46484375,
+        192.5625
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 274.546411994379,
+      "status_fps_samples": [
+        29.895845,
+        29.90152,
+        29.907528,
+        29.908808,
+        29.893982,
+        29.90348
+      ],
+      "source_sha256": "6977a1db077f552c50e910af42051cb0f1527c3b69902716354a182a597c4b4d"
+    },
+    "041.mp4-lossless-zstd-3": {
+      "source_bytes": 4177999,
+      "package_bytes": 3544086,
+      "codec": "zstd:3",
+      "encoding": "lossless",
+      "pack_seconds_samples": [
+        0.030570046976208687,
+        0.029317951994016767,
+        0.03077821497572586,
+        0.02945674699731171,
+        0.030007920984644443,
+        0.02995260601164773,
+        0.02952984703006223
+      ],
+      "pack_seconds_median": 0.02995260601164773,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 12.61083242559293,
+      "cpu_percent_samples": [
+        14.711175350950164,
+        14.484186122109557,
+        12.23285708497096,
+        12.984077197670057,
+        12.237587653515803,
+        12.235678456461075
+      ],
+      "rss_mib_median": 193.578125,
+      "rss_mib_samples": [
+        185.5625,
+        186.9140625,
+        193.56640625,
+        193.58984375,
+        193.875,
+        193.87890625
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 275.6163680460304,
+      "status_fps_samples": [
+        29.900375,
+        29.912788,
+        29.894958,
+        29.907198,
+        29.914412,
+        29.912401
+      ],
+      "source_sha256": "6977a1db077f552c50e910af42051cb0f1527c3b69902716354a182a597c4b4d"
+    },
+    "002.mp4-original-none": {
+      "source_bytes": 7454767,
+      "package_bytes": 7456219,
+      "codec": "none",
+      "encoding": "original",
+      "pack_seconds_samples": [
+        0.025272427999880165,
+        0.012493617017753422,
+        0.012438440986443311,
+        0.01448903197888285,
+        0.012718896963633597,
+        0.012500860029831529,
+        0.013799111999105662
+      ],
+      "pack_seconds_median": 0.012718896963633597,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 39.57903932405757,
+      "cpu_percent_samples": [
+        45.91796073232785,
+        43.66252582968637,
+        39.94902560275819,
+        39.20333913733024,
+        38.94960988706533,
+        39.209053045356946
+      ],
+      "rss_mib_median": 294.955078125,
+      "rss_mib_samples": [
+        291.43359375,
+        295.6328125,
+        293.72265625,
+        297.9140625,
+        294.27734375,
+        298.52734375
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 315.7511199824512,
+      "status_fps_samples": [
+        29.361483,
+        29.46469,
+        29.605207,
+        29.550976,
+        29.64649,
+        29.61367
+      ],
+      "source_sha256": "4811a13df477d3f4e00dbd778e73d00bb63f0e736b7fe761373ce223ca7403e6"
+    },
+    "002.mp4-original-lz4": {
+      "source_bytes": 7454767,
+      "package_bytes": 7150121,
+      "codec": "lz4",
+      "encoding": "original",
+      "pack_seconds_samples": [
+        0.014564715966116637,
+        0.013180198962800205,
+        0.013608206994831562,
+        0.01449056394631043,
+        0.012669742980506271,
+        0.014817179006058723,
+        0.012698688020464033
+      ],
+      "pack_seconds_median": 0.013608206994831562,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 40.67107704898541,
+      "cpu_percent_samples": [
+        41.90649663216588,
+        40.899216121027074,
+        40.442937976943746,
+        39.6999415592825,
+        40.9485183656039,
+        39.442880368765564
+      ],
+      "rss_mib_median": 294.0,
+      "rss_mib_samples": [
+        288.05859375,
+        289.953125,
+        293.56640625,
+        297.41796875,
+        294.43359375,
+        298.21875
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 315.76389604015276,
+      "status_fps_samples": [
+        29.648481,
+        29.604343,
+        29.62601,
+        29.581408,
+        29.656752,
+        29.658388
+      ],
+      "source_sha256": "4811a13df477d3f4e00dbd778e73d00bb63f0e736b7fe761373ce223ca7403e6"
+    },
+    "002.mp4-original-zstd-3": {
+      "source_bytes": 7454767,
+      "package_bytes": 7200651,
+      "codec": "zstd:3",
+      "encoding": "original",
+      "pack_seconds_samples": [
+        0.01708969398168847,
+        0.01431674201739952,
+        0.013930954970419407,
+        0.017371020978316665,
+        0.014008262020070106,
+        0.016809046966955066,
+        0.014303706993814558
+      ],
+      "pack_seconds_median": 0.01431674201739952,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 39.82251267690539,
+      "cpu_percent_samples": [
+        42.39744560316251,
+        41.67366057392752,
+        39.955143429437854,
+        39.689881924372926,
+        39.67530998934517,
+        39.68228626573061
+      ],
+      "rss_mib_median": 294.9921875,
+      "rss_mib_samples": [
+        293.66796875,
+        296.52734375,
+        293.4296875,
+        296.3203125,
+        293.42578125,
+        296.31640625
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 356.2899550306611,
+      "status_fps_samples": [
+        29.584375,
+        29.629799,
+        29.632538,
+        29.506886,
+        29.625858,
+        29.603342
+      ],
+      "source_sha256": "4811a13df477d3f4e00dbd778e73d00bb63f0e736b7fe761373ce223ca7403e6"
+    },
+    "002.mp4-lossless-none": {
+      "source_bytes": 15999941,
+      "package_bytes": 16002185,
+      "codec": "none",
+      "encoding": "lossless",
+      "pack_seconds_samples": [
+        0.030848719005007297,
+        0.023175058013293892,
+        0.022671425016596913,
+        0.02175055496627465,
+        0.0360959519748576,
+        0.03691251197597012,
+        0.03640039300080389
+      ],
+      "pack_seconds_median": 0.030848719005007297,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 37.83405455943256,
+      "cpu_percent_samples": [
+        38.94913688647006,
+        37.4589804589578,
+        38.948873780180925,
+        38.20912865990732,
+        36.96186192851696,
+        36.18968081308823
+      ],
+      "rss_mib_median": 251.556640625,
+      "rss_mib_samples": [
+        249.19921875,
+        253.9140625,
+        248.828125,
+        256.453125,
+        247.78515625,
+        255.4296875
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 335.96815197961405,
+      "status_fps_samples": [
+        29.605368,
+        29.627417,
+        29.596506,
+        29.559175,
+        29.58748,
+        29.586662
+      ],
+      "source_sha256": "a44969fbf630fcb33ba8092e7b3643435e5002d4f2caf0b8889d500bf55515cf"
+    },
+    "002.mp4-lossless-lz4": {
+      "source_bytes": 15999941,
+      "package_bytes": 14508295,
+      "codec": "lz4",
+      "encoding": "lossless",
+      "pack_seconds_samples": [
+        0.040091169998049736,
+        0.05268378497567028,
+        0.05014442099491134,
+        0.05232411698671058,
+        0.05024941096780822,
+        0.05092125601368025,
+        0.053792515012901276
+      ],
+      "pack_seconds_median": 0.05092125601368025,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 38.57006981140107,
+      "cpu_percent_samples": [
+        39.44645454437023,
+        37.69368507843191,
+        40.195338760900256,
+        41.69269317467899,
+        36.457171381559114,
+        36.70507439291477
+      ],
+      "rss_mib_median": 249.837890625,
+      "rss_mib_samples": [
+        247.828125,
+        252.87109375,
+        245.9765625,
+        249.37109375,
+        250.3046875,
+        257.34375
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 294.8529970017262,
+      "status_fps_samples": [
+        29.618748,
+        29.600754,
+        29.537727,
+        29.534014,
+        29.59559,
+        29.57702
+      ],
+      "source_sha256": "a44969fbf630fcb33ba8092e7b3643435e5002d4f2caf0b8889d500bf55515cf"
+    },
+    "002.mp4-lossless-zstd-3": {
+      "source_bytes": 15999941,
+      "package_bytes": 12462046,
+      "codec": "zstd:3",
+      "encoding": "lossless",
+      "pack_seconds_samples": [
+        0.11668572999769822,
+        0.12353307101875544,
+        0.12020799401216209,
+        0.1216308239963837,
+        0.11124612903222442,
+        0.11355977301718667,
+        0.1131427549989894
+      ],
+      "pack_seconds_median": 0.11668572999769822,
+      "media_bytes_identical": true,
+      "cpu_percent_median": 38.31918802759247,
+      "cpu_percent_samples": [
+        39.4401973318786,
+        38.19374695079176,
+        39.679858707150764,
+        38.44462910439317,
+        38.189969969506144,
+        36.706827897642206
+      ],
+      "rss_mib_median": 251.591796875,
+      "rss_mib_samples": [
+        248.74609375,
+        252.38671875,
+        248.58203125,
+        255.1328125,
+        250.796875,
+        257.90625
+      ],
+      "paused_cpu_percent_median": 0.0,
+      "startup_to_render_loop_ms_median": 295.6407099845819,
+      "status_fps_samples": [
+        29.53773,
+        29.521456,
+        29.572805,
+        29.561827,
+        29.620344,
+        29.596367
+      ],
+      "source_sha256": "a44969fbf630fcb33ba8092e7b3643435e5002d4f2caf0b8889d500bf55515cf"
+    }
+  }
+}
