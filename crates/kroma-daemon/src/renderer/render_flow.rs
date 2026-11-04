@@ -605,6 +605,7 @@ pub(super) fn render_frame(
     let texture_gpu = GpuContext {
         device: Arc::clone(device),
         queue: Arc::clone(queue),
+        video_queues: state.gpu.video_queues.clone(),
         surface_format: SURFACE_FORMAT,
     };
     let mut completed = Vec::new();
@@ -794,10 +795,10 @@ pub(super) fn render_frame(
             if capture {
                 capture_output(&mut encoder, &target.output);
             }
-            queue.submit([encoder.finish()]);
+            crate::gpu_interop::submit(queue, [encoder.finish()]);
             scene_rendered |= draw_scene;
             if let Some(frame) = frame {
-                frame.present();
+                crate::gpu_interop::with_submission(|| frame.present());
             }
             if capture {
                 let tx = target.output.completion_tx.clone();

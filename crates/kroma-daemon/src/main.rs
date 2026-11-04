@@ -8,6 +8,7 @@ mod backend;
 mod config;
 mod data;
 mod fallback;
+mod gpu_interop;
 mod ipc_server;
 mod lighting;
 mod preview;
@@ -1255,6 +1256,9 @@ impl Daemon {
             // Fail-open: an unknown compositor yields no occlusion data.
             let suspended = self.renderer.all_targets_occluded(&occluded);
 
+            if self.current_phase == DaemonPhase::Terminal && self.static_rendered {
+                self.renderer.stop_playback();
+            }
             if self.paused || suspended || self.pump_dead {
                 self.static_rendered = false;
                 self.last_frame_time = Instant::now();
@@ -2438,6 +2442,22 @@ impl Daemon {
         self.last_frame_time = frame_start;
 
         self.advance_lifecycle(dt as f64)?;
+
+        if self.current_phase == DaemonPhase::Terminal && self.static_rendered {
+            // Hold the final presented image without retaining decoder surfaces
+            // or advancing video inputs inside nested/per-monitor shaders.
+            self.renderer.stop_playback();
+            if self.lighting_was_active {
+                for sink in self.lighting_sinks.values() {
+                    if let Err(error) = sink.disconnect() {
+                        warn!("Failed to disconnect lighting: {error:#}");
+                    }
+                }
+                self.lighting_was_active = false;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            return Ok(());
+        }
 
         self.renderer.uniforms.u_time = self.phase_elapsed as f32;
         self.renderer.uniforms.u_delta_time = dt;

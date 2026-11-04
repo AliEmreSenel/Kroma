@@ -42,6 +42,7 @@ x11rb.workspace = true
 cpal.workspace = true
 rustfft.workspace = true
 ffmpeg-next.workspace = true
+ash = "0.38"
 fontdue.workspace = true
 font8x8.workspace = true
 notify.workspace = true

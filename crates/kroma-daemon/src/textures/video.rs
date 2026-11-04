@@ -4,6 +4,8 @@
 //! native frame rate. Handles accumulator-based timing, looping, and
 //! hot-reload for external disk-backed files.
 
+mod hardware;
+
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
@@ -25,13 +27,11 @@ use super::ffmpeg_io;
 use super::hot_reload::SourceHotReload;
 use super::{GpuContext, TextureSource, TextureUpdate, VideoSource};
 
-use kroma_shared::shade::AssetByteStream;
-
 pub struct FfmpegVideoDecoder {
     input: ffmpeg_io::InputContext,
     decoder: ffmpeg_next::decoder::Video,
     video_stream_index: usize,
-    scaler: ffmpeg_next::software::scaling::Context,
+    scaler: Option<ffmpeg_next::software::scaling::Context>,
     width: u32,
     height: u32,
     decoded_frame: frame::Video,
@@ -40,10 +40,22 @@ pub struct FfmpegVideoDecoder {
     time_base: f64,
     frame_interval: f64,     // Now dynamic: updates per frame
     avg_frame_interval: f64, // Fallback: calculated from stream average FPS
+    source_label: String,
+    primed: bool,
+    converter: Option<hardware::Converter>,
+    hardware: Option<hardware::Device>,
 }
 
 impl FfmpegVideoDecoder {
     fn from_input(input: ffmpeg_io::InputContext, source_label: &str) -> Result<Self> {
+        Self::from_input_for_gpu(input, source_label, None)
+    }
+
+    fn from_input_for_gpu(
+        mut input: ffmpeg_io::InputContext,
+        source_label: &str,
+        gpu: Option<&GpuContext>,
+    ) -> Result<Self> {
         let _timing = crate::timing::scope("video.decoder.create");
         let video_stream = input
             .as_input()
@@ -61,12 +73,10 @@ impl FfmpegVideoDecoder {
         };
 
         let stream_parameters = video_stream.parameters();
-
-        let context_decoder = codec::Context::from_parameters(stream_parameters)?;
-        let decoder = context_decoder.decoder().video()?;
-
-        let width = decoder.width();
-        let height = decoder.height();
+        let has_alpha = video_stream
+            .metadata()
+            .get("alpha_mode")
+            .is_some_and(|value| value != "0");
 
         let frame_rate = video_stream.rate();
         let interval = frame_rate.denominator() as f64 / frame_rate.numerator() as f64;
@@ -76,15 +86,100 @@ impl FfmpegVideoDecoder {
             1.0 / 30.0
         };
 
-        let scaler = scaling::Context::get(
-            decoder.format(),
-            width,
-            height,
-            Pixel::RGBA,
-            width,
-            height,
-            scaling::Flags::BILINEAR,
-        )?;
+        let mode = std::env::var("KROMA_VIDEO_DECODE").unwrap_or_else(|_| "auto".into());
+        let software = mode == "software";
+        let attempt = gpu.filter(|_| !software).map(|gpu| -> Result<_> {
+            anyhow::ensure!(
+                !has_alpha,
+                "GPU video conversion does not support alpha channels"
+            );
+            let backends: &[bool] = match mode.as_str() {
+                "vaapi" => &[true],
+                "vulkan" => &[false],
+                _ => &[true, false],
+            };
+            let mut failures = Vec::new();
+            for (index, vaapi) in backends.iter().copied().enumerate() {
+                if index > 0 {
+                    input.as_input_mut().seek(0, ..0)?;
+                }
+                let result = (|| -> Result<_> {
+                    let mut hardware = if vaapi {
+                        hardware::Device::new_vaapi(gpu)?
+                    } else {
+                        hardware::Device::new(gpu)?
+                    };
+                    let mut context = codec::Context::from_parameters(stream_parameters.clone())?;
+                    hardware.configure(&mut context)?;
+                    let mut decoder = context.decoder().video()?;
+                    let mut frame = frame::Video::empty();
+                    anyhow::ensure!(
+                        Self::decode_native(
+                            &mut input,
+                            &mut decoder,
+                            video_stream_index,
+                            &mut frame
+                        )?,
+                        "video produced no hardware frame"
+                    );
+                    hardware.map_frame(&mut frame)?;
+                    hardware::validate_frame(&frame)?;
+                    Ok((decoder, frame, hardware))
+                })();
+                match result {
+                    Ok(ready) => return Ok(ready),
+                    Err(error) => failures.push(format!(
+                        "{}: {error:#}",
+                        if vaapi { "VA-API" } else { "Vulkan" }
+                    )),
+                }
+            }
+            anyhow::bail!("{}", failures.join("; "))
+        });
+        let (decoder, decoded_frame, hardware, primed) = match attempt {
+            Some(Ok((decoder, frame, hardware))) => {
+                info!(
+                    "HARDWARE VIDEO DECODING: '{}' uses {} on the rendering GPU; GPU conversion and shader textures",
+                    source_label,
+                    hardware.name()
+                );
+                (decoder, frame, Some(hardware), true)
+            }
+            result => {
+                if gpu.is_some() {
+                    let reason = match result {
+                        Some(Err(error)) => format!("{error:#}"),
+                        _ => "software decoding was explicitly selected".into(),
+                    };
+                    warn!(
+                        "\n*** SOFTWARE VIDEO DECODING: '{}' ***\nHardware decoding unavailable: {}. Decoding, color conversion and frame upload will use the CPU fallback.",
+                        source_label, reason
+                    );
+                    // A failed negotiation may have consumed packets. Rewind the
+                    // same seekable source before opening the software codec.
+                    input.as_input_mut().seek(0, ..0)?;
+                }
+                let decoder = codec::Context::from_parameters(stream_parameters)?
+                    .decoder()
+                    .video()?;
+                (decoder, frame::Video::empty(), None, false)
+            }
+        };
+        let width = decoder.width();
+        let height = decoder.height();
+        let scaler = if hardware.is_none() {
+            Some(scaling::Context::get(
+                decoder.format(),
+                width,
+                height,
+                Pixel::RGBA,
+                width,
+                height,
+                scaling::Flags::BILINEAR,
+            )?)
+        } else {
+            None
+        };
 
         info!(
             "FFmpeg video decoder: {}x{}, {:.1}s duration, {} FPS (avg), stream {}",
@@ -98,48 +193,133 @@ impl FfmpegVideoDecoder {
             scaler,
             width,
             height,
-            decoded_frame: frame::Video::empty(),
+            decoded_frame,
             rgba_frame: frame::Video::empty(),
-            frame_buffer: Vec::with_capacity((width * height * 4) as usize),
+            frame_buffer: Vec::new(),
             time_base,
             frame_interval: avg_frame_interval,
             avg_frame_interval,
+            source_label: source_label.into(),
+            primed,
+            converter: None,
+            hardware,
         })
-    }
-
-    pub fn load_from_stream(stream: AssetByteStream, source_label: &str) -> Result<Self> {
-        ffmpeg_next::init().map_err(|e| anyhow::anyhow!("Failed to initialize FFmpeg: {}", e))?;
-        let input = ffmpeg_io::InputContext::open_from_stream(stream)
-            .with_context(|| format!("Failed to open embedded stream for '{}'", source_label))?;
-        Self::from_input(input, source_label)
     }
 
     /// Receive into a reusable native frame, then scale into reusable RGBA storage.
     fn next_frame_rgba(&mut self) -> Option<()> {
+        self.next_native().ok()?.then_some(())?;
+        self.scaler
+            .as_mut()?
+            .run(&self.decoded_frame, &mut self.rgba_frame)
+            .ok()?;
+        Some(())
+    }
+
+    fn decode_native(
+        input: &mut ffmpeg_io::InputContext,
+        decoder: &mut ffmpeg_next::decoder::Video,
+        index: usize,
+        frame: &mut frame::Video,
+    ) -> Result<bool> {
         loop {
-            if self.decoder.receive_frame(&mut self.decoded_frame).is_ok() {
-                break;
+            match decoder.receive_frame(frame) {
+                Ok(()) => return Ok(true),
+                Err(ffmpeg_next::Error::Eof) => return Ok(false),
+                Err(ffmpeg_next::Error::Other { errno }) if errno == ffmpeg_next::error::EAGAIN => {
+                }
+                Err(error) => return Err(error.into()),
             }
             let mut found_video = false;
-            for (stream, packet) in self.input.as_input_mut().packets() {
-                if stream.index() == self.video_stream_index
-                    && self.decoder.send_packet(&packet).is_ok()
-                {
+            for (stream, packet) in input.as_input_mut().packets() {
+                if stream.index() == index {
+                    decoder.send_packet(&packet)?;
                     found_video = true;
                     break;
                 }
             }
             if !found_video {
-                let _ = self.decoder.send_eof();
-                self.decoder.receive_frame(&mut self.decoded_frame).ok()?;
-                break;
+                let _ = decoder.send_eof();
+                return match decoder.receive_frame(frame) {
+                    Ok(()) => Ok(true),
+                    Err(ffmpeg_next::Error::Eof) => Ok(false),
+                    Err(error) => Err(error.into()),
+                };
             }
         }
+    }
+
+    fn next_native(&mut self) -> Result<bool> {
         self.frame_interval = self.avg_frame_interval;
-        self.scaler
-            .run(&self.decoded_frame, &mut self.rgba_frame)
-            .ok()?;
-        Some(())
+        if std::mem::take(&mut self.primed) {
+            return Ok(true);
+        }
+        let available = Self::decode_native(
+            &mut self.input,
+            &mut self.decoder,
+            self.video_stream_index,
+            &mut self.decoded_frame,
+        )?;
+        if available && let Some(hardware) = self.hardware.as_mut() {
+            hardware.map_frame(&mut self.decoded_frame)?;
+        }
+        Ok(available)
+    }
+
+    fn next_frame_to_gpu(&mut self, gpu: &GpuContext, texture: &wgpu::Texture) -> Result<bool> {
+        if self.hardware.is_none() {
+            if self.next_frame_rgba().is_none() {
+                return Ok(false);
+            }
+            self.upload_current_rgba_to(&gpu.queue, texture);
+            return Ok(true);
+        }
+        let result = (|| -> Result<bool> {
+            if !self.next_native()? {
+                return Ok(false);
+            }
+            let converter = self.converter.get_or_insert_with(|| {
+                hardware::Converter::new(gpu.clone(), texture, self.width, self.height)
+            });
+            converter.convert(&mut self.decoded_frame)?;
+            Ok(true)
+        })();
+        if let Err(error) = result {
+            warn!(
+                "\n*** SOFTWARE VIDEO DECODING: '{}' ***\nHardware decoding/conversion failed: {:#}. Switching to CPU decoding and frame upload.",
+                self.source_label, error
+            );
+            // Stop hardware use before releasing codec-owned decoder images.
+            gpu.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(10)),
+            })?;
+            let parameters = self
+                .input
+                .as_input()
+                .stream(self.video_stream_index)
+                .context("video stream disappeared")?
+                .parameters();
+            self.decoder = codec::Context::from_parameters(parameters)?
+                .decoder()
+                .video()?;
+            self.decoded_frame = frame::Video::empty();
+            self.converter = None;
+            self.hardware = None;
+            self.primed = false;
+            self.scaler = Some(scaling::Context::get(
+                self.decoder.format(),
+                self.width,
+                self.height,
+                Pixel::RGBA,
+                self.width,
+                self.height,
+                scaling::Flags::BILINEAR,
+            )?);
+            self.seek(0.0)?;
+            return self.next_frame_to_gpu(gpu, texture);
+        }
+        result
     }
 
     fn next_frame_into(&mut self, out: &mut Vec<u8>) -> Option<()> {
@@ -180,7 +360,7 @@ impl FfmpegVideoDecoder {
         );
         // Flush uploads even if rendering is paused or this source is replaced
         // before the next draw. Otherwise repeated paused loads retain staging.
-        queue.submit(std::iter::empty());
+        crate::gpu_interop::submit(queue, std::iter::empty());
     }
 
     pub fn frame_interval(&self) -> f64 {
@@ -250,6 +430,7 @@ impl VideoDecoder for FfmpegVideoDecoder {
             .seek(ts, ..ts)
             .map_err(|e| anyhow::anyhow!("Seek failed: {}", e))?;
         self.decoder.flush();
+        self.primed = false;
         Ok(())
     }
 
@@ -317,17 +498,26 @@ impl VideoTexture {
         }
     }
 
-    fn decode_with_looping_rgba(decoder: &mut FfmpegVideoDecoder, looping: bool) -> Option<()> {
-        match decoder.next_frame_rgba() {
-            Some(()) => Some(()),
-            None if looping => {
+    fn decode_with_looping_gpu(
+        decoder: &mut FfmpegVideoDecoder,
+        looping: bool,
+        gpu: &GpuContext,
+        texture: &wgpu::Texture,
+    ) -> Option<()> {
+        match decoder.next_frame_to_gpu(gpu, texture) {
+            Ok(true) => Some(()),
+            Ok(false) if looping => {
                 if let Err(e) = decoder.seek(0.0) {
                     warn!("Video seek-to-start failed: {}", e);
                     return None;
                 }
-                decoder.next_frame_rgba()
+                decoder.next_frame_to_gpu(gpu, texture).ok()?.then_some(())
             }
-            None => None,
+            Ok(false) => None,
+            Err(error) => {
+                warn!("Video frame failed: {:#}", error);
+                None
+            }
         }
     }
 
@@ -345,8 +535,10 @@ impl VideoTexture {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
         }));
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
@@ -408,29 +600,27 @@ impl VideoTexture {
         let handle = std::thread::Builder::new()
             .name(format!("kroma-video-{}", label))
             .spawn(move || {
-                let mut decoder = match source {
-                    VideoSource::ExternalPath(path) => match FfmpegVideoDecoder::load(&path) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            let _ = ready_tx.send(Err(format!(
-                                "Failed to open video '{}': {}",
-                                path.display(),
-                                e
-                            )));
-                            return;
+                let opened = (|| -> Result<_> {
+                    ffmpeg_next::init()?;
+                    let input = match source {
+                        VideoSource::ExternalPath(path) => {
+                            let _timing = crate::timing::scope("video.external.open");
+                            ffmpeg_io::InputContext::from_input(ffmpeg_next::format::input(&path)?)
                         }
-                    },
-                    VideoSource::EmbeddedStream(stream) => {
-                        match FfmpegVideoDecoder::load_from_stream(stream, "embedded-stream") {
-                            Ok(d) => d,
-                            Err(e) => {
-                                let _ = ready_tx.send(Err(format!(
-                                    "Failed to open embedded video stream: {}",
-                                    e
-                                )));
-                                return;
-                            }
+                        VideoSource::EmbeddedStream(stream) => {
+                            ffmpeg_io::InputContext::open_from_stream(stream)?
                         }
+                    };
+                    FfmpegVideoDecoder::from_input_for_gpu(input, &worker_label, gpu.as_ref())
+                })();
+                let mut decoder = match opened {
+                    Ok(decoder) => decoder,
+                    Err(error) => {
+                        let _ = ready_tx.send(Err(format!(
+                            "Failed to open video '{}': {:#}",
+                            worker_label, error
+                        )));
+                        return;
                     }
                 };
 
@@ -441,7 +631,7 @@ impl VideoTexture {
                 let gpu_upload = gpu
                     .as_ref()
                     .zip(gpu_target.as_ref())
-                    .map(|(gpu, target)| (Arc::clone(&gpu.queue), Arc::clone(&target._texture)));
+                    .map(|(gpu, target)| (gpu.clone(), Arc::clone(&target._texture)));
 
                 let ready = VideoWorkerReady {
                     frame_interval: decoder.frame_interval(),
@@ -464,9 +654,9 @@ impl VideoTexture {
                 // Prime the first frame. In GPU-managed mode this uploads straight
                 // from FFmpeg's RGBA frame into the wgpu texture and sends only
                 // metadata to the renderer; no per-frame Vec crosses threads.
-                if let Some((queue, texture)) = gpu_upload.as_ref() {
-                    if Self::decode_with_looping_rgba(&mut decoder, looping).is_some() {
-                        decoder.upload_current_rgba_to(queue, texture);
+                if let Some((gpu, texture)) = gpu_upload.as_ref() {
+                    if Self::decode_with_looping_gpu(&mut decoder, looping, gpu, texture).is_some()
+                    {
                         let frame_interval = {
                             let raw = decoder.frame_interval();
                             if raw.is_finite() && raw > 0.0 {
@@ -521,11 +711,12 @@ impl VideoTexture {
                     let (fw, fh) = decoder.dimensions();
                     let frame_interval;
 
-                    if let Some((queue, texture)) = gpu_upload.as_ref() {
-                        if Self::decode_with_looping_rgba(&mut decoder, looping).is_none() {
+                    if let Some((gpu, texture)) = gpu_upload.as_ref() {
+                        if Self::decode_with_looping_gpu(&mut decoder, looping, gpu, texture)
+                            .is_none()
+                        {
                             return;
                         }
-                        decoder.upload_current_rgba_to(queue, texture);
                         let raw = decoder.frame_interval();
                         frame_interval = if raw.is_finite() && raw > 0.0 {
                             raw
@@ -651,6 +842,7 @@ impl VideoTexture {
     /// so the decoder is created once the file appears/changes.
     pub fn load(
         source: VideoSource,
+        source_label: &str,
         looping: bool,
         hot_reload: bool,
         optional: bool,
@@ -749,7 +941,7 @@ impl VideoTexture {
                 match Self::spawn_worker(
                     VideoSource::EmbeddedStream(stream),
                     looping,
-                    "embedded-stream",
+                    source_label,
                     gpu.clone(),
                 ) {
                     Ok((worker, ready)) => {
@@ -802,6 +994,10 @@ impl Drop for VideoTexture {
 }
 
 impl TextureSource for VideoTexture {
+    fn stop_playback(&mut self) {
+        self.stop_worker();
+    }
+
     fn frame_rate(&self) -> Option<f64> {
         self.worker.as_ref().map(|_| 1.0 / self.frame_interval)
     }
@@ -968,6 +1164,7 @@ mod tests {
         let gpu = GpuContext {
             device: Arc::new(device),
             queue: Arc::new(queue),
+            video_queues: None,
             surface_format: wgpu::TextureFormat::Rgba8UnormSrgb,
         };
         let mut decoder = FfmpegVideoDecoder::load(Path::new(&path)).unwrap();
@@ -1023,7 +1220,7 @@ mod tests {
                 depth_or_array_layers: 1,
             },
         );
-        gpu.queue.submit([encoder.finish()]);
+        crate::gpu_interop::submit(&gpu.queue, [encoder.finish()]);
         let (tx, rx) = mpsc::channel();
         buffer.map_async(wgpu::MapMode::Read, .., move |result| {
             tx.send(result).unwrap()

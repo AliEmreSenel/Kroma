@@ -626,7 +626,7 @@ impl SlideshowTexture {
             pass.draw(0..3, 0..1);
         }
 
-        gpu.queue.submit(std::iter::once(encoder.finish()));
+        crate::gpu_interop::submit(&gpu.queue, std::iter::once(encoder.finish()));
         Ok(())
     }
 
@@ -765,6 +765,15 @@ impl SlideshowTexture {
 }
 
 impl TextureSource for SlideshowTexture {
+    fn stop_playback(&mut self) {
+        for source in [&mut self.current_child, &mut self.next_child]
+            .into_iter()
+            .flatten()
+        {
+            source.stop_playback();
+        }
+    }
+
     fn update(&mut self, dt: f64) -> Result<TextureUpdate> {
         if self.entries.is_empty() {
             return Ok(TextureUpdate::Unchanged);
