@@ -13,7 +13,9 @@ mod lighting;
 mod render_demand;
 mod renderer;
 mod textures;
+mod timing;
 mod transitions;
+mod worker;
 
 use std::{
     env, fs,
@@ -255,7 +257,7 @@ impl RuntimeShade {
         }
     }
 
-    fn frame_pacing(&self, phase: ShadePhase, default_fps: u32) -> FramePacing {
+    fn frame_pacing(&self, phase: ShadePhase, default_fps: u32, source_fps: f64) -> FramePacing {
         let fps = if self.package.config.rendering.target_fps > 0 {
             self.package.config.rendering.target_fps
         } else {
@@ -282,24 +284,11 @@ impl RuntimeShade {
                 .textures
                 .values()
                 .all(|texture| matches!(texture.ty, TextureType::Video | TextureType::Image))
+            && source_fps > 0.0
         {
-            let source_fps = state
-                .textures
-                .values()
-                .filter_map(|texture| {
-                    (texture.ty == TextureType::Video)
-                        .then_some(texture.source.as_deref())
-                        .flatten()
-                        .and_then(|source| {
-                            textures::video::source_frame_rate(&self.package, source)
-                        })
-                })
-                .fold(0.0_f64, f64::max);
-            if source_fps > 0.0 {
-                return FramePacing::Continuous(Duration::from_secs_f64(
-                    (1.0 / f64::from(fps)).max(1.0 / source_fps),
-                ));
-            }
+            return FramePacing::Continuous(Duration::from_secs_f64(
+                (1.0 / f64::from(fps)).max(1.0 / source_fps),
+            ));
         }
         FramePacing::Continuous(Duration::from_secs_f64(1.0 / f64::from(fps)))
     }
@@ -452,6 +441,7 @@ impl Daemon {
     }
 
     fn prewarm_builtin_transitions(&self) -> Result<()> {
+        let _timing = timing::scope("startup.builtin_transitions");
         if self.builtin_transition_cache_is_fresh() {
             info!("Builtin transition cache is fresh; skipping WGSL validation");
             return Ok(());
@@ -1080,6 +1070,7 @@ impl Daemon {
     }
 
     fn new() -> Result<Self> {
+        let _timing = timing::scope("daemon.startup");
         let config = config::DaemonConfig::load()?;
         info!(
             "Target FPS: {}, GPU power: {:?}",
@@ -1755,6 +1746,7 @@ impl Daemon {
     }
 
     fn prepare_runtime_shade(&self, path: &str) -> Result<RuntimeShade> {
+        let _timing = timing::scope("shade.prepare");
         let requested_path = Path::new(path);
         let package = if requested_path.extension().and_then(|s| s.to_str()) == Some("shade") {
             LiveShadePackage::load(requested_path)?
@@ -1958,7 +1950,11 @@ impl Daemon {
             .runtime_shade
             .as_ref()
             .expect("runtime shade present")
-            .frame_pacing(phase, self.config.target_fps);
+            .frame_pacing(
+                phase,
+                self.config.target_fps,
+                self.renderer.source_frame_rate(),
+            );
         info!("Phase {:?} frame pacing: {:?}", phase, self.frame_pacing);
         self.static_rendered = false;
     }
@@ -2691,7 +2687,7 @@ mod tests {
     fn static_active_phase_renders_on_demand() {
         let runtime = mk_runtime(None, Some(0.0), None);
         assert!(matches!(
-            runtime.frame_pacing(kroma_shared::types::ShadePhase::Active, 60),
+            runtime.frame_pacing(kroma_shared::types::ShadePhase::Active, 60, 0.0),
             FramePacing::Static
         ));
     }
@@ -2703,11 +2699,26 @@ mod tests {
         package.config.rendering.target_fps = 24;
         package.config.states.active.as_mut().unwrap().shader = Some("animated.glsl".into());
         let FramePacing::Continuous(interval) =
-            runtime.frame_pacing(kroma_shared::types::ShadePhase::Active, 60)
+            runtime.frame_pacing(kroma_shared::types::ShadePhase::Active, 60, 0.0)
         else {
             panic!("animated shader must keep rendering");
         };
         assert!((interval.as_secs_f64() - 1.0 / 24.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn plain_video_uses_loaded_source_fps_without_reopening_media() {
+        let mut runtime = mk_runtime(None, Some(0.0), None);
+        let config: ShadeConfig = toml::from_str("[meta]\nname='video'\nauthor='test'\n[states.active.textures.movie]\ntype='video'\nsource='missing.mp4'").unwrap();
+        runtime.package = Arc::new(LiveShadePackage::new_empty(config));
+        for (source_fps, expected) in [(20.0, 20.0), (30.0, 30.0), (120.0, 60.0), (0.0, 60.0)] {
+            let FramePacing::Continuous(interval) =
+                runtime.frame_pacing(kroma_shared::types::ShadePhase::Active, 60, source_fps)
+            else {
+                panic!("video requires continuous pacing")
+            };
+            assert!((interval.as_secs_f64() - 1.0 / expected).abs() < 0.001);
+        }
     }
 
     #[test]

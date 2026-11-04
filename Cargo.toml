@@ -85,7 +85,20 @@ clap_complete = "4"
 # HTTP client
 reqwest = { version = "0.13", features = ["json"] }
 
+# Benchmarks only; keep plotting and parallel analysis out of the benchmark binary.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 strip = true
+
+# Release optimizations with symbols retained for perf and heaptrack.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
+
+[profile.bench]
+debug = "line-tables-only"
+strip = false

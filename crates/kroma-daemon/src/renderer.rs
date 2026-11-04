@@ -150,6 +150,8 @@ struct OutputCaptureState {
     _final_texture: wgpu::Texture,
     final_view: wgpu::TextureView,
     output_bind_group: wgpu::BindGroup,
+    output_layout: wgpu::BindGroupLayout,
+    output_sampler: wgpu::Sampler,
     /// Pipeline layout wrapping the canvas sampler/texture bind group.
     blit_pipeline_layout: wgpu::PipelineLayout,
     /// Fragment module sampling the canvas (OUTPUT_BLIT_FRAG_WGSL).
@@ -178,6 +180,7 @@ struct RendererLane {
     custom_uniforms: HashMap<String, kroma_shared::ipc::UniformValue>,
     custom_uniform_indices: HashMap<String, usize>,
     custom_uniform_data: Vec<f32>,
+    custom_uniforms_dirty: bool,
     custom_uniform_buffer: Option<wgpu::Buffer>,
     pipeline: Option<wgpu::RenderPipeline>,
     bind_group: Option<wgpu::BindGroup>,
@@ -200,6 +203,7 @@ impl RendererLane {
             custom_uniforms: HashMap::new(),
             custom_uniform_indices: HashMap::new(),
             custom_uniform_data: vec![0.0; MAX_CUSTOM_UNIFORMS],
+            custom_uniforms_dirty: false,
             custom_uniform_buffer: None,
             pipeline: None,
             bind_group: None,
@@ -245,7 +249,7 @@ struct BufferPassState {
 ///
 /// Keyed by monitor *name* (stable across re-enumeration). Each monitor owns
 /// its wgpu surface, the configuration it was last configured with, and the
-/// pipeline that stretches this monitor's independently rendered output.
+/// pipeline that stretches the logical scene to this monitor's surface.
 pub(crate) struct MonitorTarget {
     /// Provider-level id of this monitor (for occlusion matching).
     pub(crate) id: MonitorId,
@@ -256,13 +260,31 @@ pub(crate) struct MonitorTarget {
     pub(crate) blit: Option<wgpu::RenderPipeline>,
     output: OutputCaptureState,
     globals: [wgpu::Buffer; 3],
+    globals_groups: [Option<CachedGlobalsGroup>; 3],
     transition: Option<MonitorTransitionTargets>,
     shader_sources: HashMap<u64, MonitorShaderSources>,
     needs_reconfigure: bool,
     retry_after: std::time::Instant,
 }
 
-type MonitorShaderSources = Vec<(usize, Box<dyn TextureSource>)>;
+#[derive(Default)]
+struct MonitorShaderSources {
+    sources: Vec<(usize, Box<dyn TextureSource>)>,
+    bindings: Option<CachedTextureGroup>,
+}
+
+struct CachedTextureGroup {
+    layout: wgpu::BindGroupLayout,
+    resources: Vec<(wgpu::TextureView, wgpu::Sampler)>,
+    group: wgpu::BindGroup,
+}
+
+/// Resource identity for a monitor's reusable uniform binding.
+struct CachedGlobalsGroup {
+    layout: wgpu::BindGroupLayout,
+    custom: Option<wgpu::Buffer>,
+    group: wgpu::BindGroup,
+}
 
 struct MonitorTransitionTargets {
     prev_view: wgpu::TextureView,
@@ -281,7 +303,7 @@ fn target_ready(target: &MonitorTarget, occluded: &[MonitorId], now: std::time::
 /// This struct groups low-level wgpu handles away from orchestration state,
 /// which keeps [`Renderer`] easier to reason about.
 ///
-/// Scene programs and media are shared; each target owns its render attachments.
+/// Stateless scenes share their canvas; output-local histories retain private attachments.
 #[derive(Default)]
 pub(crate) struct GpuResources {
     instance: Option<wgpu::Instance>,
@@ -300,6 +322,9 @@ pub(crate) struct GpuResources {
     canvas_size: Option<(u32, u32)>,
     /// Render targets keyed by monitor name.
     targets: HashMap<String, MonitorTarget>,
+    /// One logical canvas for scenes with identical output content and no local history.
+    shared_canvas: Option<(wgpu::Texture, wgpu::TextureView)>,
+    shared_transition: Option<MonitorTransitionTargets>,
     /// Display handle used to create wgpu surfaces for hotplugged monitors.
     raw_display: Option<raw_window_handle::RawDisplayHandle>,
 }
@@ -318,8 +343,9 @@ pub struct Renderer {
     custom_uniforms: HashMap<String, kroma_shared::ipc::UniformValue>,
     /// Mapping from custom uniform name → index in the storage buffer.
     custom_uniform_indices: HashMap<String, usize>,
-    /// CPU-side custom uniform data (uploaded to GPU each frame).
+    /// CPU-side custom uniform data, uploaded after initialization or IPC changes.
     custom_uniform_data: Vec<f32>,
+    custom_uniforms_dirty: bool,
     /// GPU storage buffer for custom uniform values.
     custom_uniform_buffer: Option<wgpu::Buffer>,
 
@@ -356,6 +382,7 @@ impl Renderer {
             custom_uniforms: std::collections::HashMap::new(),
             custom_uniform_indices: std::collections::HashMap::new(),
             custom_uniform_data: vec![0.0; MAX_CUSTOM_UNIFORMS],
+            custom_uniforms_dirty: false,
             custom_uniform_buffer: None,
             gpu: GpuResources::default(),
             textures: Vec::new(),
@@ -389,6 +416,7 @@ impl Renderer {
             custom_uniforms: std::mem::take(&mut self.custom_uniforms),
             custom_uniform_indices: std::mem::take(&mut self.custom_uniform_indices),
             custom_uniform_data: std::mem::take(&mut self.custom_uniform_data),
+            custom_uniforms_dirty: std::mem::take(&mut self.custom_uniforms_dirty),
             custom_uniform_buffer: self.custom_uniform_buffer.take(),
             pipeline: self.gpu.pipeline.take(),
             bind_group: self.gpu.bind_group.take(),
@@ -411,6 +439,7 @@ impl Renderer {
             custom_uniforms,
             custom_uniform_indices,
             custom_uniform_data,
+            custom_uniforms_dirty,
             custom_uniform_buffer,
             pipeline,
             bind_group,
@@ -430,6 +459,7 @@ impl Renderer {
         self.custom_uniforms = custom_uniforms;
         self.custom_uniform_indices = custom_uniform_indices;
         self.custom_uniform_data = custom_uniform_data;
+        self.custom_uniforms_dirty = custom_uniforms_dirty;
         self.custom_uniform_buffer = custom_uniform_buffer;
         self.gpu.pipeline = pipeline;
         self.gpu.bind_group = bind_group;
@@ -525,6 +555,7 @@ impl Renderer {
         for target in self.gpu.targets.values_mut() {
             target.transition = None;
         }
+        self.gpu.shared_transition = None;
         self.transition_spec = Some(spec.to_string());
         self.transition_progress = 0.0;
         self.transition_state = Some(TransitionRenderState {
@@ -668,6 +699,7 @@ impl Renderer {
         gpu_pref: &GpuPower,
         surface: &dyn SurfaceProvider,
     ) -> Result<()> {
+        let _timing = crate::timing::scope("startup.gpu");
         let mut monitors = surface.list_monitors()?;
         monitors.sort_by(|a, b| a.name.cmp(&b.name));
         let (canvas_w, canvas_h) = monitors
@@ -708,6 +740,9 @@ impl Renderer {
         let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: wgpu::Features::FLOAT32_FILTERABLE,
             label: Some("kroma-device"),
+            // A persistent wallpaper benefits from smaller allocation pools;
+            // individual large textures still receive appropriately sized blocks.
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
         .context("Failed to create GPU device")?;
@@ -805,6 +840,7 @@ impl Renderer {
         precompiled_wgsl: Option<&str>,
         shade_path: Option<&str>,
     ) -> Result<ShadeLoadOutcome> {
+        let _timing = crate::timing::scope("shade.phase.load");
         let state = match phase {
             ShadePhase::Load => pkg.config.states.load.as_ref(),
             ShadePhase::Active => pkg.config.states.active.as_ref(),
@@ -938,6 +974,7 @@ impl Renderer {
                 mapped_at_creation: false,
             });
             self.custom_uniform_buffer = Some(buffer);
+            self.custom_uniforms_dirty = true;
             self.rebuild_bind_group_0()?;
         } else if self.gpu.texture_bind_group_layout.is_some() {
             // Ensure pipeline layout includes texture bind groups if present
@@ -964,6 +1001,7 @@ impl Renderer {
         if let Some(&idx) = self.custom_uniform_indices.get(name)
             && idx < MAX_CUSTOM_UNIFORMS
         {
+            self.custom_uniforms_dirty = true;
             self.custom_uniform_data[idx] = match value {
                 UniformValue::Float(v) => *v as f32,
                 UniformValue::Bool(b) => {
@@ -1022,6 +1060,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         self.custom_uniform_buffer = Some(buffer);
+        self.custom_uniforms_dirty = true;
 
         // Rebuild bind group 0 to include both uniform buffer and storage buffer
         self.rebuild_bind_group_0()?;
@@ -1095,10 +1134,13 @@ impl Renderer {
         Ok(())
     }
 
-    /// Upload custom uniform data to the GPU (called each frame).
-    pub fn upload_custom_uniforms(&self) {
-        if let (Some(buf), Some(queue)) = (&self.custom_uniform_buffer, self.gpu.queue.as_ref()) {
+    /// Upload custom values after a change, retaining GPU contents between frames.
+    pub fn upload_custom_uniforms(&mut self) {
+        if self.custom_uniforms_dirty
+            && let (Some(buf), Some(queue)) = (&self.custom_uniform_buffer, self.gpu.queue.as_ref())
+        {
             queue.write_buffer(buf, 0, bytemuck::cast_slice(&self.custom_uniform_data));
+            self.custom_uniforms_dirty = false;
         }
     }
 
@@ -1239,7 +1281,14 @@ impl Renderer {
                         vec![0u8; source.format().bytes_per_pixel() as usize];
                     let mut recycle_init_data = false;
 
-                    match source.update(0.0) {
+                    // Shader templates are transferred to the first monitor. Do not
+                    // advance their nested feedback before that monitor's first frame.
+                    let initial = if def.ty == kroma_shared::types::TextureType::Shader {
+                        Ok(TextureUpdate::Unchanged)
+                    } else {
+                        source.update(0.0)
+                    };
+                    match initial {
                         Ok(TextureUpdate::NewFrame {
                             data,
                             width,
@@ -1527,7 +1576,9 @@ impl Renderer {
             let samp_binding = (i * 2 + 1) as u32;
 
             let (view, sampler) = if let Some(Some(source)) = self.texture_sources.get(i) {
-                if source.is_gpu_managed() {
+                if source.is_gpu_managed()
+                    && !self.shader_defs.iter().any(|(slot, _, _)| *slot == i)
+                {
                     if let (Some(v), Some(s)) = (source.gpu_texture_view(), source.gpu_sampler()) {
                         (v as &wgpu::TextureView, s as &wgpu::Sampler)
                     } else {
@@ -1652,6 +1703,16 @@ impl Renderer {
         )
     }
 
+    /// Highest nominal video frame rate among loaded root texture sources.
+    pub fn source_frame_rate(&self) -> f64 {
+        self.texture_sources
+            .iter()
+            .flatten()
+            .filter_map(|source| source.frame_rate())
+            .filter(|rate| rate.is_finite() && *rate > 0.0)
+            .fold(0.0_f64, f64::max)
+    }
+
     /// Get the audio level from the first audio texture source, if any.
     pub fn get_audio_level(&self) -> f32 {
         for source_opt in &self.texture_sources {
@@ -1659,6 +1720,16 @@ impl Renderer {
                 let level = source.audio_level();
                 if level > 0.0 || source.texture_type() == "audio_spectrum" {
                     return level;
+                }
+            }
+        }
+        for target in self.gpu.targets.values() {
+            if let Some(sources) = target.shader_sources.get(&self.lane_id) {
+                for (_, source) in &sources.sources {
+                    let level = source.audio_level();
+                    if level > 0.0 {
+                        return level;
+                    }
                 }
             }
         }
@@ -1684,15 +1755,115 @@ impl Renderer {
     }
 
     /// Polls asynchronous work without waiting, even while rendering is paused.
-    pub fn poll_gpu(&self) {
+    pub fn poll_gpu(&mut self) {
+        self.prune_monitor_resources();
         if let Some(device) = &self.gpu.device {
             let _ = device.poll(wgpu::wgt::PollType::Poll);
+        }
+    }
+
+    /// Retires histories and transition targets even when their output cannot render.
+    fn prune_monitor_resources(&mut self) {
+        let incoming = self
+            .transition_state
+            .as_ref()
+            .map(|t| t.incoming_lane.lane_id);
+        if incoming.is_none() {
+            self.gpu.shared_transition = None;
+        }
+        for target in self.gpu.targets.values_mut() {
+            target
+                .shader_sources
+                .retain(|lane, _| *lane == self.lane_id || Some(*lane) == incoming);
+            if incoming.is_none() {
+                target.transition = None;
+                target.globals_groups[1] = None;
+                target.globals_groups[2] = None;
+            }
+            // A phase can replace the layout/storage buffer while paused.
+            // Drop the old binding immediately rather than retaining its resources.
+            for slot in [0, 2] {
+                if target.globals_groups[slot].as_ref().is_some_and(|cached| {
+                    Some(&cached.layout) != self.gpu.bind_group_layout.as_ref()
+                        || cached.custom.as_ref() != self.custom_uniform_buffer.as_ref()
+                }) {
+                    target.globals_groups[slot] = None;
+                }
+            }
+            if target.globals_groups[1].as_ref().is_some_and(|cached| {
+                self.transition_state.as_ref().is_none_or(|transition| {
+                    Some(&cached.layout) != transition.incoming_lane.bind_group_layout.as_ref()
+                        || cached.custom.as_ref()
+                            != transition.incoming_lane.custom_uniform_buffer.as_ref()
+                })
+            }) {
+                target.globals_groups[1] = None;
+            }
+        }
+        // Coalesce retired independent canvases even if playback is paused.
+        if self.can_share_scene() {
+            let _ = self.prepare_output_canvases();
         }
     }
 
     /// Drops GPU surfaces before the backend's native handles are released.
     pub fn clear_targets(&mut self) {
         self.gpu.targets.clear();
+        self.gpu.shared_canvas = None;
+        self.gpu.shared_transition = None;
+    }
+
+    /// Only scenes without output-local shader/feedback state can share their pixels.
+    fn can_share_scene(&self) -> bool {
+        self.shader_defs.is_empty()
+            && self.buffer_passes.is_empty()
+            && self.transition_state.as_ref().is_none_or(|transition| {
+                transition.incoming_lane.shader_defs.is_empty()
+                    && transition.incoming_lane.buffer_passes.is_empty()
+            })
+    }
+
+    /// Shares identical canvases, or detaches them before output-local histories advance.
+    fn prepare_output_canvases(&mut self) -> Result<bool> {
+        let shared = self.can_share_scene();
+        let device = self.gpu.device.as_ref().context("GPU not initialized")?;
+        let size = self.surface_dimensions();
+        if shared {
+            if self.gpu.shared_canvas.is_none() {
+                self.gpu.shared_canvas = self.gpu.targets.values().next().map(|target| {
+                    (
+                        target.output._final_texture.clone(),
+                        target.output.final_view.clone(),
+                    )
+                });
+            }
+            if let Some(canvas) = &self.gpu.shared_canvas {
+                for target in self.gpu.targets.values_mut() {
+                    render_flow::set_output_canvas(device, &mut target.output, canvas);
+                    target.transition = None;
+                }
+            }
+        } else {
+            self.gpu.shared_transition = None;
+            if let Some((texture, _)) = self.gpu.shared_canvas.take() {
+                let mut retained = false;
+                for target in self.gpu.targets.values_mut() {
+                    if target.output._final_texture == texture {
+                        if retained {
+                            let canvas = render_flow::create_output_canvas(
+                                device,
+                                SURFACE_FORMAT,
+                                size.0,
+                                size.1,
+                            );
+                            render_flow::set_output_canvas(device, &mut target.output, &canvas);
+                        }
+                        retained = true;
+                    }
+                }
+            }
+        }
+        Ok(shared)
     }
 
     /// Reconciles native handles and sizes, including recovery from zero targets.
@@ -1701,6 +1872,7 @@ impl Renderer {
         provider: &dyn SurfaceProvider,
         monitors: &[MonitorConfig],
     ) -> bool {
+        let share_scene = self.can_share_scene();
         let (Some(device), Some(instance), Some(adapter), Some(vert)) = (
             self.gpu.device.as_ref(),
             self.gpu.instance.as_ref(),
@@ -1777,6 +1949,11 @@ impl Renderer {
                     SURFACE_FORMAT,
                     size.0,
                     size.1,
+                    if share_scene {
+                        self.gpu.shared_canvas.as_ref()
+                    } else {
+                        None
+                    },
                 );
                 let blit = config.as_ref().map(|config| {
                     Self::create_fullscreen_pipeline(
@@ -1804,6 +1981,7 @@ impl Renderer {
                     blit,
                     output,
                     globals,
+                    globals_groups: std::array::from_fn(|_| None),
                     transition: None,
                     shader_sources: HashMap::new(),
                     needs_reconfigure: false,
@@ -1812,11 +1990,21 @@ impl Renderer {
             })();
             match created {
                 Ok(target) => {
+                    if share_scene && self.gpu.shared_canvas.is_none() {
+                        self.gpu.shared_canvas = Some((
+                            target.output._final_texture.clone(),
+                            target.output.final_view.clone(),
+                        ));
+                    }
                     self.gpu.targets.insert(monitor.name.clone(), target);
                     changed = true;
                 }
                 Err(error) => warn!("Cannot initialize monitor {}: {error:#}", monitor.name),
             }
+        }
+        if self.gpu.targets.is_empty() {
+            self.gpu.shared_canvas = None;
+            self.gpu.shared_transition = None;
         }
         changed
     }
@@ -1843,7 +2031,7 @@ pub fn glsl_to_wgsl(glsl_source: &str) -> Result<String> {
 
 /// Tiny helper to block on an async wgpu future (wgpu's async is usually
 /// instant on native backends).
-fn pollster_block<F: std::future::Future>(f: F) -> F::Output {
+pub(crate) fn pollster_block<F: std::future::Future>(f: F) -> F::Output {
     shader_translation::pollster_block(f)
 }
 
@@ -1894,6 +2082,229 @@ mod monitor_tests {
         }
     }
 
+    /// Fixed-work full-resolution renderer profile using the cached test build.
+    #[test]
+    #[ignore = "manual GPU profiling workload; run with --ignored --exact and --nocapture"]
+    fn profile_render_loop() {
+        let parameter = |name: &str, default: u32| -> u32 {
+            let value = std::env::var(name)
+                .map(|value| value.parse().expect("profile parameters must be integers"))
+                .unwrap_or(default);
+            assert!(value > 0, "{name} must be greater than zero");
+            value
+        };
+        let frames = parameter("KROMA_PROFILE_FRAMES", 600);
+        let width = parameter("KROMA_PROFILE_WIDTH", 1920);
+        let height = parameter("KROMA_PROFILE_HEIGHT", 1080);
+        let outputs = parameter("KROMA_PROFILE_OUTPUTS", 1);
+        let provider = OffscreenMonitors(
+            (0..outputs)
+                .map(|id| MonitorConfig {
+                    id: MonitorId(id),
+                    name: format!("output-{id}"),
+                    width,
+                    height,
+                    x: 0,
+                    y: 0,
+                    scale: 1.0,
+                })
+                .collect(),
+        );
+        let names: Vec<_> = provider
+            .0
+            .iter()
+            .map(|monitor| monitor.name.clone())
+            .collect();
+        let ids: Vec<_> = provider.0.iter().map(|monitor| monitor.id).collect();
+        let mut renderer = Renderer::new().unwrap();
+        renderer
+            .init_gpu_with_surface(&GpuPower::Low, &provider)
+            .unwrap();
+        assert_eq!(renderer.surface_dimensions(), (width, height));
+        assert_eq!(renderer.gpu.targets.len(), outputs as usize);
+        for target in renderer.gpu.targets.values() {
+            assert_eq!(target.output._final_texture.width(), width);
+            assert_eq!(target.output._final_texture.height(), height);
+        }
+        let translated = kroma_shared::translator::translate(
+            include_str!("../../../examples/shadertoy/plasma.glsl"),
+            "Profile plasma",
+            "Kroma",
+        );
+        renderer
+            .load_glsl_source(&translated.shader_source)
+            .unwrap();
+        let device = Arc::clone(renderer.gpu.device.as_ref().unwrap());
+        let wait = || {
+            device
+                .poll(wgpu::wgt::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(std::time::Duration::from_secs(30)),
+                })
+                .unwrap()
+        };
+        let capture = |renderer: &mut Renderer| {
+            renderer.render_frame(&names, &[]).unwrap();
+            wait();
+            let mut captures = renderer.render_frame(&[], &ids).unwrap();
+            assert_eq!(captures.len(), outputs as usize);
+            captures.sort_by(|a, b| a.0.cmp(&b.0));
+            captures
+                .into_iter()
+                .map(|(name, frame)| {
+                    assert!(
+                        frame
+                            .rgba()
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .any(|pixel| pixel != &frame.rgba()[..4]),
+                        "plasma output must contain spatially varying pixels"
+                    );
+                    let hash = frame
+                        .rgba()
+                        .iter()
+                        .fold(0xcbf29ce484222325u64, |hash, byte| {
+                            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+                        });
+                    (name, format!("{hash:016x}"))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let initial_pixels = capture(&mut renderer);
+        for frame in 0..32 {
+            renderer.uniforms.u_time = frame as f32 / 60.0;
+            renderer.render_frame(&[], &[]).unwrap();
+            wait();
+        }
+        let memory_before = profile_process_snapshot();
+        let start = std::time::Instant::now();
+        let mut frame_ms = Vec::with_capacity(frames as usize);
+        for frame in 0..frames {
+            renderer.uniforms.u_frame = frame;
+            renderer.uniforms.u_time = (frame + 32) as f32 / 60.0;
+            renderer.uniforms.u_delta_time = 1.0 / 60.0;
+            let frame_start = std::time::Instant::now();
+            renderer.render_frame(&[], &[]).unwrap();
+            wait();
+            assert!(
+                renderer
+                    .gpu
+                    .targets
+                    .values()
+                    .all(|target| target.retry_after <= frame_start),
+                "an output failed during profiling"
+            );
+            frame_ms.push(frame_start.elapsed().as_secs_f64() * 1000.0);
+        }
+        let elapsed = start.elapsed();
+        let memory_after = profile_process_snapshot();
+        let final_pixels = capture(&mut renderer);
+        assert_ne!(initial_pixels, final_pixels, "plasma output must animate");
+        frame_ms.sort_by(f64::total_cmp);
+        let percentile = |fraction: f64| {
+            frame_ms[((frames as f64 * fraction).ceil() as usize - 1).min(frame_ms.len() - 1)]
+        };
+        println!(
+            "render_profile_json {}",
+            serde_json::json!({
+                "adapter": format!("{:?}", renderer.gpu.adapter.as_ref().unwrap().get_info()),
+                "shader": "examples/shadertoy/plasma.glsl", "frames": frames,
+                "outputs": outputs, "width": width, "height": height,
+                "warmup_frames": 32, "gpu_wait_every_frames": 1,
+                "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
+                "mean_frame_ms": elapsed.as_secs_f64() * 1000.0 / f64::from(frames),
+                "p50_frame_ms": percentile(0.50), "p95_frame_ms": percentile(0.95),
+                "memory_before": memory_before, "memory_after": memory_after,
+                "initial_pixels": initial_pixels, "final_pixels": final_pixels,
+            })
+        );
+    }
+
+    /// Linux process counters and per-client DRM allocation/engine counters.
+    fn profile_process_snapshot() -> serde_json::Value {
+        let mut memory = std::collections::BTreeMap::new();
+        if let Ok(rollup) = std::fs::read_to_string("/proc/self/smaps_rollup") {
+            for line in rollup.lines() {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                if fields.len() == 3 && fields[2] == "kB" {
+                    memory.insert(
+                        fields[0].trim_end_matches(':').to_owned(),
+                        fields[1].parse::<u64>().unwrap() * 1024,
+                    );
+                }
+            }
+        }
+        let cpu_ticks = std::fs::read_to_string("/proc/self/stat")
+            .ok()
+            .and_then(|stat| {
+                let (_, fields) = stat.rsplit_once(')')?;
+                let mut fields = fields.split_whitespace().skip(11);
+                Some(fields.next()?.parse::<u64>().ok()? + fields.next()?.parse::<u64>().ok()?)
+            });
+        let mut seen = std::collections::HashSet::new();
+        let mut drm_memory = std::collections::BTreeMap::<String, u64>::new();
+        let mut gfx_ns = None::<u64>;
+        if let Ok(files) = std::fs::read_dir("/proc/self/fdinfo") {
+            for file in files.flatten() {
+                let Ok(text) = std::fs::read_to_string(file.path()) else {
+                    continue;
+                };
+                let fields: std::collections::HashMap<_, _> = text
+                    .lines()
+                    .filter_map(|line| line.split_once(':').map(|(key, value)| (key, value.trim())))
+                    .collect();
+                let Some(client) = fields.get("drm-client-id") else {
+                    continue;
+                };
+                let key = (
+                    fields.get("drm-driver").copied(),
+                    fields.get("drm-pdev").copied(),
+                    *client,
+                );
+                if !seen.insert((
+                    key.0.map(str::to_owned),
+                    key.1.map(str::to_owned),
+                    key.2.to_owned(),
+                )) {
+                    continue;
+                }
+                let resident_regions: std::collections::HashSet<_> = fields
+                    .keys()
+                    .copied()
+                    .filter_map(|key| key.strip_prefix("drm-resident-"))
+                    .collect();
+                for (key, value) in fields {
+                    let mut parts = value.split_whitespace();
+                    let Some(number) = parts.next().and_then(|number| number.parse::<u64>().ok())
+                    else {
+                        continue;
+                    };
+                    let unit = parts.next().unwrap_or("");
+                    // Prefer the standard resident counters. Older amdgpu
+                    // exports drm-memory-* aliases; never count both copies.
+                    let region = key.strip_prefix("drm-resident-").or_else(|| {
+                        key.strip_prefix("drm-memory-")
+                            .filter(|region| !resident_regions.contains(region))
+                    });
+                    if let Some(region) = region {
+                        let scale = match unit {
+                            "KiB" => 1024,
+                            "MiB" => 1024 * 1024,
+                            "" | "B" => 1,
+                            _ => continue,
+                        };
+                        *drm_memory.entry(region.to_owned()).or_default() += number * scale;
+                    } else if key == "drm-engine-gfx" && unit == "ns" {
+                        *gfx_ns.get_or_insert(0) += number;
+                    }
+                }
+            }
+        }
+        serde_json::json!({"resident_bytes": memory, "cpu_ticks": cpu_ticks,
+            "drm_memory_bytes": drm_memory, "drm_gfx_ns": gfx_ns})
+    }
+
     #[test]
     fn unsupported_surface_capabilities_fail_without_panicking() {
         assert!(
@@ -1939,7 +2350,7 @@ mod monitor_tests {
         assert!(renderer.all_targets_occluded(&[MonitorId(7), MonitorId(42)]));
         assert!(!renderer.all_targets_occluded(&[MonitorId(999)]));
         let left = renderer.gpu.targets["left"].output._final_texture.clone();
-        assert_ne!(left, renderer.gpu.targets["right"].output._final_texture);
+        assert_eq!(left, renderer.gpu.targets["right"].output._final_texture);
         assert_ne!(
             renderer.gpu.targets["left"].globals[0],
             renderer.gpu.targets["right"].globals[0]
@@ -1986,7 +2397,7 @@ mod monitor_tests {
             "test-incoming",
         ));
         incoming.bind_group_layout = renderer.gpu.bind_group_layout.clone();
-        renderer.begin_transition_internal("test", r#"
+        let transition_shader = r#"
             @group(1) @binding(0) var prev: texture_2d<f32>;
             @group(1) @binding(1) var prev_sampler: sampler;
             @group(1) @binding(2) var next: texture_2d<f32>;
@@ -1994,7 +2405,10 @@ mod monitor_tests {
             @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
                 return textureSample(prev, prev_sampler, uv) + textureSample(next, next_sampler, uv);
             }
-        "#, incoming, 64, 32).unwrap();
+        "#;
+        renderer
+            .begin_transition_internal("test", transition_shader, incoming, 64, 32)
+            .unwrap();
         renderer.transition_lane_uniforms = Some(TransitionLaneUniformState {
             outgoing_elapsed: 0.2,
             outgoing_frame: 1,
@@ -2021,9 +2435,62 @@ mod monitor_tests {
         assert!((110..=140).contains(&pixel[0]), "Outgoing lane: {pixel:?}");
         assert!((220..=245).contains(&pixel[1]), "Incoming lane: {pixel:?}");
 
+        let binding = renderer.gpu.targets["left"].globals_groups[0]
+            .as_ref()
+            .unwrap()
+            .group
+            .clone();
+        renderer.render_frame(&[], &[]).unwrap();
+        assert_eq!(
+            renderer.gpu.targets["left"].globals_groups[0]
+                .as_ref()
+                .unwrap()
+                .group,
+            binding
+        );
+        assert!(renderer.gpu.shared_transition.is_some());
+        assert!(
+            renderer
+                .gpu
+                .targets
+                .values()
+                .all(|target| target.transition.is_none())
+        );
+        renderer
+            .render_frame(&["left".into(), "right".into()], &[])
+            .unwrap();
+        device
+            .poll(wgpu::wgt::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(10)),
+            })
+            .unwrap();
+        let captures = renderer
+            .render_frame(&[], &[MonitorId(99), MonitorId(101)])
+            .unwrap();
+        assert_eq!(captures.len(), 2);
+        assert_eq!(
+            captures[0].1.rgba(),
+            captures[1].1.rgba(),
+            "shared pixels must preserve independent output readbacks"
+        );
+        assert_ne!(
+            renderer.gpu.targets["left"].output.readback_buffer,
+            renderer.gpu.targets["right"].output.readback_buffer
+        );
+
+        // Ending a transition must release both outputs' scratch textures,
+        // even if no subsequent frame is rendered (paused/occluded outputs).
+        renderer.end_transition();
+        renderer.poll_gpu();
+        assert!(renderer.gpu.shared_transition.is_none());
+        for target in renderer.gpu.targets.values() {
+            assert!(target.transition.is_none());
+            assert!(target.globals_groups[1].is_none());
+            assert!(target.globals_groups[2].is_none());
+        }
+
         // Feedback must advance only on the monitor being rendered.
-        renderer.transition_state = None;
-        renderer.transition_lane_uniforms = None;
         let config: kroma_shared::types::ShadeConfig = toml::from_str(
             r#"
             [meta]
@@ -2054,10 +2521,16 @@ void main() {
 "#
             .to_vec(),
         );
+        let package = Arc::new(package);
         renderer
-            .load_phase(Arc::new(package), ShadePhase::Active, None, None)
+            .load_phase(Arc::clone(&package), ShadePhase::Active, None, None)
             .unwrap();
         renderer.render_frame(&[], &[]).unwrap();
+        assert_ne!(
+            renderer.gpu.targets["left"].output._final_texture,
+            renderer.gpu.targets["right"].output._final_texture,
+            "feedback lanes require independent scene canvases"
+        );
         renderer.render_frame(&[], &[MonitorId(101)]).unwrap();
         renderer
             .render_frame(&["left".into(), "right".into()], &[])
@@ -2077,13 +2550,193 @@ void main() {
             red("left") > red("right") + 10,
             "Feedback history leaked between monitors"
         );
+        assert!(
+            renderer.texture_sources[0].is_none(),
+            "validated template must belong to a monitor"
+        );
+        let cached = renderer.gpu.targets["left"].shader_sources[&renderer.lane_id]
+            .bindings
+            .as_ref()
+            .unwrap()
+            .group
+            .clone();
+        renderer.render_frame(&[], &[MonitorId(101)]).unwrap();
+        assert_eq!(
+            renderer.gpu.targets["left"].shader_sources[&renderer.lane_id]
+                .bindings
+                .as_ref()
+                .unwrap()
+                .group,
+            cached
+        );
         assert_ne!(
-            renderer.gpu.targets["left"].shader_sources[&renderer.lane_id][0]
+            renderer.gpu.targets["left"].shader_sources[&renderer.lane_id].sources[0]
                 .1
                 .gpu_texture_view(),
-            renderer.gpu.targets["right"].shader_sources[&renderer.lane_id][0]
+            renderer.gpu.targets["right"].shader_sources[&renderer.lane_id].sources[0]
                 .1
                 .gpu_texture_view()
         );
+        renderer.show_no_shade_fallback().unwrap();
+        renderer.poll_gpu();
+        assert_eq!(
+            renderer.gpu.targets["left"].output._final_texture,
+            renderer.gpu.targets["right"].output._final_texture,
+            "paused cleanup should coalesce stateless canvases"
+        );
+        assert!(
+            renderer
+                .gpu
+                .targets
+                .values()
+                .all(|target| target.shader_sources.is_empty())
+        );
+        // An incoming feedback lane also disables sharing while the outgoing
+        // fallback remains stateless. Preflight alone must not change its canvas.
+        let prepared = renderer
+            .preflight_transition_lane(package, ShadePhase::Active, None, None)
+            .unwrap();
+        assert!(renderer.can_share_scene());
+        renderer
+            .begin_transition_with_preflighted_lane(
+                "incoming-feedback",
+                transition_shader,
+                prepared,
+                64,
+                32,
+            )
+            .unwrap();
+        assert!(!renderer.can_share_scene());
+        renderer.render_frame(&[], &[]).unwrap();
+        assert!(renderer.gpu.shared_canvas.is_none());
+        assert_ne!(
+            renderer.gpu.targets["left"].output._final_texture,
+            renderer.gpu.targets["right"].output._final_texture
+        );
+    }
+
+    #[test]
+    fn cached_bindings_follow_uniform_changes_and_buffer_replacement() {
+        let provider = OffscreenMonitors(vec![monitor(1, "left", 64)]);
+        let mut renderer = Renderer::new().unwrap();
+        if let Err(error) = renderer.init_gpu_with_surface(&GpuPower::Low, &provider) {
+            if error.to_string().contains("No GPU adapter found") {
+                return;
+            }
+            panic!("GPU initialization failed: {error:#}");
+        }
+        renderer.init_custom_uniforms(&IndexMap::new()).unwrap();
+        renderer.custom_uniform_indices.insert("red".into(), 0);
+        renderer
+            .rebuild_pipeline_with_frag(
+                r#"
+            @group(0) @binding(1) var<storage, read> custom: array<f32, 32>;
+            @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                return vec4<f32>(custom[0], 0.0, 0.0, 1.0);
+            }
+        "#,
+            )
+            .unwrap();
+        let capture = |renderer: &mut Renderer| {
+            renderer.render_frame(&["left".into()], &[]).unwrap();
+            renderer
+                .gpu
+                .device
+                .as_ref()
+                .unwrap()
+                .poll(wgpu::wgt::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(std::time::Duration::from_secs(10)),
+                })
+                .unwrap();
+            let frames = renderer.render_frame(&[], &[MonitorId(1)]).unwrap();
+            assert_eq!(frames.len(), 1);
+            frames[0].1.rgba()[0]
+        };
+        renderer.set_custom_uniform("red", &kroma_shared::ipc::UniformValue::Float(0.2));
+        assert!((110..=140).contains(&capture(&mut renderer)));
+        assert!(!renderer.custom_uniforms_dirty);
+        let binding = renderer.gpu.targets["left"].globals_groups[0]
+            .as_ref()
+            .unwrap()
+            .group
+            .clone();
+        renderer.set_custom_uniform("red", &kroma_shared::ipc::UniformValue::Float(0.8));
+        assert!(renderer.custom_uniforms_dirty);
+        assert!((220..=245).contains(&capture(&mut renderer)));
+        assert!(!renderer.custom_uniforms_dirty);
+        assert_eq!(
+            renderer.gpu.targets["left"].globals_groups[0]
+                .as_ref()
+                .unwrap()
+                .group,
+            binding
+        );
+
+        // Keep the layout unchanged and replace only the bound storage buffer.
+        let device = renderer.gpu.device.as_ref().unwrap();
+        renderer.custom_uniform_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("test-replacement-custom"),
+            size: (MAX_CUSTOM_UNIFORMS * std::mem::size_of::<f32>()) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        renderer.set_custom_uniform("red", &kroma_shared::ipc::UniformValue::Float(0.2));
+        renderer.poll_gpu();
+        assert!(renderer.gpu.targets["left"].globals_groups[0].is_none());
+        assert!((110..=140).contains(&capture(&mut renderer)));
+        assert_ne!(
+            renderer.gpu.targets["left"].globals_groups[0]
+                .as_ref()
+                .unwrap()
+                .group,
+            binding
+        );
+
+        // Incoming uniforms must be uploaded once, then remain editable after promotion.
+        let mut incoming = RendererLane::blank();
+        incoming.lane_id = renderer.next_lane_id;
+        renderer.next_lane_id += 1;
+        incoming.pipeline = renderer.gpu.pipeline.clone();
+        incoming.bind_group_layout = renderer.gpu.bind_group_layout.clone();
+        incoming.custom_uniform_buffer = Some(renderer.gpu.device.as_ref().unwrap().create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("test-incoming-custom"),
+                size: (MAX_CUSTOM_UNIFORMS * std::mem::size_of::<f32>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            },
+        ));
+        incoming.custom_uniform_indices.insert("red".into(), 0);
+        incoming.custom_uniform_data[0] = 0.6;
+        incoming.custom_uniforms_dirty = true;
+        renderer
+            .begin_transition_internal(
+                "custom-uniform-test",
+                r#"
+            @group(1) @binding(2) var next: texture_2d<f32>;
+            @group(1) @binding(3) var next_sampler: sampler;
+            @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                return textureSample(next, next_sampler, uv);
+            }
+        "#,
+                incoming,
+                64,
+                32,
+            )
+            .unwrap();
+        assert!((195..=215).contains(&capture(&mut renderer)));
+        assert!(
+            !renderer
+                .transition_state
+                .as_ref()
+                .unwrap()
+                .incoming_lane
+                .custom_uniforms_dirty
+        );
+        assert!(renderer.promote_live_transition_incoming().unwrap());
+        renderer.set_custom_uniform("red", &kroma_shared::ipc::UniformValue::Float(0.8));
+        assert!((220..=245).contains(&capture(&mut renderer)));
+        assert!(!renderer.custom_uniforms_dirty);
     }
 }

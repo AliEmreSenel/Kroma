@@ -6,7 +6,7 @@
 //! 3. Wrapping the `mainImage` entry point into a standard `main()`.
 //! 4. Generating a skeleton `config.toml`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use indexmap::IndexMap;
@@ -190,16 +190,27 @@ pub fn translate(source: &str, name: &str, author: &str) -> TranslationResult {
     let mut sorted_channels: Vec<u32> = detected_channels.iter().copied().collect();
     sorted_channels.sort();
 
-    // Replace iChannelN with sampler2D(kroma_tex_I, kroma_samp_I) expressions
-    // where I is the sequential binding index (position in sorted channels).
-    for (binding_idx, idx) in sorted_channels.iter().enumerate() {
-        let from = format!("iChannel{}", idx);
-        let to = format!(
-            "sampler2D(kroma_tex_{}, kroma_samp_{})",
-            binding_idx, binding_idx
-        );
-        let re = word_regex(&from);
-        output = re.replace_all(&output, to.as_str()).to_string();
+    // Replace all channels in one pass using the already compiled regex.
+    // Building a new regex per channel dominates translation of small shaders.
+    if !sorted_channels.is_empty() {
+        let replacements: HashMap<_, _> = sorted_channels
+            .iter()
+            .enumerate()
+            .map(|(binding, idx)| {
+                (
+                    format!("iChannel{idx}"),
+                    format!("sampler2D(kroma_tex_{binding}, kroma_samp_{binding})"),
+                )
+            })
+            .collect();
+        output = channel_re
+            .replace_all(&output, |caps: &regex::Captures<'_>| {
+                replacements
+                    .get(&caps[0])
+                    .cloned()
+                    .unwrap_or_else(|| caps[0].to_owned())
+            })
+            .into_owned();
     }
 
     // ------------------------------------------------------------------
@@ -341,7 +352,8 @@ layout(location = 0) out vec4 kroma_out_color;
     // Step 6: Generate config.toml
     // ------------------------------------------------------------------
     let mut textures = IndexMap::new();
-    for idx in &detected_channels {
+    // Keep config insertion order aligned with the shader's binding indices.
+    for idx in &sorted_channels {
         let channel_name = format!("channel{}", idx);
         textures.insert(
             channel_name,
@@ -471,6 +483,26 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
                 .expect("active state")
                 .textures
                 .contains_key("channel0")
+        );
+    }
+
+    #[test]
+    fn channel_replacement_preserves_order_and_identifier_boundaries() {
+        let source = r#"
+void mainImage(out vec4 c, in vec2 p) {
+    float my_iChannel1 = 1.0;
+    c = texture(iChannel10, p) + texture(iChannel1, p) + texture(iChannel10, p);
+}
+"#;
+        let result = translate(source, "Channels", "Tester");
+        assert!(result.shader_source.contains("float my_iChannel1 = 1.0"));
+        assert!(result.shader_source.contains(
+            "texture(sampler2D(kroma_tex_1, kroma_samp_1), p) + texture(sampler2D(kroma_tex_0, kroma_samp_0), p) + texture(sampler2D(kroma_tex_1, kroma_samp_1), p)"
+        ));
+        let textures = &result.config.states.active.as_ref().unwrap().textures;
+        assert_eq!(
+            textures.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["channel1", "channel10"]
         );
     }
 

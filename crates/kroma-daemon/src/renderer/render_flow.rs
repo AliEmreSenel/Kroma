@@ -1,14 +1,13 @@
 use super::*;
 use wgpu::wgt::PollType;
 
-/// Creates the intermediate final-output and asynchronous capture resources.
-pub(super) fn create_output_capture_state(
+/// Creates one logical scene canvas independently of output-specific readbacks.
+pub(super) fn create_output_canvas(
     device: &wgpu::Device,
-    vert_module: &wgpu::ShaderModule,
     surface_format: wgpu::TextureFormat,
     width: u32,
     height: u32,
-) -> OutputCaptureState {
+) -> (wgpu::Texture, wgpu::TextureView) {
     let final_texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("kroma-final-output"),
         size: wgpu::Extent3d {
@@ -24,6 +23,62 @@ pub(super) fn create_output_capture_state(
         view_formats: &[],
     });
     let final_view = final_texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (final_texture, final_view)
+}
+
+/// Rebinds an output to a shared or independent canvas without replacing its readback.
+pub(super) fn set_output_canvas(
+    device: &wgpu::Device,
+    output: &mut OutputCaptureState,
+    canvas: &(wgpu::Texture, wgpu::TextureView),
+) {
+    if output._final_texture == canvas.0 {
+        return;
+    }
+    output._final_texture = canvas.0.clone();
+    output.final_view = canvas.1.clone();
+    output.output_bind_group = canvas_bind_group(
+        device,
+        &output.output_layout,
+        &output.final_view,
+        &output.output_sampler,
+    );
+}
+
+fn canvas_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    view: &wgpu::TextureView,
+    sampler: &wgpu::Sampler,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("kroma-final-output-bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    })
+}
+
+/// Creates output-specific capture resources, optionally reusing a scene canvas.
+pub(super) fn create_output_capture_state(
+    device: &wgpu::Device,
+    vert_module: &wgpu::ShaderModule,
+    surface_format: wgpu::TextureFormat,
+    width: u32,
+    height: u32,
+    shared_canvas: Option<&(wgpu::Texture, wgpu::TextureView)>,
+) -> OutputCaptureState {
+    let (final_texture, final_view) = shared_canvas
+        .cloned()
+        .unwrap_or_else(|| create_output_canvas(device, surface_format, width, height));
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("kroma-final-output-sampler"),
         mag_filter: wgpu::FilterMode::Linear,
@@ -51,20 +106,7 @@ pub(super) fn create_output_capture_state(
             },
         ],
     });
-    let output_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("kroma-final-output-bg"),
-        layout: &layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&final_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-        ],
-    });
+    let output_bind_group = canvas_bind_group(device, &layout, &final_view, &sampler);
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("kroma-final-output-pl"),
         bind_group_layouts: &[Some(&layout)],
@@ -111,6 +153,8 @@ pub(super) fn create_output_capture_state(
         _final_texture: final_texture,
         final_view,
         output_bind_group,
+        output_layout: layout,
+        output_sampler: sampler,
         blit_pipeline_layout: pipeline_layout,
         blit_fragment: frag_module,
         capture_texture,
@@ -357,22 +401,35 @@ fn globals_group(
     layout: &wgpu::BindGroupLayout,
     globals: &wgpu::Buffer,
     custom: Option<&wgpu::Buffer>,
+    cached: &mut Option<CachedGlobalsGroup>,
 ) -> wgpu::BindGroup {
-    let mut entries = vec![wgpu::BindGroupEntry {
-        binding: 0,
-        resource: globals.as_entire_binding(),
-    }];
-    if let Some(custom) = custom {
-        entries.push(wgpu::BindGroupEntry {
-            binding: 1,
-            resource: custom.as_entire_binding(),
-        });
+    if let Some(cached) = cached
+        && &cached.layout == layout
+        && cached.custom.as_ref() == custom
+    {
+        return cached.group.clone();
     }
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let entries = [
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: globals.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: custom.unwrap_or(globals).as_entire_binding(),
+        },
+    ];
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("kroma-monitor-uniforms"),
         layout,
-        entries: &entries,
-    })
+        entries: &entries[..if custom.is_some() { 2 } else { 1 }],
+    });
+    *cached = Some(CachedGlobalsGroup {
+        layout: layout.clone(),
+        custom: custom.cloned(),
+        group: group.clone(),
+    });
+    group
 }
 
 fn scene_pass(
@@ -438,26 +495,35 @@ fn capture_output(encoder: &mut wgpu::CommandEncoder, output: &OutputCaptureStat
 #[allow(clippy::too_many_arguments)]
 fn monitor_textures(
     gpu: &GpuContext,
-    sources: &mut MonitorShaderSources,
+    state: &mut MonitorShaderSources,
     defs: &[(usize, Arc<LiveShadePackage>, TextureDef)],
     layout: Option<&wgpu::BindGroupLayout>,
     shared: &[LoadedTexture],
-    shared_sources: &[Option<Box<dyn TextureSource>>],
+    shared_sources: &mut [Option<Box<dyn TextureSource>>],
     uniforms: &ShaderUniforms,
 ) -> Result<Option<wgpu::BindGroup>> {
     if defs.is_empty() {
         return Ok(None);
     }
-    if sources.is_empty() {
-        let mut created = Vec::new();
+    {
+        // Reuse the validated template for one output; other outputs need their
+        // own history. Keep successfully created sources if a later one fails.
         for (index, package, def) in defs {
-            if let Some(source) = textures::create_texture_source(package, def, Some(gpu))? {
-                created.push((*index, source));
+            if state.sources.iter().any(|(slot, _)| slot == index) {
+                continue;
+            }
+            let source = shared_sources
+                .get_mut(*index)
+                .and_then(Option::take)
+                .map(Some)
+                .map(Ok)
+                .unwrap_or_else(|| textures::create_texture_source(package, def, Some(gpu)))?;
+            if let Some(source) = source {
+                state.sources.push((*index, source));
             }
         }
-        *sources = created;
     }
-    for (_, source) in sources.iter_mut() {
+    for (_, source) in &mut state.sources {
         source.update_uniforms(uniforms);
         if let TextureUpdate::NewFrame { data, .. } =
             source.update(f64::from(uniforms.u_delta_time))?
@@ -466,19 +532,37 @@ fn monitor_textures(
         }
         source.gpu_render()?;
     }
-    let mut entries = Vec::new();
-    for (index, texture) in shared.iter().enumerate() {
-        let source = sources
-            .iter()
-            .find(|(i, _)| *i == index)
-            .map(|(_, s)| s.as_ref())
-            .or_else(|| shared_sources.get(index).and_then(|s| s.as_deref()));
-        let view = source
-            .and_then(|s| s.gpu_texture_view())
-            .unwrap_or(&texture.view);
-        let sampler = source
-            .and_then(|s| s.gpu_sampler())
-            .unwrap_or(&texture.sampler);
+    let layout = layout.context("Missing texture layout")?;
+    let resources = || {
+        shared.iter().enumerate().map(|(index, texture)| {
+            let source = state
+                .sources
+                .iter()
+                .find(|(i, _)| *i == index)
+                .map(|(_, s)| s.as_ref())
+                .or_else(|| shared_sources.get(index).and_then(|s| s.as_deref()));
+            (
+                source
+                    .and_then(|s| s.gpu_texture_view())
+                    .unwrap_or(&texture.view),
+                source
+                    .and_then(|s| s.gpu_sampler())
+                    .unwrap_or(&texture.sampler),
+            )
+        })
+    };
+    if let Some(cache) = &state.bindings
+        && cache.layout == *layout
+        && cache.resources.len() == shared.len()
+        && resources()
+            .zip(&cache.resources)
+            .all(|((v, s), (old_v, old_s))| v == old_v && s == old_s)
+    {
+        return Ok(Some(cache.group.clone()));
+    }
+    let resources: Vec<_> = resources().map(|(v, s)| (v.clone(), s.clone())).collect();
+    let mut entries = Vec::with_capacity(resources.len() * 2);
+    for (index, (view, sampler)) in resources.iter().enumerate() {
         entries.push(wgpu::BindGroupEntry {
             binding: (index * 2) as u32,
             resource: wgpu::BindingResource::TextureView(view),
@@ -488,13 +572,17 @@ fn monitor_textures(
             resource: wgpu::BindingResource::Sampler(sampler),
         });
     }
-    Ok(Some(gpu.device.create_bind_group(
-        &wgpu::BindGroupDescriptor {
-            label: Some("kroma-monitor-textures"),
-            layout: layout.context("Missing texture layout")?,
-            entries: &entries,
-        },
-    )))
+    let group = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("kroma-monitor-textures"),
+        layout,
+        entries: &entries,
+    });
+    state.bindings = Some(CachedTextureGroup {
+        layout: layout.clone(),
+        resources,
+        group: group.clone(),
+    });
+    Ok(Some(group))
 }
 
 /// Renders every monitor independently using its own attachments and uniforms.
@@ -503,6 +591,9 @@ pub(super) fn render_frame(
     capture_lighting: &[String],
     occluded: &[MonitorId],
 ) -> Result<Vec<(String, LightingFrame)>> {
+    state.prune_monitor_resources();
+    let share_scene = state.prepare_output_canvases()?;
+    state.upload_custom_uniforms();
     let device = state.gpu.device.as_ref().context("GPU not initialized")?;
     let queue = state
         .gpu
@@ -510,7 +601,6 @@ pub(super) fn render_frame(
         .as_ref()
         .context("GPU queue not initialized")?;
     device.poll(PollType::Poll)?;
-    state.upload_custom_uniforms();
     let size = state.surface_dimensions();
     let texture_gpu = GpuContext {
         device: Arc::clone(device),
@@ -536,7 +626,8 @@ pub(super) fn render_frame(
         .pipeline
         .as_ref()
         .context("Missing scene pipeline")?;
-    if let Some(transition) = &state.transition_state
+    if let Some(transition) = &mut state.transition_state
+        && transition.incoming_lane.custom_uniforms_dirty
         && let Some(custom) = &transition.incoming_lane.custom_uniform_buffer
     {
         queue.write_buffer(
@@ -544,7 +635,9 @@ pub(super) fn render_frame(
             0,
             bytemuck::cast_slice(&transition.incoming_lane.custom_uniform_data),
         );
+        transition.incoming_lane.custom_uniforms_dirty = false;
     }
+    let mut scene_rendered = false;
     for (name, target) in &mut state.gpu.targets {
         let frame_result = collect_lighting_frame(&mut target.output)?;
         if let Some(frame) = frame_result {
@@ -587,98 +680,106 @@ pub(super) fn render_frame(
             } else {
                 None
             };
-            target.shader_sources.retain(|id, _| {
-                *id == state.lane_id
-                    || state
-                        .transition_state
-                        .as_ref()
-                        .is_some_and(|t| *id == t.incoming_lane.lane_id)
-            });
-            let out_textures = monitor_textures(
-                &texture_gpu,
-                target.shader_sources.entry(state.lane_id).or_default(),
-                &state.shader_defs,
-                state.gpu.texture_bind_group_layout.as_ref(),
-                &state.textures,
-                &state.texture_sources,
-                &outgoing,
-            )?;
+            let draw_scene = !share_scene || !scene_rendered;
+            let capture = capture_lighting.contains(name) && !target.output.mapping_pending;
+            if !draw_scene && frame.is_none() && !capture {
+                return Ok(());
+            }
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("kroma-monitor-frame"),
             });
-            queue.write_buffer(&target.globals[0], 0, bytemuck::bytes_of(&outgoing));
-            let out_globals = globals_group(
-                device,
-                outgoing_layout,
-                &target.globals[0],
-                state.custom_uniform_buffer.as_ref(),
-            );
-            if let Some(transition) = &state.transition_state {
-                let scratch = target.transition.get_or_insert_with(|| {
-                    transition_targets(device, &transition.texture_layout, size)
-                });
-                scene_pass(
-                    &mut encoder,
-                    &scratch.prev_view,
-                    outgoing_pipeline,
-                    &out_globals,
-                    out_textures
-                        .as_ref()
-                        .or(state.gpu.texture_bind_group.as_ref()),
-                );
-                let lane = &transition.incoming_lane;
-                let in_textures = monitor_textures(
+            if draw_scene {
+                let out_textures = monitor_textures(
                     &texture_gpu,
-                    target.shader_sources.entry(lane.lane_id).or_default(),
-                    &lane.shader_defs,
-                    lane.texture_bind_group_layout.as_ref(),
-                    &lane.textures,
-                    &lane.texture_sources,
-                    &incoming,
+                    target.shader_sources.entry(state.lane_id).or_default(),
+                    &state.shader_defs,
+                    state.gpu.texture_bind_group_layout.as_ref(),
+                    &state.textures,
+                    &mut state.texture_sources,
+                    &outgoing,
                 )?;
-                queue.write_buffer(&target.globals[1], 0, bytemuck::bytes_of(&incoming));
-                let in_globals = globals_group(
-                    device,
-                    lane.bind_group_layout
-                        .as_ref()
-                        .context("Missing incoming uniform layout")?,
-                    &target.globals[1],
-                    lane.custom_uniform_buffer.as_ref(),
-                );
-                scene_pass(
-                    &mut encoder,
-                    &scratch.next_view,
-                    lane.pipeline
-                        .as_ref()
-                        .context("Missing incoming pipeline")?,
-                    &in_globals,
-                    in_textures.as_ref().or(lane.texture_bind_group.as_ref()),
-                );
-                queue.write_buffer(&target.globals[2], 0, bytemuck::bytes_of(&state.uniforms));
-                let composite_globals = globals_group(
+                queue.write_buffer(&target.globals[0], 0, bytemuck::bytes_of(&outgoing));
+                let out_globals = globals_group(
                     device,
                     outgoing_layout,
-                    &target.globals[2],
+                    &target.globals[0],
                     state.custom_uniform_buffer.as_ref(),
+                    &mut target.globals_groups[0],
                 );
-                scene_pass(
-                    &mut encoder,
-                    &target.output.final_view,
-                    &transition.pipeline,
-                    &composite_globals,
-                    Some(&scratch.bind_group),
-                );
-            } else {
-                target.transition = None;
-                scene_pass(
-                    &mut encoder,
-                    &target.output.final_view,
-                    outgoing_pipeline,
-                    &out_globals,
-                    out_textures
-                        .as_ref()
-                        .or(state.gpu.texture_bind_group.as_ref()),
-                );
+                if let Some(transition) = &mut state.transition_state {
+                    let scratch = if share_scene {
+                        state.gpu.shared_transition.get_or_insert_with(|| {
+                            transition_targets(device, &transition.texture_layout, size)
+                        })
+                    } else {
+                        target.transition.get_or_insert_with(|| {
+                            transition_targets(device, &transition.texture_layout, size)
+                        })
+                    };
+                    scene_pass(
+                        &mut encoder,
+                        &scratch.prev_view,
+                        outgoing_pipeline,
+                        &out_globals,
+                        out_textures
+                            .as_ref()
+                            .or(state.gpu.texture_bind_group.as_ref()),
+                    );
+                    let lane = &mut transition.incoming_lane;
+                    let in_textures = monitor_textures(
+                        &texture_gpu,
+                        target.shader_sources.entry(lane.lane_id).or_default(),
+                        &lane.shader_defs,
+                        lane.texture_bind_group_layout.as_ref(),
+                        &lane.textures,
+                        &mut lane.texture_sources,
+                        &incoming,
+                    )?;
+                    queue.write_buffer(&target.globals[1], 0, bytemuck::bytes_of(&incoming));
+                    let in_globals = globals_group(
+                        device,
+                        lane.bind_group_layout
+                            .as_ref()
+                            .context("Missing incoming uniform layout")?,
+                        &target.globals[1],
+                        lane.custom_uniform_buffer.as_ref(),
+                        &mut target.globals_groups[1],
+                    );
+                    scene_pass(
+                        &mut encoder,
+                        &scratch.next_view,
+                        lane.pipeline
+                            .as_ref()
+                            .context("Missing incoming pipeline")?,
+                        &in_globals,
+                        in_textures.as_ref().or(lane.texture_bind_group.as_ref()),
+                    );
+                    queue.write_buffer(&target.globals[2], 0, bytemuck::bytes_of(&state.uniforms));
+                    let composite_globals = globals_group(
+                        device,
+                        outgoing_layout,
+                        &target.globals[2],
+                        state.custom_uniform_buffer.as_ref(),
+                        &mut target.globals_groups[2],
+                    );
+                    scene_pass(
+                        &mut encoder,
+                        &target.output.final_view,
+                        &transition.pipeline,
+                        &composite_globals,
+                        Some(&scratch.bind_group),
+                    );
+                } else {
+                    scene_pass(
+                        &mut encoder,
+                        &target.output.final_view,
+                        outgoing_pipeline,
+                        &out_globals,
+                        out_textures
+                            .as_ref()
+                            .or(state.gpu.texture_bind_group.as_ref()),
+                    );
+                }
             }
             if let (Some(frame), Some(blit)) = (&frame, &target.blit) {
                 let view = frame.texture.create_view(&Default::default());
@@ -690,11 +791,11 @@ pub(super) fn render_frame(
                     "kroma-monitor-present",
                 );
             }
-            let capture = capture_lighting.contains(name) && !target.output.mapping_pending;
             if capture {
                 capture_output(&mut encoder, &target.output);
             }
             queue.submit([encoder.finish()]);
+            scene_rendered |= draw_scene;
             if let Some(frame) = frame {
                 frame.present();
             }

@@ -4,3 +4,5 @@
 perf-export
 /*.svg
 /perf.data*
+/perf-results/
+**/__pycache__/
