@@ -22,7 +22,7 @@ mod render_flow;
 mod shader_translation;
 
 use crate::{
-    config::GpuPower,
+    config::{GpuPower, VideoDecodeMode},
     fallback,
     textures::{self, GpuContext, TextureSource, TextureUpdate},
 };
@@ -313,6 +313,7 @@ pub(crate) struct GpuResources {
     device: Option<Arc<wgpu::Device>>,
     queue: Option<Arc<wgpu::Queue>>,
     video_queues: Option<Arc<crate::gpu_interop::VideoQueues>>,
+    video_decode: VideoDecodeMode,
     pipeline: Option<wgpu::RenderPipeline>,
     uniform_buffer: Option<wgpu::Buffer>,
     bind_group: Option<wgpu::BindGroup>,
@@ -699,6 +700,7 @@ impl Renderer {
     pub fn init_gpu_with_surface(
         &mut self,
         gpu_pref: &GpuPower,
+        video_decode: VideoDecodeMode,
         surface: &dyn SurfaceProvider,
     ) -> Result<()> {
         let _timing = crate::timing::scope("startup.gpu");
@@ -747,7 +749,7 @@ impl Renderer {
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         };
-        let hardware = if std::env::var("KROMA_VIDEO_DECODE").is_ok_and(|mode| mode == "software") {
+        let hardware = if video_decode == VideoDecodeMode::Software {
             None
         } else {
             match crate::gpu_interop::request_device(&adapter, &descriptor) {
@@ -769,6 +771,7 @@ impl Renderer {
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         self.gpu.video_queues = video_queues;
+        self.gpu.video_decode = video_decode;
         let format = SURFACE_FORMAT;
         // Create uniform buffer
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1271,6 +1274,7 @@ impl Renderer {
             device: Arc::clone(device),
             queue: Arc::clone(queue),
             video_queues: self.gpu.video_queues.clone(),
+            video_decode: self.gpu.video_decode,
             surface_format,
         };
 
@@ -2131,7 +2135,9 @@ mod monitor_tests {
             scale: 1.0,
         }]);
         let mut renderer = Renderer::new().unwrap();
-        if let Err(error) = renderer.init_gpu_with_surface(&GpuPower::Low, &provider) {
+        if let Err(error) =
+            renderer.init_gpu_with_surface(&GpuPower::Low, VideoDecodeMode::Auto, &provider)
+        {
             eprintln!("GPU unavailable: {error}");
             return;
         }
@@ -2197,7 +2203,7 @@ mod monitor_tests {
         let ids: Vec<_> = provider.0.iter().map(|monitor| monitor.id).collect();
         let mut renderer = Renderer::new().unwrap();
         renderer
-            .init_gpu_with_surface(&GpuPower::Low, &provider)
+            .init_gpu_with_surface(&GpuPower::Low, VideoDecodeMode::Auto, &provider)
             .unwrap();
         assert_eq!(renderer.surface_dimensions(), (width, height));
         assert_eq!(renderer.gpu.targets.len(), outputs as usize);
@@ -2418,7 +2424,9 @@ mod monitor_tests {
         let mut provider =
             OffscreenMonitors(vec![monitor(7, "left", 64), monitor(42, "right", 96)]);
         let mut renderer = Renderer::new().unwrap();
-        if let Err(error) = renderer.init_gpu_with_surface(&GpuPower::Low, &provider) {
+        if let Err(error) =
+            renderer.init_gpu_with_surface(&GpuPower::Low, VideoDecodeMode::Auto, &provider)
+        {
             if error.to_string().contains("No GPU adapter") {
                 eprintln!("Skipping GPU regression: no Vulkan adapter available");
                 return;
@@ -2698,7 +2706,9 @@ void main() {
     fn cached_bindings_follow_uniform_changes_and_buffer_replacement() {
         let provider = OffscreenMonitors(vec![monitor(1, "left", 64)]);
         let mut renderer = Renderer::new().unwrap();
-        if let Err(error) = renderer.init_gpu_with_surface(&GpuPower::Low, &provider) {
+        if let Err(error) =
+            renderer.init_gpu_with_surface(&GpuPower::Low, VideoDecodeMode::Auto, &provider)
+        {
             if error.to_string().contains("No GPU adapter found") {
                 return;
             }
