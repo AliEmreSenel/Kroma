@@ -65,6 +65,18 @@ python3 tools/profile.py --pid PID --duration 30
 See [performance measurement](docs/PERFORMANCE.md) for CPU stack capture, memory
 profiles, baseline comparisons, and optimization findings.
 
+### Portable media and previews
+
+```bash
+kroma media import wallpaper.mp4 --output wallpaper.shade
+kroma media render-preview shader.shade --embed
+kroma media preview wallpaper.shade --thumbnail poster.jpg --video hover.mp4
+```
+
+Imports preserve original media bytes and generate previews using Kroma's real
+renderer. See [media packages and previews](docs/MEDIA_LIBRARY.md) for shader
+feedback/lifecycle previews, video extraction, and chooser integration.
+
 ### Import a Shadertoy shader
 
 ```bash
