@@ -53,6 +53,18 @@ cargo run -p kroma-daemon
 # The daemon starts in a neutral fallback state until a `.shade` package is loaded.
 ```
 
+### Benchmarks and profiling
+
+```bash
+cargo bench -p kroma-shared --bench core
+cargo bench -p kroma-daemon --bench hot_paths
+cargo build -p kroma-daemon --profile profiling
+python3 tools/profile.py --pid PID --duration 30
+```
+
+See [performance measurement](docs/PERFORMANCE.md) for CPU stack capture, memory
+profiles, baseline comparisons, and optimization findings.
+
 ### Import a Shadertoy shader
 
 ```bash
@@ -187,9 +199,10 @@ enabled = true
 
 ### Multiple monitors
 
-The selected wallpaper renders separately on every enabled output. Each output
-stretches the same logical canvas to fill its surface. Outputs can be connected
-or removed while the daemon is running, including while paused.
+Each enabled output stretches the same logical canvas to fill its surface.
+Stateless scenes render once and share their pixels across outputs; shader
+textures with feedback/history keep independent rendering per output. Outputs
+can be connected or removed while the daemon is running, including while paused.
 
 `[[monitors]]` rules match exact connector names. Unlisted outputs are enabled;
 `enabled = false` prevents creating a wallpaper surface. Rules for disconnected

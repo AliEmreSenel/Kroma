@@ -8,7 +8,7 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    thread,
+    time::Duration,
 };
 
 use log::warn;
@@ -23,6 +23,7 @@ use log::info;
 use rustfft::{FftPlanner, num_complex::Complex};
 
 use super::{TextureFormat, TextureSource, TextureUpdate};
+use crate::worker::PeriodicWorker;
 
 /// Number of frequency bands in the spectrum.
 pub const SPECTRUM_BANDS: usize = 1024;
@@ -175,10 +176,15 @@ pub struct CpalAudioProvider {
     bands: usize,
     state: SharedAudioState,
     stream: Option<Stream>,
+    fft_worker: Option<PeriodicWorker>,
 }
 
 impl CpalAudioProvider {
     pub fn switch(&mut self, config: &AudioConfig) -> Result<()> {
+        // Release the previous capture and join its FFT thread before replacing
+        // shared state. This also handles partially initialized optional audio.
+        self.stream = None;
+        self.fft_worker = None;
         let source = &config.source;
         self.bands = config.fft_bands;
         let bands = self.bands;
@@ -210,98 +216,91 @@ impl CpalAudioProvider {
         let mut planner = FftPlanner::new();
         let fft = Arc::new(planner.plan_fft_forward(FFT_SIZE));
 
-        thread::Builder::new()
-            .name("kroma-audio-fft".into())
-            .spawn(move || {
-                let mut input = vec![Complex::new(0.0, 0.0); FFT_SIZE];
-                let mut scratch = vec![Complex::new(0.0, 0.0); FFT_SIZE];
+        let mut input = vec![Complex::new(0.0, 0.0); FFT_SIZE];
+        let mut scratch = vec![Complex::new(0.0, 0.0); fft.get_inplace_scratch_len()];
 
-                // Pre-compute Hann Window
-                let window: Vec<f32> = (0..FFT_SIZE)
-                    .map(|i| {
-                        0.5 * (1.0
-                            - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32).cos())
-                    })
-                    .collect();
-                let mut samples = vec![0.0f32; FFT_SIZE];
-                let mut spectrum = vec![0.0f32; bands];
+        // Pre-compute Hann Window
+        let window: Vec<f32> = (0..FFT_SIZE)
+            .map(|i| {
+                0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (FFT_SIZE - 1) as f32).cos())
+            })
+            .collect();
+        let mut samples = vec![0.0f32; FFT_SIZE];
+        let mut spectrum = vec![0.0f32; bands];
 
-                loop {
-                    // Update at ~60Hz
-                    std::thread::sleep(std::time::Duration::from_millis(16));
-
-                    // 1. Snapshot the Ring Buffer (Sliding Window)
-                    {
-                        let buf = buf_read.lock().unwrap();
-                        if buf.len() < FFT_SIZE {
-                            continue;
-                        } // Wait for buffer to fill
-                        for (dst, src) in samples.iter_mut().zip(buf.iter().copied()) {
-                            *dst = src;
-                        }
+        let fft_worker =
+            PeriodicWorker::spawn("kroma-audio-fft", Duration::from_millis(16), move || {
+                // 1. Snapshot the Ring Buffer (Sliding Window)
+                {
+                    let buf = buf_read.lock().unwrap();
+                    if buf.len() < FFT_SIZE {
+                        return;
+                    } // Wait for buffer to fill
+                    for (dst, src) in samples.iter_mut().zip(buf.iter().copied()) {
+                        *dst = src;
                     }
+                }
 
-                    // 2. Compute RMS Level
-                    let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
-                    let rms = (sum_sq / samples.len() as f32).sqrt();
-                    // Just max(0.0) here too if you want the level to exceed 1.0
-                    *lvl_write.lock().unwrap() = (rms * 4.0).max(0.0);
+                // 2. Compute RMS Level
+                let sum_sq: f32 = samples.iter().map(|s| s * s).sum();
+                let rms = (sum_sq / samples.len() as f32).sqrt();
+                // Just max(0.0) here too if you want the level to exceed 1.0
+                *lvl_write.lock().unwrap() = (rms * 4.0).max(0.0);
 
-                    // 3. Prepare FFT Input (Windowing)
-                    for (i, &sample) in samples.iter().enumerate() {
-                        input[i] = Complex::new(sample * window[i], 0.0);
+                // 3. Prepare FFT Input (Windowing)
+                for (i, &sample) in samples.iter().enumerate() {
+                    input[i] = Complex::new(sample * window[i], 0.0);
+                }
+
+                // 4. Execute FFT
+                fft.process_with_scratch(&mut input, &mut scratch);
+
+                // 5. Compute Magnitude Spectrum (Logarithmic Mapping)
+                spectrum.fill(0.0);
+                let half_size = FFT_SIZE / 2;
+
+                // --- NEW MATH ---
+                // Restrict mapping from 20 Hz (sub-bass) up to 16 kHz (practical high-end)
+                let min_freq = 20.0f32;
+                let max_freq = 16000.0f32;
+
+                let min_target_bin = (min_freq * FFT_SIZE as f32 / sample_rate).max(1.0);
+                let max_target_bin =
+                    (max_freq * FFT_SIZE as f32 / sample_rate).min(half_size as f32 - 1.0);
+
+                let min_log = min_target_bin.log2();
+                let max_log = max_target_bin.log2();
+                let log_range = max_log - min_log;
+
+                for (i, spectrum_val) in spectrum.iter_mut().enumerate().take(bands) {
+                    let start_log = min_log + (i as f32 / bands as f32) * log_range;
+                    let end_log = min_log + ((i + 1) as f32 / bands as f32) * log_range;
+
+                    let start_bin = (2.0f32.powf(start_log) as usize).min(half_size - 1);
+                    let mut end_bin = (2.0f32.powf(end_log) as usize).min(half_size);
+
+                    // Ensure end_bin is strictly greater than start_bin
+                    end_bin = end_bin.max(start_bin + 1);
+
+                    // Use fold to find the maximum magnitude in this band instead of averaging
+                    let max_mag = input[start_bin..end_bin]
+                        .iter()
+                        .map(|x| x.norm())
+                        .fold(0.0f32, f32::max);
+
+                    // Convert magnitude to normalized dB
+                    let db = 20.0 * (max_mag + 1e-6).log10();
+
+                    // No clamping on the top end, just prevent it from going negative
+                    *spectrum_val = ((db + 60.0) / 60.0).max(0.0);
+                }
+
+                {
+                    let mut dst = spec_write.lock().unwrap();
+                    if dst.len() != bands {
+                        dst.resize(bands, 0.0);
                     }
-
-                    // 4. Execute FFT
-                    fft.process_with_scratch(&mut input, &mut scratch);
-
-                    // 5. Compute Magnitude Spectrum (Logarithmic Mapping)
-                    spectrum.fill(0.0);
-                    let half_size = FFT_SIZE / 2;
-
-                    // --- NEW MATH ---
-                    // Restrict mapping from 20 Hz (sub-bass) up to 16 kHz (practical high-end)
-                    let min_freq = 20.0f32;
-                    let max_freq = 16000.0f32;
-
-                    let min_target_bin = (min_freq * FFT_SIZE as f32 / sample_rate).max(1.0);
-                    let max_target_bin =
-                        (max_freq * FFT_SIZE as f32 / sample_rate).min(half_size as f32 - 1.0);
-
-                    let min_log = min_target_bin.log2();
-                    let max_log = max_target_bin.log2();
-                    let log_range = max_log - min_log;
-
-                    for (i, spectrum_val) in spectrum.iter_mut().enumerate().take(bands) {
-                        let start_log = min_log + (i as f32 / bands as f32) * log_range;
-                        let end_log = min_log + ((i + 1) as f32 / bands as f32) * log_range;
-
-                        let start_bin = (2.0f32.powf(start_log) as usize).min(half_size - 1);
-                        let mut end_bin = (2.0f32.powf(end_log) as usize).min(half_size);
-
-                        // Ensure end_bin is strictly greater than start_bin
-                        end_bin = end_bin.max(start_bin + 1);
-
-                        // Use fold to find the maximum magnitude in this band instead of averaging
-                        let max_mag = input[start_bin..end_bin]
-                            .iter()
-                            .map(|x| x.norm())
-                            .fold(0.0f32, f32::max);
-
-                        // Convert magnitude to normalized dB
-                        let db = 20.0 * (max_mag + 1e-6).log10();
-
-                        // No clamping on the top end, just prevent it from going negative
-                        *spectrum_val = ((db + 60.0) / 60.0).max(0.0);
-                    }
-
-                    {
-                        let mut dst = spec_write.lock().unwrap();
-                        if dst.len() != bands {
-                            dst.resize(bands, 0.0);
-                        }
-                        dst.copy_from_slice(&spectrum);
-                    }
+                    dst.copy_from_slice(&spectrum);
                 }
             })?;
         // --- Input Stream ---
@@ -333,6 +332,9 @@ impl CpalAudioProvider {
 
         stream.play()?;
         self.stream = Some(stream);
+        // Until capture starts successfully this local owner stops the FFT
+        // worker on every error path, including unsupported sample formats.
+        self.fft_worker = Some(fft_worker);
         Ok(())
     }
 
@@ -342,6 +344,7 @@ impl CpalAudioProvider {
             bands: SPECTRUM_BANDS,
             state: SharedAudioState::new(SPECTRUM_BANDS),
             stream: None,
+            fft_worker: None,
         }
     }
 }

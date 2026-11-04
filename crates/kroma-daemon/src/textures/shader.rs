@@ -42,10 +42,8 @@ pub struct ShaderTexture {
     /// Sampler for the output texture.
     sampler: wgpu::Sampler,
 
-    /// Previous frame snapshot used by `input = "t-1"` channels.
-    prev_frame_texture: wgpu::Texture,
-    prev_frame_view: wgpu::TextureView,
-    prev_frame_sampler: wgpu::Sampler,
+    /// Allocated only when a direct channel samples input = "t-1".
+    history: Option<ShaderHistory>,
 
     /// Output dimensions.
     width: u32,
@@ -56,7 +54,6 @@ pub struct ShaderTexture {
 
     // -- Bind group 0: uniforms --
     uniform_buffer: wgpu::Buffer,
-    custom_uniform_buffer: wgpu::Buffer,
     bind_group_0: wgpu::BindGroup,
 
     // -- Bind group 1: sub-textures --
@@ -66,7 +63,12 @@ pub struct ShaderTexture {
     // -- Uniform state --
     uniforms: ShaderUniforms,
     clock_from_parent: bool,
-    custom_uniform_data: Vec<f32>,
+}
+
+struct ShaderHistory {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
 }
 
 /// A loaded sub-texture within a shader texture.
@@ -100,6 +102,7 @@ impl ShaderTexture {
         uniform_defs: &IndexMap<String, UniformDef>,
         optional: bool,
     ) -> Result<Self> {
+        let _timing = crate::timing::scope("texture.shader.load");
         let device = &gpu.device;
         let queue = &gpu.queue;
 
@@ -123,8 +126,18 @@ impl ShaderTexture {
         // -- Offscreen render target --
         let (render_texture, render_view, sample_view, sampler) =
             Self::create_render_target(device, width, height, output_format);
-        let (prev_frame_texture, _prev_frame_render_view, prev_frame_view, prev_frame_sampler) =
-            Self::create_render_target(device, width, height, output_format);
+        let history = sub_texture_defs
+            .values()
+            .any(|def| Self::is_t_minus_one_input(def))
+            .then(|| {
+                let (texture, _, view, sampler) =
+                    Self::create_render_target(device, width, height, output_format);
+                ShaderHistory {
+                    texture,
+                    view,
+                    sampler,
+                }
+            });
 
         // -- Uniform buffer (ShaderUniforms) --
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -163,6 +176,13 @@ impl ShaderTexture {
                 };
             }
         }
+
+        // Defaults are immutable for this texture's lifetime. Upload once.
+        queue.write_buffer(
+            &custom_uniform_buffer,
+            0,
+            bytemuck::cast_slice(&custom_uniform_data),
+        );
 
         // -- Bind group 0 (uniforms + custom uniforms) --
         let bgl0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -283,7 +303,10 @@ impl ShaderTexture {
             for (i, sub) in sub_textures.iter().enumerate() {
                 let (tex_b, samp_b) = tex_bg_entries_data[i];
                 let (view, sampler) = if sub.uses_prev_frame {
-                    (&prev_frame_view, &prev_frame_sampler)
+                    {
+                        let history = history.as_ref().expect("t-1 allocates history");
+                        (&history.view, &history.sampler)
+                    }
                 } else {
                     (&sub.gpu_view, &sub.gpu_sampler)
                 };
@@ -322,14 +345,11 @@ impl ShaderTexture {
                 render_view,
                 sample_view,
                 sampler,
-                prev_frame_texture,
-                prev_frame_view,
-                prev_frame_sampler,
+                history,
                 width,
                 height,
                 pipeline,
                 uniform_buffer,
-                custom_uniform_buffer,
                 bind_group_0,
                 sub_textures,
                 texture_bind_group: Some(tex_bg),
@@ -338,7 +358,6 @@ impl ShaderTexture {
                     u_resolution: [width as f32, height as f32],
                     ..ShaderUniforms::default()
                 },
-                custom_uniform_data,
             });
         } else {
             None
@@ -360,14 +379,11 @@ impl ShaderTexture {
             render_view,
             sample_view,
             sampler,
-            prev_frame_texture,
-            prev_frame_view,
-            prev_frame_sampler,
+            history,
             width,
             height,
             pipeline,
             uniform_buffer,
-            custom_uniform_buffer,
             bind_group_0,
             sub_textures,
             texture_bind_group,
@@ -376,7 +392,6 @@ impl ShaderTexture {
                 u_resolution: [width as f32, height as f32],
                 ..ShaderUniforms::default()
             },
-            custom_uniform_data,
         })
     }
 
@@ -641,8 +656,7 @@ impl ShaderTexture {
 
         let (render_texture, render_view, sample_view, sampler) =
             Self::create_render_target(device, width, height, output_format);
-        let (prev_frame_texture, _prev_frame_render_view, prev_frame_view, prev_frame_sampler) =
-            Self::create_render_target(device, width, height, output_format);
+        let history = None;
 
         // Minimal pass-through shader
         let placeholder_wgsl = r#"
@@ -755,20 +769,16 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             render_view,
             sample_view,
             sampler,
-            prev_frame_texture,
-            prev_frame_view,
-            prev_frame_sampler,
+            history,
             width,
             height,
             pipeline,
             uniform_buffer,
-            custom_uniform_buffer,
             bind_group_0,
             sub_textures: Vec::new(),
             texture_bind_group: None,
             clock_from_parent: false,
             uniforms: ShaderUniforms::default(),
-            custom_uniform_data: vec![0.0; MAX_CUSTOM_UNIFORMS],
         })
     }
 
@@ -816,13 +826,14 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             let samp_binding = (i * 2 + 1) as u32;
 
             if sub.uses_prev_frame {
+                let history = self.history.as_ref().expect("t-1 allocates history");
                 group_entries.push(wgpu::BindGroupEntry {
                     binding: tex_binding,
-                    resource: wgpu::BindingResource::TextureView(&self.prev_frame_view),
+                    resource: wgpu::BindingResource::TextureView(&history.view),
                 });
                 group_entries.push(wgpu::BindGroupEntry {
                     binding: samp_binding,
-                    resource: wgpu::BindingResource::Sampler(&self.prev_frame_sampler),
+                    resource: wgpu::BindingResource::Sampler(&history.sampler),
                 });
                 continue;
             }
@@ -1007,11 +1018,6 @@ impl TextureSource for ShaderTexture {
 
         // Upload uniforms
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniforms));
-        queue.write_buffer(
-            &self.custom_uniform_buffer,
-            0,
-            bytemuck::cast_slice(&self.custom_uniform_data),
-        );
 
         // Encode render pass
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1049,26 +1055,27 @@ impl TextureSource for ShaderTexture {
             pass.draw(0..3, 0..1);
         }
 
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.render_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.prev_frame_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-
+        if let Some(history) = &self.history {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.render_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &history.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
         queue.submit(std::iter::once(encoder.finish()));
 
         Ok(())

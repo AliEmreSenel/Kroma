@@ -103,6 +103,11 @@ pub enum TextureUpdate {
 /// The renderer simply calls [`update`](TextureSource::update) each frame
 /// and uploads any new pixel data to the GPU.
 pub trait TextureSource {
+    /// Nominal video frame rate from the already-open decoder, if available.
+    fn frame_rate(&self) -> Option<f64> {
+        None
+    }
+
     /// Advance the texture state by `dt` seconds.
     ///
     /// Returns [`TextureUpdate::NewFrame`] when the GPU texture should be

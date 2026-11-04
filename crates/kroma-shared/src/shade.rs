@@ -492,7 +492,10 @@ fn decode_with_codec(
     }
 }
 
-fn decode_chunk_verified(bytes: &[u8], chunk: &ChunkDescriptor) -> Result<Vec<u8>> {
+fn decode_chunk_verified<'a>(
+    bytes: &'a [u8],
+    chunk: &ChunkDescriptor,
+) -> Result<std::borrow::Cow<'a, [u8]>> {
     let start = chunk.data_offset as usize;
     let end = start + chunk.compressed_size as usize;
     let chunk_bytes = &bytes[start..end];
@@ -504,7 +507,14 @@ fn decode_chunk_verified(bytes: &[u8], chunk: &ChunkDescriptor) -> Result<Vec<u8
         anyhow::bail!("Chunk checksum mismatch: data corruption detected");
     }
 
-    decode_with_codec(chunk.codec, chunk_bytes, chunk.uncompressed_size as usize)
+    if chunk.codec == CompressionCodec::None {
+        // Embedded video is normally stored uncompressed. Borrow the verified
+        // mmap slice so small AVIO reads don't allocate/copy an entire chunk.
+        Ok(std::borrow::Cow::Borrowed(chunk_bytes))
+    } else {
+        decode_with_codec(chunk.codec, chunk_bytes, chunk.uncompressed_size as usize)
+            .map(std::borrow::Cow::Owned)
+    }
 }
 
 fn auto_select_codec(data: &[u8]) -> Result<(CompressionCodec, i16, Vec<u8>)> {
@@ -1103,7 +1113,7 @@ impl LiveShadePackage {
         let raw = &bytes[start..end];
 
         if decoded {
-            Ok(Some(decode_chunk_verified(bytes, chunk)?))
+            Ok(Some(decode_chunk_verified(bytes, chunk)?.into_owned()))
         } else {
             Ok(Some(raw.to_vec()))
         }
@@ -1454,6 +1464,43 @@ mod tests {
     }
 
     #[test]
+    fn stream_reads_across_chunks_and_eof_for_all_codecs() {
+        let tmp = tempdir().unwrap();
+        let payload: Vec<u8> = (0..DEFAULT_CHUNK_SIZE as usize * 2 + 17)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        for policy in [
+            CompressionPolicy::None,
+            CompressionPolicy::Lz4,
+            CompressionPolicy::Zstd { level: 3 },
+        ] {
+            let path = tmp.path().join("stream.shade");
+            let mut package = LiveShadePackage::new_empty(test_config());
+            package.add_asset("assets/video.bin".into(), payload.clone());
+            package.set_entry_compression("assets/video.bin", policy);
+            package.save(&path).unwrap();
+            let loaded = LiveShadePackage::load(&path).unwrap();
+            let stream = loaded.open_asset_stream("assets/video.bin").unwrap();
+            drop(loaded); // The stream must retain its mapping independently.
+            let offset = DEFAULT_CHUNK_SIZE as usize - 7;
+            assert_eq!(
+                stream.read_range(offset as u64, 31).unwrap(),
+                payload[offset..offset + 31]
+            );
+            assert_eq!(
+                stream.read_range(payload.len() as u64 - 9, 64).unwrap(),
+                payload[payload.len() - 9..]
+            );
+            assert!(
+                stream
+                    .read_range(payload.len() as u64, 64)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn deterministic_save_produces_identical_bytes() {
         let tmp = tempdir().expect("tempdir");
         let a = tmp.path().join("a.shade");
@@ -1476,31 +1523,38 @@ mod tests {
 
     #[test]
     fn chunk_checksum_corruption_is_detected_on_stream_read() {
-        let tmp = tempdir().expect("tempdir");
-        let path = tmp.path().join("corrupt.shade");
+        for policy in [
+            CompressionPolicy::None,
+            CompressionPolicy::Lz4,
+            CompressionPolicy::Zstd { level: 3 },
+        ] {
+            let tmp = tempdir().expect("tempdir");
+            let path = tmp.path().join("corrupt.shade");
 
-        let mut pkg = LiveShadePackage::new_empty(test_config());
-        pkg.add_asset("assets/corrupt.bin".into(), vec![42u8; 128 * 1024]);
-        pkg.save(&path).expect("save");
+            let mut pkg = LiveShadePackage::new_empty(test_config());
+            pkg.add_asset("assets/corrupt.bin".into(), vec![42u8; 128 * 1024]);
+            pkg.set_entry_compression("assets/corrupt.bin", policy);
+            pkg.save(&path).expect("save");
 
-        let mut bytes = std::fs::read(&path).expect("read original");
-        let header = parse_header(&bytes).expect("parse header");
-        let entries = parse_index(&bytes, &header).expect("parse index");
-        let entry = entries
-            .iter()
-            .find(|e| e.path == "assets/corrupt.bin")
-            .expect("asset entry");
-        let chunks = parse_chunk_table(&bytes, entry).expect("chunk table");
-        let first = chunks.first().expect("first chunk");
-        bytes[first.data_offset as usize] ^= 0xFF;
-        std::fs::write(&path, &bytes).expect("write corrupted");
+            let mut bytes = std::fs::read(&path).expect("read original");
+            let header = parse_header(&bytes).expect("parse header");
+            let entries = parse_index(&bytes, &header).expect("parse index");
+            let entry = entries
+                .iter()
+                .find(|e| e.path == "assets/corrupt.bin")
+                .expect("asset entry");
+            let chunks = parse_chunk_table(&bytes, entry).expect("chunk table");
+            let first = chunks.first().expect("first chunk");
+            bytes[first.data_offset as usize] ^= 0xFF;
+            std::fs::write(&path, &bytes).expect("write corrupted");
 
-        let loaded = LiveShadePackage::load(&path).expect("load");
-        let stream = loaded
-            .open_asset_stream("assets/corrupt.bin")
-            .expect("stream");
-        let err = stream.read_range(0, 1024).expect_err("must fail checksum");
-        assert!(err.to_string().contains("checksum"));
+            let loaded = LiveShadePackage::load(&path).expect("load");
+            let stream = loaded
+                .open_asset_stream("assets/corrupt.bin")
+                .expect("stream");
+            let err = stream.read_range(0, 1024).expect_err("must fail checksum");
+            assert!(err.to_string().contains("checksum"));
+        }
     }
 
     #[test]

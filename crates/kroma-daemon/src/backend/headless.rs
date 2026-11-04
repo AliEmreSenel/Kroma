@@ -21,14 +21,16 @@ impl HeadlessSurfaceProvider {
         }
     }
 
-    pub fn create_virtual_monitors(&mut self) {
+    /// Create the default 1080p output, or an explicitly sized profiling output.
+    pub fn create_virtual_monitors(&mut self) -> Result<()> {
+        let (width, height) = parse_size(std::env::var("KROMA_HEADLESS_SIZE").ok().as_deref())?;
         self.monitors.clear();
         self.virtual_surfaces.clear();
         let default_monitor = MonitorConfig {
             id: MonitorId(0),
             name: "headless-virtual-0".into(),
-            width: 1920,
-            height: 1080,
+            width,
+            height,
             x: 0,
             y: 0,
             scale: 1.0,
@@ -40,14 +42,14 @@ impl HeadlessSurfaceProvider {
         );
         self.monitors.push(default_monitor);
 
-        info!("Created headless virtual monitor: 1920x1080");
+        info!("Created headless virtual monitor: {width}x{height}");
+        Ok(())
     }
 }
 
 impl SurfaceProvider for HeadlessSurfaceProvider {
     fn connect(&mut self) -> Result<()> {
-        self.create_virtual_monitors();
-        Ok(())
+        self.create_virtual_monitors()
     }
 
     fn is_headless(&self) -> bool {
@@ -91,5 +93,35 @@ impl SurfaceProvider for HeadlessSurfaceProvider {
 
     fn dispatch(&mut self) -> Result<()> {
         Ok(())
+    }
+}
+
+/// Only the offscreen backend reads this override; native outputs use their real size.
+fn parse_size(size: Option<&str>) -> Result<(u32, u32)> {
+    let Some(size) = size else {
+        return Ok((1920, 1080));
+    };
+    let (width, height) = size
+        .split_once('x')
+        .ok_or_else(|| anyhow!("KROMA_HEADLESS_SIZE must be WIDTHxHEIGHT"))?;
+    let width: u32 = width.parse()?;
+    let height: u32 = height.parse()?;
+    anyhow::ensure!(
+        width > 0 && height > 0,
+        "Headless dimensions must be positive"
+    );
+    Ok((width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn explicit_headless_sizes_validate_and_default_to_1080p() {
+        assert_eq!(parse_size(None).unwrap(), (1920, 1080));
+        assert_eq!(parse_size(Some("3840x2160")).unwrap(), (3840, 2160));
+        for input in ["0x2160", "1920x0", "-1x1080", "4K", "1x2x3"] {
+            assert!(parse_size(Some(input)).is_err());
+        }
     }
 }

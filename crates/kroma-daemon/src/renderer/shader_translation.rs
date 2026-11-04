@@ -1,10 +1,75 @@
 use anyhow::Result;
+use std::{
+    collections::VecDeque,
+    sync::{LazyLock, Mutex},
+};
+
+const CACHE_BYTES: usize = 2 * 1024 * 1024;
+const CACHE_ENTRIES: usize = 16;
+
+#[derive(Default)]
+struct ShaderCache {
+    entries: VecDeque<(String, String)>,
+    bytes: usize,
+}
+
+impl ShaderCache {
+    fn get(&mut self, source: &str) -> Option<String> {
+        let index = self.entries.iter().position(|(key, _)| key == source)?;
+        let entry = self.entries.remove(index)?;
+        let output = entry.1.clone();
+        self.entries.push_back(entry);
+        Some(output)
+    }
+
+    fn insert(&mut self, source: &str, output: &str) {
+        let size = source.len() + output.len();
+        if size > CACHE_BYTES {
+            return;
+        }
+        if let Some(index) = self.entries.iter().position(|(key, _)| key == source) {
+            let old = self.entries.remove(index).expect("entry exists");
+            self.bytes -= old.0.len() + old.1.len();
+        }
+        while self.bytes + size > CACHE_BYTES || self.entries.len() >= CACHE_ENTRIES {
+            let old = self
+                .entries
+                .pop_front()
+                .expect("cache contains evictable entries");
+            self.bytes -= old.0.len() + old.1.len();
+        }
+        self.entries.push_back((source.into(), output.into()));
+        self.bytes += size;
+    }
+}
+
+static SHADERS: LazyLock<Mutex<ShaderCache>> = LazyLock::new(|| Mutex::new(ShaderCache::default()));
 
 /// Translates fragment GLSL into WGSL expected by the renderer pipeline.
 ///
 /// The translator injects the custom uniform storage declaration when missing,
 /// compiles GLSL with shaderc, then validates and writes WGSL via naga.
 pub(super) fn glsl_to_wgsl(glsl_source: &str) -> Result<String> {
+    if let Some(output) = SHADERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(glsl_source)
+    {
+        let _timing = crate::timing::scope("shader.cache_hit");
+        return Ok(output);
+    }
+    // The complete source is the key, so hot reload cannot reuse stale code.
+    // Do not hold the cache lock while invoking native compilers or cache failures.
+    let output = compile_glsl(glsl_source)?;
+    SHADERS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(glsl_source, &output);
+    Ok(output)
+}
+
+fn compile_glsl(glsl_source: &str) -> Result<String> {
+    let _timing = crate::timing::scope("shader.compile");
     use naga::back::wgsl;
     use naga::valid::{Capabilities, ValidationFlags, Validator};
 
@@ -123,5 +188,41 @@ fn futures_lite_block_on<F: std::future::Future>(f: F) -> F::Output {
                 std::hint::spin_loop();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_is_bounded_and_repeated_sources_replace_their_accounting() {
+        let mut cache = ShaderCache::default();
+        cache.insert("a", "first");
+        cache.insert("a", "replacement");
+        assert_eq!(cache.bytes, "areplacement".len());
+        assert_eq!(cache.get("a").as_deref(), Some("replacement"));
+        for i in 0..CACHE_ENTRIES + 2 {
+            cache.insert(&format!("source-{i}"), "wgsl");
+        }
+        assert_eq!(cache.entries.len(), CACHE_ENTRIES);
+        assert!(cache.get("source-0").is_none());
+        cache.insert("large", &"x".repeat(CACHE_BYTES));
+        assert!(cache.get("large").is_none());
+        assert!(cache.bytes <= CACHE_BYTES);
+    }
+
+    #[test]
+    fn hot_reload_changes_recompile_and_errors_do_not_poison_the_cache() {
+        let source =
+            "#version 450\nlayout(location=0) out vec4 color;\nvoid main(){color=vec4(0.25);}";
+        let first = glsl_to_wgsl(source).unwrap();
+        assert_eq!(first, glsl_to_wgsl(source).unwrap());
+        assert_ne!(
+            first,
+            glsl_to_wgsl(&source.replace("0.25", "0.75")).unwrap()
+        );
+        assert!(glsl_to_wgsl("#version 450\ninvalid shader").is_err());
+        assert_eq!(first, glsl_to_wgsl(source).unwrap());
     }
 }

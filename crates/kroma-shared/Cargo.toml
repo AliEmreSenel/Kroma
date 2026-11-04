@@ -24,3 +24,8 @@ raw-window-handle.workspace = true
 [dev-dependencies]
 serde_json.workspace = true
 tempfile = "3"
+criterion.workspace = true
+
+[[bench]]
+name = "core"
+harness = false

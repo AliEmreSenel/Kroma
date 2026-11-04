@@ -6,7 +6,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, TryRecvError, TrySendError};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -34,6 +34,7 @@ pub struct FfmpegVideoDecoder {
     scaler: ffmpeg_next::software::scaling::Context,
     width: u32,
     height: u32,
+    decoded_frame: frame::Video,
     rgba_frame: frame::Video,
     frame_buffer: Vec<u8>,
     time_base: f64,
@@ -43,6 +44,7 @@ pub struct FfmpegVideoDecoder {
 
 impl FfmpegVideoDecoder {
     fn from_input(input: ffmpeg_io::InputContext, source_label: &str) -> Result<Self> {
+        let _timing = crate::timing::scope("video.decoder.create");
         let video_stream = input
             .as_input()
             .streams()
@@ -67,7 +69,12 @@ impl FfmpegVideoDecoder {
         let height = decoder.height();
 
         let frame_rate = video_stream.rate();
-        let avg_frame_interval = frame_rate.denominator() as f64 / frame_rate.numerator() as f64;
+        let interval = frame_rate.denominator() as f64 / frame_rate.numerator() as f64;
+        let avg_frame_interval = if interval.is_finite() && interval > 0.0 {
+            interval
+        } else {
+            1.0 / 30.0
+        };
 
         let scaler = scaling::Context::get(
             decoder.format(),
@@ -91,6 +98,7 @@ impl FfmpegVideoDecoder {
             scaler,
             width,
             height,
+            decoded_frame: frame::Video::empty(),
             rgba_frame: frame::Video::empty(),
             frame_buffer: Vec::with_capacity((width * height * 4) as usize),
             time_base,
@@ -106,112 +114,43 @@ impl FfmpegVideoDecoder {
         Self::from_input(input, source_label)
     }
 
-    /// Try to decode one video frame from the input stream into `out`.
-    fn decode_next_packet_into(&mut self, out: &mut Vec<u8>) -> Option<()> {
-        loop {
-            // Try to receive a decoded frame first
-            let mut decoded = frame::Video::empty();
-            if self.decoder.receive_frame(&mut decoded).is_ok() {
-                return self.scale_frame_into(&decoded, out);
-            }
-
-            // Send next packet to the decoder
-            let mut found_video = false;
-            for (stream, packet) in self.input.as_input_mut().packets() {
-                if stream.index() == self.video_stream_index {
-                    if self.decoder.send_packet(&packet).is_err() {
-                        continue;
-                    }
-                    found_video = true;
-                    break;
-                }
-            }
-
-            if !found_video {
-                // End of stream — flush decoder
-                let _ = self.decoder.send_eof();
-                let mut decoded = frame::Video::empty();
-                if self.decoder.receive_frame(&mut decoded).is_ok() {
-                    return self.scale_frame_into(&decoded, out);
-                }
-                return None;
-            }
-        }
-    }
-
-    /// Scale a decoded frame to the reusable FFmpeg RGBA frame.
-    fn scale_frame_to_rgba(&mut self, decoded: &frame::Video) -> Option<()> {
-        // Calculate variable frame duration
-        // decoded.duration() returns duration in stream time_base units
-        /*let duration = decoded.duration();
-        if duration > 0 {
-            self.frame_interval = duration as f64 * self.time_base;
-        } else */
-        {
-            // Fallback to average if individual frame duration is missing
-            self.frame_interval = self.avg_frame_interval;
-        }
-
-        // Reuse the same FFmpeg RGBA output frame. Creating a fresh Video frame
-        // here forces FFmpeg to allocate an output buffer every decoded frame.
-        self.scaler.run(decoded, &mut self.rgba_frame).ok()?;
-        Some(())
-    }
-
-    /// Scale a decoded frame to RGBA and store it in `out`.
-    fn scale_frame_into(&mut self, decoded: &frame::Video, out: &mut Vec<u8>) -> Option<()> {
-        self.scale_frame_to_rgba(decoded)?;
-
-        let data = self.rgba_frame.data(0);
-        let stride = self.rgba_frame.stride(0);
-        let w = self.width as usize;
-        let h = self.height as usize;
-        let row_bytes = w * 4;
-
-        out.resize(w * h * 4, 0);
-        for y in 0..h {
-            let src_start = y * stride;
-            let dst_start = y * row_bytes;
-            if src_start + row_bytes <= data.len() && dst_start + row_bytes <= out.len() {
-                out[dst_start..dst_start + row_bytes]
-                    .copy_from_slice(&data[src_start..src_start + row_bytes]);
-            }
-        }
-        Some(())
-    }
-
-    /// Decode one frame into the reusable FFmpeg RGBA frame without copying to Rust memory.
+    /// Receive into a reusable native frame, then scale into reusable RGBA storage.
     fn next_frame_rgba(&mut self) -> Option<()> {
         loop {
-            let mut decoded = frame::Video::empty();
-            if self.decoder.receive_frame(&mut decoded).is_ok() {
-                return self.scale_frame_to_rgba(&decoded);
+            if self.decoder.receive_frame(&mut self.decoded_frame).is_ok() {
+                break;
             }
-
             let mut found_video = false;
             for (stream, packet) in self.input.as_input_mut().packets() {
-                if stream.index() == self.video_stream_index {
-                    if self.decoder.send_packet(&packet).is_err() {
-                        continue;
-                    }
+                if stream.index() == self.video_stream_index
+                    && self.decoder.send_packet(&packet).is_ok()
+                {
                     found_video = true;
                     break;
                 }
             }
-
             if !found_video {
                 let _ = self.decoder.send_eof();
-                let mut decoded = frame::Video::empty();
-                if self.decoder.receive_frame(&mut decoded).is_ok() {
-                    return self.scale_frame_to_rgba(&decoded);
-                }
-                return None;
+                self.decoder.receive_frame(&mut self.decoded_frame).ok()?;
+                break;
             }
         }
+        self.frame_interval = self.avg_frame_interval;
+        self.scaler
+            .run(&self.decoded_frame, &mut self.rgba_frame)
+            .ok()?;
+        Some(())
     }
 
     fn next_frame_into(&mut self, out: &mut Vec<u8>) -> Option<()> {
-        self.decode_next_packet_into(out)
+        self.next_frame_rgba()?;
+        copy_rgba_rows(
+            self.rgba_frame.data(0),
+            self.rgba_frame.stride(0),
+            self.width as usize,
+            self.height as usize,
+            out,
+        )
     }
 
     fn upload_current_rgba_to(&self, queue: &wgpu::Queue, texture: &wgpu::Texture) {
@@ -239,6 +178,9 @@ impl FfmpegVideoDecoder {
                 depth_or_array_layers: 1,
             },
         );
+        // Flush uploads even if rendering is paused or this source is replaced
+        // before the next draw. Otherwise repeated paused loads retain staging.
+        queue.submit(std::iter::empty());
     }
 
     pub fn frame_interval(&self) -> f64 {
@@ -246,17 +188,32 @@ impl FfmpegVideoDecoder {
     }
 }
 
-/// Read the nominal frame rate for a video texture, including embedded assets.
-pub fn source_frame_rate(pkg: &kroma_shared::shade::LiveShadePackage, source: &str) -> Option<f64> {
-    let (video, _) = super::resolve_video_source_with_origin(pkg, source).ok()?;
-    let decoder = match video {
-        super::VideoSource::ExternalPath(path) => FfmpegVideoDecoder::load(&path).ok()?,
-        super::VideoSource::EmbeddedStream(stream) => {
-            FfmpegVideoDecoder::load_from_stream(stream, source).ok()?
+/// Copy only pixel bytes, retaining initialized recycled storage between frames.
+fn copy_rgba_rows(
+    data: &[u8],
+    stride: usize,
+    width: usize,
+    height: usize,
+    out: &mut Vec<u8>,
+) -> Option<()> {
+    let row_bytes = width.checked_mul(4)?;
+    let len = row_bytes.checked_mul(height)?;
+    if width == 0
+        || height == 0
+        || stride < row_bytes
+        || data.len() < (height - 1).checked_mul(stride)?.checked_add(row_bytes)?
+    {
+        return None;
+    }
+    out.resize(len, 0);
+    if stride == row_bytes {
+        out.copy_from_slice(&data[..len]);
+    } else {
+        for (dst, src) in out.chunks_exact_mut(row_bytes).zip(data.chunks(stride)) {
+            dst.copy_from_slice(&src[..row_bytes]);
         }
-    };
-    let rate = 1.0 / decoder.avg_frame_interval;
-    (rate.is_finite() && rate > 0.0).then_some(rate)
+    }
+    Some(())
 }
 
 impl VideoDecoder for FfmpegVideoDecoder {
@@ -264,6 +221,7 @@ impl VideoDecoder for FfmpegVideoDecoder {
     where
         Self: Sized,
     {
+        let _timing = crate::timing::scope("video.external.open");
         ffmpeg_next::init().map_err(|e| anyhow::anyhow!("Failed to initialize FFmpeg: {}", e))?;
 
         let input = ffmpeg_next::format::input(&path)
@@ -314,6 +272,7 @@ struct GpuVideoTarget {
 }
 
 struct VideoWorkerReady {
+    frame_interval: f64,
     width: u32,
     height: u32,
     gpu_target: Option<GpuVideoTarget>,
@@ -404,8 +363,7 @@ impl VideoTexture {
         }
     }
 
-    fn recycle_buffer_to(tx: &mpsc::SyncSender<Vec<u8>>, mut data: Vec<u8>) {
-        data.clear();
+    fn recycle_buffer_to(tx: &mpsc::SyncSender<Vec<u8>>, data: Vec<u8>) {
         let _ = tx.try_send(data);
     }
 
@@ -425,7 +383,6 @@ impl VideoTexture {
                     if data.capacity() < required_len {
                         data = Vec::with_capacity(required_len);
                     }
-                    data.clear();
                     return Some(data);
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -487,6 +444,7 @@ impl VideoTexture {
                     .map(|(gpu, target)| (Arc::clone(&gpu.queue), Arc::clone(&target._texture)));
 
                 let ready = VideoWorkerReady {
+                    frame_interval: decoder.frame_interval(),
                     width: w,
                     height: h,
                     gpu_target,
@@ -496,10 +454,13 @@ impl VideoTexture {
                 }
 
                 let frame_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
-                for _ in 0..2 {
-                    let _ = worker_recycle_tx.try_send(Vec::with_capacity(frame_len));
+                if gpu_upload.is_none() {
+                    for _ in 0..2 {
+                        let _ = worker_recycle_tx.try_send(Vec::with_capacity(frame_len));
+                    }
                 }
 
+                let first_frame_timing = crate::timing::scope("video.first_frame");
                 // Prime the first frame. In GPU-managed mode this uploads straight
                 // from FFmpeg's RGBA frame into the wgpu texture and sends only
                 // metadata to the renderer; no per-frame Vec crosses threads.
@@ -550,6 +511,7 @@ impl VideoTexture {
                     }
                 }
 
+                drop(first_frame_timing);
                 loop {
                     match stop_rx.try_recv() {
                         Ok(()) | Err(TryRecvError::Disconnected) => return,
@@ -561,8 +523,7 @@ impl VideoTexture {
 
                     if let Some((queue, texture)) = gpu_upload.as_ref() {
                         if Self::decode_with_looping_rgba(&mut decoder, looping).is_none() {
-                            std::thread::sleep(Duration::from_millis(5));
-                            continue;
+                            return;
                         }
                         decoder.upload_current_rgba_to(queue, texture);
                         let raw = decoder.frame_interval();
@@ -571,14 +532,16 @@ impl VideoTexture {
                         } else {
                             1.0 / 30.0
                         };
-                        match frame_tx.try_send(DecodedVideoFrame {
-                            data: None,
-                            width: fw,
-                            height: fh,
-                            frame_interval,
-                        }) {
-                            Ok(()) | Err(TrySendError::Full(_)) => {}
-                            Err(TrySendError::Disconnected(_)) => return,
+                        if frame_tx
+                            .send(DecodedVideoFrame {
+                                data: None,
+                                width: fw,
+                                height: fh,
+                                frame_interval,
+                            })
+                            .is_err()
+                        {
+                            return;
                         }
                     } else {
                         let frame_len = (fw as usize).saturating_mul(fh as usize).saturating_mul(4);
@@ -591,8 +554,7 @@ impl VideoTexture {
                             .is_none()
                         {
                             Self::recycle_buffer_to(&worker_recycle_tx, data);
-                            std::thread::sleep(Duration::from_millis(5));
-                            continue;
+                            return;
                         }
 
                         let raw = decoder.frame_interval();
@@ -670,7 +632,7 @@ impl VideoTexture {
         self.last_height = ready.height;
         self.gpu_target = ready.gpu_target;
         self.gpu_rebind_pending = self.gpu_target.is_some();
-        self.frame_interval = 1.0 / 30.0;
+        self.frame_interval = ready.frame_interval;
         self.pending_frame = None;
         info!(
             "VideoTexture reloaded from disk: {} ({}x{})",
@@ -694,11 +656,10 @@ impl VideoTexture {
         optional: bool,
         gpu: Option<&GpuContext>,
     ) -> Result<Self> {
-        // Keep video uploads on the render thread. Uploading directly from the
-        // decode worker can enqueue unbounded driver-side staging work that is
-        // not visible in process RSS/heap profiles.
-        let _ = gpu;
-        let gpu: Option<GpuContext> = None;
+        // The bounded metadata channel applies backpressure to GPU uploads too.
+        // Paused rendering can queue at most two frames, rather than accumulating
+        // unbounded driver staging work. This avoids a full RGBA copy through Vec.
+        let gpu = gpu.cloned();
         match source {
             VideoSource::ExternalPath(path) => {
                 let hot_reload = if hot_reload {
@@ -748,7 +709,7 @@ impl VideoTexture {
                         Ok(Self {
                             worker: Some(worker),
                             looping,
-                            frame_interval: 1.0 / 30.0,
+                            frame_interval: ready.frame_interval,
                             pending_frame,
                             last_width: ready.width,
                             last_height: ready.height,
@@ -799,7 +760,7 @@ impl VideoTexture {
                         Ok(Self {
                             worker: Some(worker),
                             looping,
-                            frame_interval: 1.0 / 30.0,
+                            frame_interval: ready.frame_interval,
                             pending_frame: None,
                             last_width: ready.width,
                             last_height: ready.height,
@@ -841,6 +802,10 @@ impl Drop for VideoTexture {
 }
 
 impl TextureSource for VideoTexture {
+    fn frame_rate(&self) -> Option<f64> {
+        self.worker.as_ref().map(|_| 1.0 / self.frame_interval)
+    }
+
     fn update(&mut self, dt: f64) -> Result<TextureUpdate> {
         if let Some(frame) = self.pending_frame.take() {
             self.last_width = frame.width;
@@ -943,5 +908,184 @@ impl TextureSource for VideoTexture {
 
     fn gpu_sampler(&self) -> Option<&wgpu::Sampler> {
         self.gpu_target.as_ref().map(|target| &target.sampler)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "manual real-media decode profiling; set KROMA_VIDEO_PROFILE_PATH"]
+    fn profile_decode() {
+        let path = std::env::var("KROMA_VIDEO_PROFILE_PATH").expect("real media path");
+        let count: usize = std::env::var("KROMA_VIDEO_PROFILE_FRAMES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120);
+        assert!(count > 0);
+        let start = std::time::Instant::now();
+        let mut decoder = FfmpegVideoDecoder::load(Path::new(&path)).unwrap();
+        let open_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let mut output = Vec::new();
+        let start = std::time::Instant::now();
+        decoder.next_frame_into(&mut output).unwrap();
+        let first_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let hash = |data: &[u8]| {
+            data.iter().fold(0xcbf29ce484222325u64, |h, b| {
+                (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+            })
+        };
+        let first_hash = hash(&output);
+        let start = std::time::Instant::now();
+        for _ in 0..count {
+            VideoTexture::decode_with_looping_into(&mut decoder, true, &mut output).unwrap();
+        }
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "VIDEO_PROFILE {}",
+            serde_json::json!({"path": path, "width": decoder.width, "height": decoder.height,
+            "open_ms": open_ms, "first_frame_ms": first_ms, "frames": count, "decode_ms": elapsed,
+            "first_frame_hash": format!("{first_hash:016x}"), "last_frame_hash": format!("{:016x}", hash(&output))})
+        );
+    }
+
+    #[test]
+    #[ignore = "real-media GPU byte check; set KROMA_VIDEO_PROFILE_PATH"]
+    fn profile_gpu_transfer() {
+        let path = std::env::var("KROMA_VIDEO_PROFILE_PATH").expect("real media path");
+        let instance = wgpu::Instance::default();
+        let adapter = crate::renderer::pollster_block(
+            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
+        )
+        .unwrap();
+        let (device, queue) =
+            crate::renderer::pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
+                memory_hints: wgpu::MemoryHints::MemoryUsage,
+                ..Default::default()
+            }))
+            .unwrap();
+        let gpu = GpuContext {
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+            surface_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        };
+        let mut decoder = FfmpegVideoDecoder::load(Path::new(&path)).unwrap();
+        let mut expected = Vec::new();
+        decoder.next_frame_into(&mut expected).unwrap();
+        let (width, height) = decoder.dimensions();
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("video-byte-check"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        decoder.upload_current_rgba_to(&gpu.queue, &target);
+        let row_bytes = width * 4;
+        let padded = row_bytes.div_ceil(256) * 256;
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: u64::from(padded) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        gpu.queue.submit([encoder.finish()]);
+        let (tx, rx) = mpsc::channel();
+        buffer.map_async(wgpu::MapMode::Read, .., move |result| {
+            tx.send(result).unwrap()
+        });
+        gpu.device
+            .poll(wgpu::wgt::PollType::Wait {
+                submission_index: None,
+                timeout: Some(Duration::from_secs(30)),
+            })
+            .unwrap();
+        rx.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+        let bytes = buffer.get_mapped_range(..);
+        let mut actual = Vec::new();
+        copy_rgba_rows(
+            &bytes,
+            padded as usize,
+            width as usize,
+            height as usize,
+            &mut actual,
+        )
+        .unwrap();
+        assert_eq!(
+            actual, expected,
+            "GPU upload must preserve every decoded RGBA byte"
+        );
+        println!(
+            "VIDEO_GPU_CHECK {}",
+            serde_json::json!({"path":path,"width":width,"height":height,"bytes_verified":actual.len()})
+        );
+    }
+
+    #[test]
+    fn rgba_copy_handles_padding_reuse_and_incomplete_frames() {
+        let mut output = vec![99; 16];
+        let allocation = output.as_ptr();
+        copy_rgba_rows(
+            &[
+                1, 2, 3, 4, 5, 6, 7, 8, 90, 90, 9, 10, 11, 12, 13, 14, 15, 16,
+            ],
+            10,
+            2,
+            2,
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(output, (1..=16).collect::<Vec<_>>());
+        assert_eq!(allocation, output.as_ptr());
+        assert!(copy_rgba_rows(&[0; 8], 8, 2, 2, &mut output).is_none());
+        assert_eq!(output, (1..=16).collect::<Vec<_>>());
+        copy_rgba_rows(&[42; 16], 8, 2, 2, &mut output).unwrap();
+        assert_eq!(output, vec![42; 16]);
+    }
+
+    #[test]
+    fn recycling_retains_initialized_frame_storage() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let (_stop_tx, stop_rx) = mpsc::channel();
+        let data = vec![7; 32];
+        let allocation = data.as_ptr();
+        VideoTexture::recycle_buffer_to(&tx, data);
+        let recycled = VideoTexture::take_recycled_buffer(&rx, 32, &stop_rx).unwrap();
+        assert_eq!(recycled, vec![7; 32]);
+        assert_eq!(recycled.as_ptr(), allocation);
     }
 }
