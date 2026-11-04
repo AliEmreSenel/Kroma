@@ -1559,6 +1559,7 @@ name = "kroma-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ash",
  "bytemuck",
  "cpal",
  "criterion",

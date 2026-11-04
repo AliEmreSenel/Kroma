@@ -40,6 +40,8 @@ pub enum VideoSource {
 pub struct GpuContext {
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
+    /// Native queues explicitly provisioned on this exact rendering device.
+    pub video_queues: Option<Arc<crate::gpu_interop::VideoQueues>>,
     /// Output format of the parent surface (used by shader textures to
     /// create compatible render targets).
     #[allow(dead_code)]
@@ -103,6 +105,10 @@ pub enum TextureUpdate {
 /// The renderer simply calls [`update`](TextureSource::update) each frame
 /// and uploads any new pixel data to the GPU.
 pub trait TextureSource {
+    /// Release playback workers while retaining the final texture for display.
+    /// Repeated calls are safe. Normal playback resumes by creating a new source.
+    fn stop_playback(&mut self) {}
+
     /// Nominal video frame rate from the already-open decoder, if available.
     fn frame_rate(&self) -> Option<f64> {
         None
@@ -347,6 +353,7 @@ pub fn create_video_source(
     };
     self::video::VideoTexture::load(
         video_source,
+        source,
         looping,
         hot_reload && is_external_disk,
         optional,

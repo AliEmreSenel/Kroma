@@ -69,7 +69,7 @@ cpal = "0.17"
 rustfft = "6"
 
 # Video decoding (optional, needs system ffmpeg libs)
-ffmpeg-next = "9"
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling"] }
 
 # Font rendering
 fontdue = "0.9"

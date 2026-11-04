@@ -111,7 +111,7 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        queue.submit([encoder.finish()]);
+        crate::gpu_interop::submit(queue, [encoder.finish()]);
         let (tx, rx) = std::sync::mpsc::channel();
         capture
             .buffer

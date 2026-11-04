@@ -312,6 +312,7 @@ pub(crate) struct GpuResources {
     adapter: Option<wgpu::Adapter>,
     device: Option<Arc<wgpu::Device>>,
     queue: Option<Arc<wgpu::Queue>>,
+    video_queues: Option<Arc<crate::gpu_interop::VideoQueues>>,
     pipeline: Option<wgpu::RenderPipeline>,
     uniform_buffer: Option<wgpu::Buffer>,
     bind_group: Option<wgpu::BindGroup>,
@@ -738,17 +739,36 @@ impl Renderer {
         .context("No GPU adapter found")?;
         log::info!("Selected GPU: {:?}", adapter.get_info());
         drop(compatible);
-        let (device, queue) = pollster_block(adapter.request_device(&wgpu::DeviceDescriptor {
+        let descriptor = wgpu::DeviceDescriptor {
             required_features: wgpu::Features::FLOAT32_FILTERABLE,
             label: Some("kroma-device"),
             // A persistent wallpaper benefits from smaller allocation pools;
             // individual large textures still receive appropriately sized blocks.
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
-        }))
-        .context("Failed to create GPU device")?;
+        };
+        let hardware = if std::env::var("KROMA_VIDEO_DECODE").is_ok_and(|mode| mode == "software") {
+            None
+        } else {
+            match crate::gpu_interop::request_device(&adapter, &descriptor) {
+                Ok(device) => Some(device),
+                Err(error) => {
+                    log::info!("Vulkan video device unavailable: {:#}", error);
+                    None
+                }
+            }
+        };
+        let (device, queue, video_queues) = match hardware {
+            Some((device, queue, queues)) => (device, queue, Some(Arc::new(queues))),
+            None => {
+                let (device, queue) = pollster_block(adapter.request_device(&descriptor))
+                    .context("Failed to create GPU device")?;
+                (device, queue, None)
+            }
+        };
         let device = Arc::new(device);
         let queue = Arc::new(queue);
+        self.gpu.video_queues = video_queues;
         let format = SURFACE_FORMAT;
         // Create uniform buffer
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1250,6 +1270,7 @@ impl Renderer {
         let gpu_ctx = GpuContext {
             device: Arc::clone(device),
             queue: Arc::clone(queue),
+            video_queues: self.gpu.video_queues.clone(),
             surface_format,
         };
 
@@ -1704,6 +1725,20 @@ impl Renderer {
         )
     }
 
+    /// Release decoder workers, including video inputs in per-monitor shaders.
+    pub fn stop_playback(&mut self) {
+        for source in self.texture_sources.iter_mut().flatten() {
+            source.stop_playback();
+        }
+        for target in self.gpu.targets.values_mut() {
+            for sources in target.shader_sources.values_mut() {
+                for (_, source) in &mut sources.sources {
+                    source.stop_playback();
+                }
+            }
+        }
+    }
+
     /// Highest nominal video frame rate among loaded root texture sources.
     pub fn source_frame_rate(&self) -> f64 {
         self.texture_sources
@@ -1761,6 +1796,7 @@ impl Renderer {
         if let Some(device) = &self.gpu.device {
             let _ = device.poll(wgpu::wgt::PollType::Poll);
         }
+        crate::memory::reclaim_if_requested();
     }
 
     /// Retires histories and transition targets even when their output cannot render.
@@ -1912,7 +1948,7 @@ impl Renderer {
                         changed = true;
                         config.width = width;
                         config.height = height;
-                        surface.configure(device, config);
+                        crate::gpu_interop::with_submission(|| surface.configure(device, config));
                         target.needs_reconfigure = false;
                     }
                     continue;
@@ -1941,7 +1977,7 @@ impl Renderer {
                         height,
                     )
                     .context("Monitor is incompatible with the selected GPU")?;
-                    surface.configure(device, &config);
+                    crate::gpu_interop::with_submission(|| surface.configure(device, &config));
                     (Some(window), Some(surface), Some(config))
                 };
                 let output = render_flow::create_output_capture_state(

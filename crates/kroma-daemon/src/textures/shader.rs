@@ -307,6 +307,13 @@ impl ShaderTexture {
                         let history = history.as_ref().expect("t-1 allocates history");
                         (&history.view, &history.sampler)
                     }
+                } else if let Some(source) =
+                    sub.source.as_ref().filter(|source| source.is_gpu_managed())
+                {
+                    match (source.gpu_texture_view(), source.gpu_sampler()) {
+                        (Some(view), Some(sampler)) => (view, sampler),
+                        _ => (&sub.gpu_view, &sub.gpu_sampler),
+                    }
                 } else {
                     (&sub.gpu_view, &sub.gpu_sampler)
                 };
@@ -872,6 +879,14 @@ fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 }
 
 impl TextureSource for ShaderTexture {
+    fn stop_playback(&mut self) {
+        for texture in &mut self.sub_textures {
+            if let Some(source) = texture.source.as_mut() {
+                source.stop_playback();
+            }
+        }
+    }
+
     fn update(&mut self, dt: f64) -> Result<TextureUpdate> {
         let queue = &self.gpu.queue;
         let device = &self.gpu.device;
@@ -905,7 +920,12 @@ impl TextureSource for ShaderTexture {
                     height,
                 } => {
                     if source.is_gpu_managed() {
-                        // GPU-managed sources handle their own rendering
+                        // NewFrame signals a changed native view, including a
+                        // same-size video reload. Pixels stay on the GPU.
+                        sub.width = width;
+                        sub.height = height;
+                        needs_bind_rebuild = true;
+                        source.gpu_render()?;
                         continue;
                     }
 
@@ -1076,7 +1096,7 @@ impl TextureSource for ShaderTexture {
                 },
             );
         }
-        queue.submit(std::iter::once(encoder.finish()));
+        crate::gpu_interop::submit(queue, std::iter::once(encoder.finish()));
 
         Ok(())
     }
