@@ -702,6 +702,7 @@ impl VideoTexture {
                 }
 
                 drop(first_frame_timing);
+                crate::memory::request_reclaim();
                 loop {
                     match stop_rx.try_recv() {
                         Ok(()) | Err(TryRecvError::Disconnected) => return,
@@ -806,6 +807,7 @@ impl VideoTexture {
             drop(frame_rx);
             drop(recycle_tx);
             let _ = handle.join();
+            crate::memory::request_reclaim();
         }
     }
 

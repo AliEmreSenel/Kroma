@@ -1796,6 +1796,7 @@ impl Renderer {
         if let Some(device) = &self.gpu.device {
             let _ = device.poll(wgpu::wgt::PollType::Poll);
         }
+        crate::memory::reclaim_if_requested();
     }
 
     /// Retires histories and transition targets even when their output cannot render.

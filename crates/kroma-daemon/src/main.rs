@@ -11,6 +11,7 @@ mod fallback;
 mod gpu_interop;
 mod ipc_server;
 mod lighting;
+mod memory;
 mod preview;
 mod render_demand;
 mod renderer;
