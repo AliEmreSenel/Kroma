@@ -91,6 +91,22 @@ pub fn pack_folder_to_shade(
 
     let mut package = LiveShadePackage::new_empty(config);
 
+    // Previews are package resources, not runtime state textures. Still previews
+    // use the existing thumbnail slot; videos remain lazy assets during playback.
+    for name in ["preview.jpg", "preview.png", "preview.webp"] {
+        let path = folder.join(name);
+        if path.is_file() {
+            package.preview = Some(std::fs::read(path)?);
+            break;
+        }
+    }
+    for name in ["preview.mp4", "preview.webm"] {
+        let path = folder.join(name);
+        if path.is_file() {
+            package.add_asset(name.into(), std::fs::read(path)?);
+        }
+    }
+
     let refs = collect_referenced_files_in_order(&package.config);
     let mut required_missing = Vec::new();
 
@@ -282,6 +298,36 @@ fn parse_entry_override(spec: &str) -> Result<(String, CompressionPolicy)> {
 mod pack_tests {
     use super::*;
     use kroma_shared::types::{BufferDef, RenderingConfig, ShadeMeta};
+
+    #[test]
+    fn pack_includes_still_and_video_previews_without_runtime_bindings() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("config.toml"),
+            "[meta]\nname='Previews'\nauthor='test'\n[states.active]\nlength=0",
+        )
+        .unwrap();
+        std::fs::write(directory.path().join("preview.jpg"), [1, 2, 3]).unwrap();
+        std::fs::write(directory.path().join("preview.mp4"), [4, 5, 6]).unwrap();
+        let path = directory.path().join("output.shade");
+        pack_folder_to_shade(directory.path(), Some(&path), &PackOptions::default()).unwrap();
+        let package = LiveShadePackage::load(&path).unwrap();
+        assert_eq!(package.preview.as_deref(), Some([1, 2, 3].as_slice()));
+        assert_eq!(
+            package.read_entry_bytes("preview.mp4").unwrap(),
+            Some(vec![4, 5, 6])
+        );
+        assert!(
+            package
+                .config
+                .states
+                .active
+                .as_ref()
+                .unwrap()
+                .textures
+                .is_empty()
+        );
+    }
 
     fn base_config() -> ShadeConfig {
         ShadeConfig {

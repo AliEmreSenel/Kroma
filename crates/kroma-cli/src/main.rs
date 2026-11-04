@@ -5,6 +5,7 @@
 mod importer;
 mod inspect;
 mod ipc_client;
+mod media;
 
 use std::io;
 use std::path::PathBuf;
@@ -25,6 +26,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Import media and manage package thumbnails and video previews.
+    Media {
+        #[command(subcommand)]
+        command: media::Command,
+    },
     /// Load a .shade package on the daemon.
     Load {
         /// Path to the .shade package file.
@@ -127,6 +133,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Media { command } => media::run(command)?,
         Commands::Load {
             path,
             force,

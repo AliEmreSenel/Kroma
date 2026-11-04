@@ -10,6 +10,7 @@ mod data;
 mod fallback;
 mod ipc_server;
 mod lighting;
+mod preview;
 mod render_demand;
 mod renderer;
 mod textures;
@@ -2616,6 +2617,18 @@ impl Drop for Daemon {
 
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
+    let arguments: Vec<_> = env::args_os().skip(1).collect();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--render-preview")
+    {
+        anyhow::ensure!(
+            arguments.len() == 2,
+            "Usage: kroma-daemon --render-preview JOB.json"
+        );
+        return preview::run(Path::new(&arguments[1]));
+    }
 
     info!("Kroma Daemon v{}", env!("CARGO_PKG_VERSION"));
     info!("Initializing...");

@@ -17,6 +17,7 @@ use kroma_shared::types::{
     MonitorConfig, MonitorId, ShadePhase, ShaderUniforms, TextureDef, UniformDef,
 };
 
+mod preview;
 mod render_flow;
 mod shader_translation;
 
@@ -2079,6 +2080,48 @@ mod monitor_tests {
             x: 0,
             y: 0,
             scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn preview_captures_final_canvas_at_full_color_with_padded_rows() {
+        let provider = OffscreenMonitors(vec![MonitorConfig {
+            id: MonitorId(0),
+            name: "preview".into(),
+            width: 1920,
+            height: 1080,
+            x: 0,
+            y: 0,
+            scale: 1.0,
+        }]);
+        let mut renderer = Renderer::new().unwrap();
+        if let Err(error) = renderer.init_gpu_with_surface(&GpuPower::Low, &provider) {
+            eprintln!("GPU unavailable: {error}");
+            return;
+        }
+        renderer
+            .rebuild_pipeline_with_frag(
+                r#"
+            @fragment fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+                if uv.x < 0.5 { return vec4<f32>(1.0,0.0,0.0,1.0); }
+                return vec4<f32>(0.0,1.0,0.0,1.0);
+            }
+        "#,
+            )
+            .unwrap();
+        renderer.render_frame(&[], &[]).unwrap();
+        let capture = renderer.create_preview_capture(638, 358).unwrap();
+        let pixels = renderer.capture_preview(&capture).unwrap();
+        assert_eq!(pixels.len(), 638 * 358 * 4);
+        for y in [0, 179, 357] {
+            assert_eq!(
+                &pixels[(y * 638 + 10) * 4..(y * 638 + 10) * 4 + 4],
+                &[255, 0, 0, 255]
+            );
+            assert_eq!(
+                &pixels[(y * 638 + 628) * 4..(y * 638 + 628) * 4 + 4],
+                &[0, 255, 0, 255]
+            );
         }
     }
 
