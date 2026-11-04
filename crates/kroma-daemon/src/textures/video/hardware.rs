@@ -875,6 +875,7 @@ mod tests {
             device: Arc::new(device),
             queue: Arc::new(queue),
             video_queues: Some(Arc::new(queues)),
+            video_decode: crate::config::VideoDecodeMode::Auto,
             surface_format: wgpu::TextureFormat::Rgba8UnormSrgb,
         };
         let mut hardware = if std::env::var("KROMA_TEST_BACKEND").as_deref() == Ok("vaapi") {

@@ -26,6 +26,7 @@ use kroma_shared::traits::VideoDecoder;
 use super::ffmpeg_io;
 use super::hot_reload::SourceHotReload;
 use super::{GpuContext, TextureSource, TextureUpdate, VideoSource};
+use crate::config::VideoDecodeMode;
 
 pub struct FfmpegVideoDecoder {
     input: ffmpeg_io::InputContext,
@@ -86,17 +87,17 @@ impl FfmpegVideoDecoder {
             1.0 / 30.0
         };
 
-        let mode = std::env::var("KROMA_VIDEO_DECODE").unwrap_or_else(|_| "auto".into());
-        let software = mode == "software";
+        let mode = gpu.map(|gpu| gpu.video_decode).unwrap_or_default();
+        let software = mode == VideoDecodeMode::Software;
         let attempt = gpu.filter(|_| !software).map(|gpu| -> Result<_> {
             anyhow::ensure!(
                 !has_alpha,
                 "GPU video conversion does not support alpha channels"
             );
-            let backends: &[bool] = match mode.as_str() {
-                "vaapi" => &[true],
-                "vulkan" => &[false],
-                _ => &[true, false],
+            let backends: &[bool] = match mode {
+                VideoDecodeMode::Vaapi => &[true],
+                VideoDecodeMode::Vulkan => &[false],
+                VideoDecodeMode::Auto | VideoDecodeMode::Software => &[true, false],
             };
             let mut failures = Vec::new();
             for (index, vaapi) in backends.iter().copied().enumerate() {
@@ -1167,6 +1168,7 @@ mod tests {
             device: Arc::new(device),
             queue: Arc::new(queue),
             video_queues: None,
+            video_decode: VideoDecodeMode::Software,
             surface_format: wgpu::TextureFormat::Rgba8UnormSrgb,
         };
         let mut decoder = FfmpegVideoDecoder::load(Path::new(&path)).unwrap();

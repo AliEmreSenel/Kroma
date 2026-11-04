@@ -42,6 +42,8 @@ pub struct GpuContext {
     pub queue: Arc<wgpu::Queue>,
     /// Native queues explicitly provisioned on this exact rendering device.
     pub video_queues: Option<Arc<crate::gpu_interop::VideoQueues>>,
+    /// Decoder preference inherited by video inputs at every nesting level.
+    pub video_decode: crate::config::VideoDecodeMode,
     /// Output format of the parent surface (used by shader textures to
     /// create compatible render targets).
     #[allow(dead_code)]

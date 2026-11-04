@@ -606,6 +606,7 @@ pub(super) fn render_frame(
         device: Arc::clone(device),
         queue: Arc::clone(queue),
         video_queues: state.gpu.video_queues.clone(),
+        video_decode: state.gpu.video_decode,
         surface_format: SURFACE_FORMAT,
     };
     let mut completed = Vec::new();

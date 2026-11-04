@@ -1095,7 +1095,7 @@ impl Daemon {
             let surface = backend.surface().context("A surface must exist")?;
             info!("Initializing GPU with surface...");
 
-            renderer.init_gpu_with_surface(&config.gpu_power, surface)?;
+            renderer.init_gpu_with_surface(&config.gpu_power, config.video_decode, surface)?;
             let (width, height) = renderer.surface_dimensions();
             let primary_name = surface
                 .list_monitors()?

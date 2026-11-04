@@ -172,7 +172,7 @@ def run(args):
     for directory in ("run", "config/kroma", "cache"):
         (root / directory).mkdir(parents=True)
     (root / "run").chmod(0o700)
-    config = f"target_fps = 60\ngpu_power = \"low\"\n[runtime]\npersist_current_shade = false\n"
+    config = f"target_fps = 60\ngpu_power = \"low\"\nvideo_decode = {json.dumps(args.video_decode)}\n[runtime]\npersist_current_shade = false\n"
     if args.media:
         config = f"current_shade = {json.dumps(str(args.media.resolve()))}\n" + config
     (root / "config/kroma/config.toml").write_text(config)
@@ -274,6 +274,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--media", type=Path)
+    parser.add_argument("--video-decode", choices=("auto", "vaapi", "vulkan", "software"), default="auto",
+                        help="video_decode setting written to the isolated daemon config")
     parser.add_argument("--sequence", type=Path, help="JSON list of labels/paths/commands/durations")
     parser.add_argument("--output", type=Path, required=True, help="new artifact directory")
     parser.add_argument("--duration", type=counters.positive_float, default=5)

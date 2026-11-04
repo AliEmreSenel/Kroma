@@ -28,6 +28,21 @@ impl From<&GpuPower> for PowerPreference {
     }
 }
 
+/// Preferred video decoder; hardware failures retain the warned CPU fallback.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoDecodeMode {
+    /// Try same-device VA-API, then Vulkan Video, then software decoding.
+    #[default]
+    Auto,
+    /// Prefer same-device VA-API with DMA-BUF import.
+    Vaapi,
+    /// Prefer native Vulkan Video on the rendering device.
+    Vulkan,
+    /// Decode and convert frames on the CPU.
+    Software,
+}
+
 /// Daemon-level configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfig {
@@ -50,6 +65,10 @@ pub struct DaemonConfig {
     /// GPU power preference.
     #[serde(default)]
     pub gpu_power: GpuPower,
+
+    /// Video decoder preference (default: auto).
+    #[serde(default)]
+    pub video_decode: VideoDecodeMode,
 
     /// Monitor-specific overrides.
     #[serde(default)]
@@ -315,6 +334,7 @@ impl Default for DaemonConfig {
             pause_on_fullscreen: true,
             pause_on_inactive: true,
             gpu_power: GpuPower::Low,
+            video_decode: VideoDecodeMode::Auto,
             monitors: Vec::new(),
             preview: PreviewConfig::default(),
             logging: LoggingConfig::default(),
@@ -429,6 +449,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn video_decode_modes_default_and_roundtrip() {
+        let legacy: DaemonConfig = toml::from_str("gpu_power = 'low'").unwrap();
+        assert_eq!(legacy.video_decode, VideoDecodeMode::Auto);
+        for (value, expected) in [
+            ("auto", VideoDecodeMode::Auto),
+            ("vaapi", VideoDecodeMode::Vaapi),
+            ("vulkan", VideoDecodeMode::Vulkan),
+            ("software", VideoDecodeMode::Software),
+        ] {
+            let config: DaemonConfig =
+                toml::from_str(&format!("video_decode = '{value}'")).unwrap();
+            assert_eq!(config.video_decode, expected);
+            let saved = toml::to_string_pretty(&config).unwrap();
+            let restored: DaemonConfig = toml::from_str(&saved).unwrap();
+            assert_eq!(restored.video_decode, expected);
+        }
+    }
+
+    #[test]
+    fn unknown_video_decode_mode_is_rejected() {
+        assert!(toml::from_str::<DaemonConfig>("video_decode = 'unknown'").is_err());
+    }
 
     #[test]
     fn default_config_serializes() {

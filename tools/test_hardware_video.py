@@ -56,6 +56,7 @@ class HardwareVideoTests(unittest.TestCase):
         (root / "run").chmod(0o700)
         (root / "config/kroma/config.toml").write_text(
             f"current_shade={json.dumps(str(package))}\ntarget_fps=60\n"
+            f"video_decode={json.dumps(mode)}\n"
             "[runtime]\npersist_current_shade=false\n"
         )
         poster = root / "poster.jpg"
@@ -65,7 +66,7 @@ class HardwareVideoTests(unittest.TestCase):
         environment = dict(os.environ, XDG_CONFIG_HOME=str(root / "config"),
                            XDG_CACHE_HOME=str(root / "cache"), XDG_RUNTIME_DIR=str(root / "run"),
                            XDG_CURRENT_DESKTOP="KDE", XDG_SESSION_TYPE="wayland", KROMA_PREVIEW_JOB="1",
-                           KROMA_HEADLESS_SIZE="1920x1080", KROMA_VIDEO_DECODE=mode,
+                           KROMA_HEADLESS_SIZE="1920x1080",
                            RUST_LOG="info")
         for key in ["DISPLAY", "WAYLAND_DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE"]:
             environment.pop(key, None)
@@ -124,11 +125,12 @@ class HardwareVideoTests(unittest.TestCase):
                 {"label": "final-unloaded", "seconds": 1},
             ]))
             output = root / "profile"
-            environment = dict(os.environ, KROMA_VIDEO_DECODE=HARDWARE_MODE)
+            environment = dict(os.environ)
             result = subprocess.run([
                 os.sys.executable, str(Path(__file__).with_name("profile_daemon.py")),
                 "--binary", DAEMON, "--media", str(package), "--size", "1920x1080",
                 "--duration", "1", "--pause-duration", "0.2", "--rounds", "1",
+                "--video-decode", HARDWARE_MODE,
                 "--sequence", str(sequence), "--output", str(output),
             ], env=environment, capture_output=True, text=True, timeout=90)
             log = (output / "daemon-0.log").read_text()
